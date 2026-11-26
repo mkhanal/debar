@@ -16,6 +16,7 @@ use acceptance::{Outcome, instructions_to_measure_scan, official_image, scratch_
 const BYTES_PER_MEBIBYTE: f64 = 1_048_576.0;
 const NANOSECONDS_PER_SECOND: f64 = 1e9;
 const TIMES_THE_REFERENCE: f64 = 2.0;
+const X86_64_INSTRUCTIONS_PER_AARCH64_INSTRUCTION: f64 = 1.27;
 
 struct Calibration {
     kind: &'static str,
@@ -64,7 +65,17 @@ const CALIBRATIONS: [Calibration; 7] = [
 fn instruction_budget_per_mebibyte(calibration: &Calibration) -> f64 {
     let nanoseconds_per_mebibyte =
         NANOSECONDS_PER_SECOND / (TIMES_THE_REFERENCE * calibration.reference_mebibytes_per_second);
-    nanoseconds_per_mebibyte * calibration.instructions_per_nanosecond
+    nanoseconds_per_mebibyte
+        * calibration.instructions_per_nanosecond
+        * instructions_on_this_architecture()
+}
+
+fn instructions_on_this_architecture() -> f64 {
+    if cfg!(target_arch = "x86_64") {
+        X86_64_INSTRUCTIONS_PER_AARCH64_INSTRUCTION
+    } else {
+        1.0
+    }
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::Path;
 
-use debar_image::{Image, ImageError, ObjectKind, SectionKind};
+use debar_image::{Image, ImageError, ObjectKind};
 use debar_platform::filesystem::{FilesystemError, write_file_atomically};
 use debar_platform::input::{UnreadableObject, read_scanned_file};
 use debar_platform::mapped_file::{ExpectedAccess, MappedFile, MappingError};
@@ -66,21 +66,10 @@ pub enum ReadyImageError {
 }
 
 pub fn ready_image(mapped: &MappedFile) -> Result<Image<'_>, ReadyImageError> {
-    let image = Image::open(mapped.bytes()).map_err(ReadyImageError::Image)?;
-    for section in image.sections() {
-        if matches!(
-            section.kind,
-            SectionKind::HashFilter
-                | SectionKind::HashEntries
-                | SectionKind::PatternGroup
-                | SectionKind::LogicalGroup
-        ) {
-            mapped
-                .advise(section.range.clone(), ExpectedAccess::Random)
-                .map_err(ReadyImageError::Mapping)?;
-        }
-    }
-    Ok(image)
+    mapped
+        .advise(0..mapped.bytes().len(), ExpectedAccess::Random)
+        .map_err(ReadyImageError::Mapping)?;
+    Image::open(mapped.bytes()).map_err(ReadyImageError::Image)
 }
 
 fn top_level_record(

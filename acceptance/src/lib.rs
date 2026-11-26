@@ -186,6 +186,11 @@ pub struct MemoryOnceReady {
 pub fn memory_once_ready(image: &Path, into: &Path) -> Outcome<MemoryOnceReady> {
     let input = into.join("input.fifo");
     run(Command::new("mkfifo").arg(&input))?;
+    run(Command::new("dd")
+        .arg(format!("if={}", image.display()))
+        .arg("iflag=nocache")
+        .arg("count=0")
+        .arg("status=none"))?;
     let mut child = Command::new(&release_binaries()?.debar)
         .arg("comparison-report")
         .arg("--image")
