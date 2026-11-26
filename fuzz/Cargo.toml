@@ -11,6 +11,7 @@ cargo-fuzz = true
 [dependencies]
 debar-clamav-signatures = { path = "../crates/clamav-signatures" }
 debar-image = { path = "../crates/image" }
+debar-matching = { path = "../crates/matching" }
 libfuzzer-sys = "=0.4.13"
 md-5 = { version = "=0.10.6", default-features = false }
 
@@ -41,6 +42,20 @@ bench = false
 [[bin]]
 name = "image_sections"
 path = "fuzz_targets/image_sections.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extended_signatures"
+path = "../crates/clamav-signatures/fuzz_targets/extended_signatures.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pattern_scan"
+path = "../crates/matching/fuzz_targets/pattern_scan.rs"
 test = false
 doc = false
 bench = false

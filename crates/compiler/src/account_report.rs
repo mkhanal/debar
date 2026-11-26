@@ -93,6 +93,9 @@ fn outcome_name(outcome: LineOutcome) -> &'static str {
         LineOutcome::Ignored => "ignored",
         LineOutcome::Comment => "comment",
         LineOutcome::NotASignature => "not_a_signature",
+        LineOutcome::TargetNotLoaded => "target_not_loaded",
+        LineOutcome::NeverReports => "never_reports",
+        LineOutcome::NeedsExecutableFacts => "needs_executable_facts",
         LineOutcome::NotYetCompiled => "not_yet_compiled",
     }
 }
@@ -103,6 +106,7 @@ fn section_kind_name(kind: SectionKind) -> &'static str {
         SectionKind::HashSizes => "hash sizes",
         SectionKind::HashFilter => "hash filter",
         SectionKind::HashEntries => "hash entries",
+        SectionKind::PatternGroup => "pattern signatures",
         SectionKind::Names => "names",
     }
 }

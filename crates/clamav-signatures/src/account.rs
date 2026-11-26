@@ -5,16 +5,22 @@ pub enum LineOutcome {
     Ignored,
     Comment,
     NotASignature,
+    TargetNotLoaded,
+    NeverReports,
+    NeedsExecutableFacts,
     NotYetCompiled,
 }
 
 impl LineOutcome {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 9] = [
         Self::Compiled,
         Self::OutsideFunctionalityLevel,
         Self::Ignored,
         Self::Comment,
         Self::NotASignature,
+        Self::TargetNotLoaded,
+        Self::NeverReports,
+        Self::NeedsExecutableFacts,
         Self::NotYetCompiled,
     ];
 }

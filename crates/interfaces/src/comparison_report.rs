@@ -3,8 +3,8 @@ use std::path::Path;
 
 use debar_image::{Image, ImageError, Indicator, SectionKind};
 use debar_matching::{
-    HashSettings, ObjectDigests, Trust, whole_object_detections, whole_object_digest_need,
-    whole_object_trust,
+    HashSettings, ObjectDigests, PatternScan, PatternScanError, PatternSettings, Trust,
+    whole_object_detections, whole_object_digest_need, whole_object_trust,
 };
 use debar_platform::filesystem::{FilesystemError, write_file_atomically};
 use debar_platform::input::{UnreadableObject, read_scanned_file};
@@ -15,11 +15,13 @@ use sha2::{Digest as _, Sha256};
 const REPORT_SCHEMA_VERSION: u32 = 1;
 const SCANNER_NAME: &str = "Debar";
 const LARGEST_OBJECT_LEFT_UNSCANNED: u64 = 5;
+const CHUNK_LENGTH: usize = 128 * 1024;
 
 #[derive(Debug)]
 pub enum ComparisonReportError {
     Mapping(MappingError),
     Image(ImageError),
+    Patterns(PatternScanError),
     Input(UnreadableObject),
     InputTooLarge,
     Report(FilesystemError),
@@ -30,6 +32,7 @@ impl fmt::Display for ComparisonReportError {
         match self {
             Self::Mapping(error) => write!(formatter, "cannot map the image: {error}"),
             Self::Image(error) => write!(formatter, "cannot use the image: {error}"),
+            Self::Patterns(error) => write!(formatter, "cannot match the patterns: {error}"),
             Self::Input(error) => write!(formatter, "{error}"),
             Self::InputTooLarge => write!(formatter, "the input is larger than 2^64 bytes"),
             Self::Report(error) => write!(formatter, "cannot write the report: {error}"),
@@ -64,7 +67,7 @@ fn ready_image(mapped: &MappedFile) -> Result<Image<'_>, ComparisonReportError> 
     for section in image.sections() {
         if matches!(
             section.kind,
-            SectionKind::HashFilter | SectionKind::HashEntries
+            SectionKind::HashFilter | SectionKind::HashEntries | SectionKind::PatternGroup
         ) {
             mapped
                 .advise(section.range.clone(), ExpectedAccess::Random)
@@ -79,7 +82,7 @@ fn top_level_record(image: &Image<'_>, object: &[u8]) -> Result<Value, Compariso
     let (detections, verdict) = if size <= LARGEST_OBJECT_LEFT_UNSCANNED {
         (Vec::new(), Verdict::NothingFound)
     } else {
-        hash_outcome(image, object, size).map_err(ComparisonReportError::Image)?
+        scan_outcome(image, object, size)?
     };
     Ok(json!({
         "schema": REPORT_SCHEMA_VERSION,
@@ -100,15 +103,71 @@ fn top_level_record(image: &Image<'_>, object: &[u8]) -> Result<Value, Compariso
     }))
 }
 
-fn hash_outcome(
+struct Found {
+    name: String,
+    indicator: Indicator,
+}
+
+fn scan_outcome(
     image: &Image<'_>,
     object: &[u8],
     size: u64,
-) -> Result<(Vec<String>, Verdict), ImageError> {
-    let settings = HashSettings::default();
-    let need = whole_object_digest_need(image, size, settings)?;
+) -> Result<(Vec<String>, Verdict), ComparisonReportError> {
+    let mut found = pattern_detections(image, object, size)?;
+    let need = whole_object_digest_need(image, size, HashSettings::default())
+        .map_err(ComparisonReportError::Image)?;
     let digests = ObjectDigests::of(object, need);
-    let found = whole_object_detections(image, size, &digests, settings)?;
+    found.extend(hash_detections(image, size, &digests).map_err(ComparisonReportError::Image)?);
+    verdict_of(image, size, &digests, &found).map_err(ComparisonReportError::Image)
+}
+
+fn pattern_detections(
+    image: &Image<'_>,
+    object: &[u8],
+    size: u64,
+) -> Result<Vec<Found>, ComparisonReportError> {
+    let settings = PatternSettings {
+        potentially_unwanted: false,
+        every_match: true,
+    };
+    let mut scan =
+        PatternScan::new(image, settings, size).map_err(ComparisonReportError::Patterns)?;
+    for chunk in object.chunks(CHUNK_LENGTH) {
+        scan.feed(chunk).map_err(ComparisonReportError::Patterns)?;
+    }
+    Ok(scan
+        .finish()
+        .map_err(ComparisonReportError::Patterns)?
+        .into_iter()
+        .map(|detection| Found {
+            name: detection.name,
+            indicator: detection.indicator,
+        })
+        .collect())
+}
+
+fn hash_detections(
+    image: &Image<'_>,
+    size: u64,
+    digests: &ObjectDigests,
+) -> Result<Vec<Found>, ImageError> {
+    Ok(
+        whole_object_detections(image, size, digests, HashSettings::default())?
+            .into_iter()
+            .map(|detection| Found {
+                name: detection.name,
+                indicator: detection.indicator,
+            })
+            .collect(),
+    )
+}
+
+fn verdict_of(
+    image: &Image<'_>,
+    size: u64,
+    digests: &ObjectDigests,
+    found: &[Found],
+) -> Result<(Vec<String>, Verdict), ImageError> {
     let reported = |indicator| {
         found
             .iter()
@@ -120,7 +179,7 @@ fn hash_outcome(
     if strong.is_empty() && unwanted.is_empty() {
         return Ok((Vec::new(), Verdict::NothingFound));
     }
-    if whole_object_trust(image, size, &digests)? == Trust::Trusted {
+    if whole_object_trust(image, size, digests)? == Trust::Trusted {
         return Ok((Vec::new(), Verdict::Trusted));
     }
     let verdict = if strong.is_empty() {

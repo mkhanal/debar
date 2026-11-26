@@ -18,3 +18,14 @@ What becomes of the databases a user loads: every line accounted for, and the im
 
 - Compiling the same databases twice gives identical images.
 - The images compiled on amd64 and on arm64 are identical.
+
+## Every Extended Signature Line In The Pinned Databases Is Accounted For In The Image
+
+- Every extended signature line has one outcome: compiled, outside the functionality level, ignored, a comment, its target not loaded, never reporting, needing executable facts, or its target not yet compiled.
+- Every loaded line whose target is any file type is compiled. None is unsupported.
+- The image holds one pattern signature for each compiled line.
+
+## A Malformed Extended Signature Line Fails The Compile
+
+- A line with too few or too many fields, an empty name, a malformed level, target, offset or body fails the compile, naming the file and line.
+- No image is written.

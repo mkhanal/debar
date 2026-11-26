@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use acceptance::{
     compile, lowercase_hex, members_of_pinned_databases, official_image, pinned_databases,
-    scratch_directory, target_directory,
+    release_binaries, scratch_directory, target_directory, write_file,
 };
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -129,4 +129,134 @@ fn the_same_databases_always_compile_to_the_same_image_byte_for_byte() {
         format!("{}\n", lowercase_hex(&Sha256::digest(&first))),
     )
     .unwrap();
+}
+
+const EXTENDED_LINE_OUTCOMES: [&str; 8] = [
+    "compiled",
+    "outside_functionality_level",
+    "ignored",
+    "comment",
+    "target_not_loaded",
+    "never_reports",
+    "needs_executable_facts",
+    "not_yet_compiled",
+];
+
+fn targets_any_file_type(line: &[u8]) -> bool {
+    if line.is_empty() {
+        return false;
+    }
+    let target = line.split(|byte| *byte == b':').nth(1).unwrap_or_default();
+    matches!(target, b"0" | b"*" | b"")
+}
+
+#[test]
+fn every_extended_signature_line_in_the_pinned_databases_is_accounted_for_in_the_image() {
+    const REQUIREMENT: &str =
+        "Every Extended Signature Line In The Pinned Databases Is Accounted For In The Image";
+    let compiled = official_image().unwrap();
+    let files = compiled.account["files"].as_array().unwrap();
+    let members = members_of_pinned_databases(&pinned_databases().unwrap()).unwrap();
+    let mut compiled_lines = 0u64;
+    let mut extended_files = 0;
+    for file in files.iter().filter(|file| {
+        file["kind"]
+            .as_str()
+            .unwrap()
+            .starts_with("extended signatures")
+    }) {
+        extended_files += 1;
+        let member = members
+            .iter()
+            .find(|member| member.member == file["member"].as_str().unwrap())
+            .unwrap();
+        let outcomes = &file["outcomes"];
+        let accounted: u64 = EXTENDED_LINE_OUTCOMES
+            .iter()
+            .map(|outcome| count(outcomes, outcome))
+            .sum();
+        assert_eq!(
+            accounted,
+            u64::try_from(member.lines).unwrap(),
+            "{REQUIREMENT}: every line of {} has one outcome",
+            member.member
+        );
+        let left_out: Vec<usize> = file["lines_not_compiled"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| usize::try_from(line["line"].as_u64().unwrap()).unwrap())
+            .collect();
+        let loaded_any_type = member
+            .contents
+            .split(|byte| *byte == b'\n')
+            .zip(1usize..)
+            .filter(|(line, number)| targets_any_file_type(line) && !left_out.contains(number))
+            .count();
+        assert_eq!(
+            count(outcomes, "compiled"),
+            u64::try_from(loaded_any_type).unwrap(),
+            "{REQUIREMENT}: every loaded line of {} for any file type is compiled",
+            member.member
+        );
+        compiled_lines += count(outcomes, "compiled");
+    }
+    assert_eq!(
+        extended_files, 3,
+        "{REQUIREMENT}: main.ndb, daily.ndb and daily.ndu"
+    );
+    assert!(
+        compiled_lines > 30_000,
+        "{REQUIREMENT}: the pinned databases were read"
+    );
+    let image_signatures: u64 = compiled.account["image"]["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|section| section["kind"] == "pattern signatures")
+        .map(|section| section["items"].as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        image_signatures, compiled_lines,
+        "{REQUIREMENT}: one image entry per compiled line"
+    );
+}
+
+#[test]
+fn a_malformed_extended_signature_line_fails_the_compile() {
+    const REQUIREMENT: &str = "A Malformed Extended Signature Line Fails The Compile";
+    let directory = scratch_directory("malformed-extended").unwrap();
+    for (case, line) in [
+        ("fields", "Test.Few:0:*\n"),
+        ("name", ":0:*:41424344\n"),
+        ("level", "Test.Level:0:*:41424344:x\n"),
+        ("target", "Test.Target:x:*:41424344\n"),
+        ("offset", "Test.Offset:0:EOF+3:41424344\n"),
+        ("body", "Test.Body:0:*:4142zz\n"),
+    ] {
+        let databases = directory.join(case);
+        std::fs::create_dir(&databases).unwrap();
+        write_file(
+            &databases.join("local.ndb"),
+            format!("Test.Good:0:*:41424344\n{line}").as_bytes(),
+        )
+        .unwrap();
+        let image = directory.join(format!("{case}.image"));
+        let output = std::process::Command::new(&release_binaries().unwrap().compiler)
+            .arg("--databases")
+            .arg(&databases)
+            .arg("--image")
+            .arg(&image)
+            .arg("--account")
+            .arg(directory.join(format!("{case}.json")))
+            .output()
+            .unwrap();
+        let message = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{REQUIREMENT}: {case}");
+        assert!(
+            message.contains("local.ndb line 2"),
+            "{REQUIREMENT}: {case}: {message}"
+        );
+        assert!(!image.exists(), "{REQUIREMENT}: {case}");
+    }
 }

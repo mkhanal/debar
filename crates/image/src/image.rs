@@ -12,6 +12,7 @@ use crate::layout::{
 };
 use crate::model::{DatabaseRecord, Provenance, SignatureName};
 use crate::names::{NameId, NamesMalformed, NamesView};
+use crate::pattern_group::{GroupMalformed, PatternGroup};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ImageError {
@@ -50,6 +51,7 @@ pub enum ImageError {
         reason: PartitionMalformed,
     },
     NamesMalformed(NamesMalformed),
+    PatternGroupMalformed(GroupMalformed),
 }
 
 impl fmt::Display for ImageError {
@@ -96,6 +98,12 @@ impl fmt::Display for ImageError {
             }
             Self::NamesMalformed(reason) => {
                 write!(formatter, "the names section is malformed: {reason:?}")
+            }
+            Self::PatternGroupMalformed(reason) => {
+                write!(
+                    formatter,
+                    "the pattern signatures are malformed: {reason:?}"
+                )
             }
         }
     }
@@ -206,6 +214,13 @@ impl<'m> Image<'m> {
         HashPartition::read(key.algorithm, sizes, filter, entries)
             .map(Some)
             .map_err(|reason| ImageError::HashPartitionMalformed { key, reason })
+    }
+
+    pub fn pattern_group(&self) -> Result<Option<PatternGroup<'m>>, ImageError> {
+        self.optional_section_bytes(SectionKind::PatternGroup, 0)
+            .map(PatternGroup::read)
+            .transpose()
+            .map_err(ImageError::PatternGroupMalformed)
     }
 
     pub fn signature_name(&self, id: NameId) -> Result<SignatureName, ImageError> {

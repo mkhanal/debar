@@ -85,6 +85,7 @@ version = "0.0.0"
 dependencies = [
  "debar-clamav-signatures",
  "debar-image",
+ "debar-matching",
  "libfuzzer-sys",
  "md-5",
 ]
@@ -95,6 +96,16 @@ version = "0.0.0"
 dependencies = [
  "sha2",
  "zerocopy",
+]
+
+[[package]]
+name = "debar-matching"
+version = "0.0.0"
+dependencies = [
+ "debar-image",
+ "md-5",
+ "sha1",
+ "sha2",
 ]
 
 [[package]]
@@ -213,6 +224,17 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
 
 [[package]]
 name = "sha2"

@@ -10,15 +10,32 @@ use crate::layout::{
     BYTE_ORDER_MARK, CHECKSUM_LENGTH, DATABASE_NAME_LENGTH, DatabaseEntry, DirectoryEntry, Header,
     LAYOUT_VERSION, MAGIC, SECTION_ALIGNMENT, SectionKind,
 };
-use crate::model::{DatabaseRecord, Digest, HashSignature, HashedSize, Indicator, Provenance};
+use crate::model::{
+    Category, DatabaseRecord, Digest, HashSignature, HashedSize, Indicator, PatternSignature,
+    Placement, Provenance, ReportWindows,
+};
 use crate::names::{self, NameId};
+use crate::pattern_group::{self, GroupNotBuilt, PendingPatternSignature};
+use crate::pattern_program::{PatternNotCompiled, Segment, segments_of};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum BuildError {
-    DatabaseNameTooLong { name: String },
-    NameWithTwoIndicators { name: String },
+    DatabaseNameTooLong {
+        name: String,
+    },
+    NameWithTwoIndicators {
+        name: String,
+    },
     TooManySignatures,
-    HashPartition { key: PartitionKey, reason: String },
+    HashPartition {
+        key: PartitionKey,
+        reason: String,
+    },
+    Pattern {
+        name: String,
+        reason: PatternNotCompiled,
+    },
+    PatternGroup(GroupNotBuilt),
     Names,
     TooManySections,
 }
@@ -40,6 +57,15 @@ impl fmt::Display for BuildError {
             ),
             Self::HashPartition { key, reason } => {
                 write!(formatter, "cannot build the hash table {key:?}: {reason}")
+            }
+            Self::Pattern { name, reason } => {
+                write!(
+                    formatter,
+                    "cannot compile the pattern of {name:?}: {reason:?}"
+                )
+            }
+            Self::PatternGroup(reason) => {
+                write!(formatter, "cannot build the pattern signatures: {reason:?}")
             }
             Self::Names => write!(formatter, "cannot build the names section"),
             Self::TooManySections => write!(
@@ -64,6 +90,16 @@ pub struct ImageBuilder {
     name_text: String,
     name_spans: Vec<NameSpan>,
     partitions: BTreeMap<PartitionKey, Vec<PendingHash>>,
+    patterns: Vec<PendingPattern>,
+    report_windows: Option<ReportWindows>,
+}
+
+struct PendingPattern {
+    name: u32,
+    category: Category,
+    placement: Placement,
+    report_rank: u8,
+    segments: Vec<Segment>,
 }
 
 struct NameSpan {
@@ -95,16 +131,43 @@ impl ImageBuilder {
         Ok(())
     }
 
-    pub fn add_hash_signature(&mut self, signature: &HashSignature<'_>) -> Result<(), BuildError> {
-        let name =
-            u32::try_from(self.name_spans.len()).map_err(|_| BuildError::TooManySignatures)?;
+    fn add_name(&mut self, name: &str, indicator: Indicator) -> Result<u32, BuildError> {
+        let id = u32::try_from(self.name_spans.len()).map_err(|_| BuildError::TooManySignatures)?;
         let start = self.name_text.len();
-        self.name_text.push_str(signature.name);
+        self.name_text.push_str(name);
         self.name_spans.push(NameSpan {
             start,
             end: self.name_text.len(),
-            indicator: signature.indicator,
+            indicator,
         });
+        Ok(id)
+    }
+
+    pub fn add_pattern_signature(
+        &mut self,
+        signature: &PatternSignature<'_>,
+    ) -> Result<(), BuildError> {
+        let segments = segments_of(signature.pattern).map_err(|reason| BuildError::Pattern {
+            name: signature.name.to_owned(),
+            reason,
+        })?;
+        let name = self.add_name(signature.name, signature.indicator)?;
+        self.patterns.push(PendingPattern {
+            name,
+            category: signature.category,
+            placement: signature.placement,
+            report_rank: signature.report_rank,
+            segments,
+        });
+        Ok(())
+    }
+
+    pub fn set_report_windows(&mut self, windows: ReportWindows) {
+        self.report_windows = Some(windows);
+    }
+
+    pub fn add_hash_signature(&mut self, signature: &HashSignature<'_>) -> Result<(), BuildError> {
+        let name = self.add_name(signature.name, signature.indicator)?;
         let key = PartitionKey {
             purpose: signature.purpose,
             category: signature.category,
@@ -124,6 +187,8 @@ impl ImageBuilder {
             name_text,
             name_spans,
             partitions,
+            patterns,
+            report_windows,
         } = self;
         let (sorted_names, name_ids) = distinct_sorted_names(&name_text, &name_spans)?;
         let mut size_sections = Vec::new();
@@ -176,6 +241,34 @@ impl ImageBuilder {
                 bytes: built.entries,
             });
         }
+        let pattern_section = if patterns.is_empty() {
+            None
+        } else {
+            let pending = patterns
+                .into_iter()
+                .map(|pattern| {
+                    Ok(PendingPatternSignature {
+                        name: *usize::try_from(pattern.name)
+                            .ok()
+                            .and_then(|index| name_ids.get(index))
+                            .ok_or(BuildError::Names)?,
+                        category: pattern.category,
+                        placement: pattern.placement,
+                        report_rank: pattern.report_rank,
+                        segments: pattern.segments,
+                    })
+                })
+                .collect::<Result<Vec<_>, BuildError>>()?;
+            let built =
+                pattern_group::build(&pending, report_windows).map_err(BuildError::PatternGroup)?;
+            Some(Section {
+                kind: SectionKind::PatternGroup,
+                qualifier: 0,
+                item_count: u64::try_from(built.signature_count)
+                    .map_err(|_| BuildError::TooManySignatures)?,
+                bytes: built.bytes,
+            })
+        };
         let names_section = Section {
             kind: SectionKind::Names,
             qualifier: 0,
@@ -183,6 +276,7 @@ impl ImageBuilder {
             bytes: names::build(&sorted_names).map_err(|_| BuildError::Names)?,
         };
         let mut sections = vec![databases_section(&databases)?];
+        sections.extend(pattern_section);
         sections.extend(size_sections);
         sections.extend(filter_sections);
         sections.extend(entry_sections);

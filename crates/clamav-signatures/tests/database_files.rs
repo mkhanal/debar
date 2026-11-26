@@ -372,8 +372,8 @@ fn files_that_are_not_databases_are_listed_and_other_kinds_are_not_yet_compiled(
         (".bashrc", b"export A=1\n"),
         ("daily-1.cvd.sign", b"signature"),
         (
-            "local.ndb",
-            b"Pattern.One:0:*:41424344\nPattern.Two:0:*:45464748\n",
+            "local.ldb",
+            b"Logical.One;Target:0;0;41424344\nLogical.Two;Target:0;0;45464748\n",
         ),
     ])
     .unwrap();

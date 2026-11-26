@@ -1,17 +1,22 @@
 use std::fmt;
 
 use debar_image::{
-    BuildError, Category, DatabaseRecord, HashPurpose, HashSignature, ImageBuilder, Provenance,
+    BuildError, Category, DatabaseRecord, HashPurpose, HashSignature, ImageBuilder,
+    PatternSignature, Provenance, ReportWindows,
 };
 
 use crate::account::{Account, FileAccount, LineOutcome};
 use crate::container::{self, ContainerError, Member};
+use crate::extended_lines::{self, MalformedExtendedLine, ReadExtendedLine};
 use crate::hash_lines::{FieldOrder, HashFile, MalformedLine, ReadLine, read_line};
 use crate::ignore_list::IgnoreList;
 use crate::line_text::{lines, without_line_ending};
 
 const UNOFFICIAL_SUFFIX: &str = ".UNOFFICIAL";
 const LICENCE_MEMBER: &str = "COPYING";
+const SCAN_WINDOW_LENGTH: u32 = 131_072;
+const RANK_OF_PLAIN_BYTES: u8 = 0;
+const RANK_OF_OTHER_BODIES: u8 = 1;
 
 pub struct DatabaseFile<'a> {
     pub name: &'a str,
@@ -30,7 +35,17 @@ pub enum DatabaseError {
         line: usize,
         reason: MalformedLine,
     },
+    MalformedExtendedLine {
+        file: String,
+        member: Option<String>,
+        line: usize,
+        reason: MalformedExtendedLine,
+    },
     EmptyHashFile {
+        file: String,
+        member: Option<String>,
+    },
+    EmptyDatabaseFile {
         file: String,
         member: Option<String>,
     },
@@ -51,7 +66,13 @@ impl fmt::Display for DatabaseError {
                 line,
                 reason,
             } => write!(formatter, "{} line {line}: {reason}", place(file, member)),
-            Self::EmptyHashFile { file, member } => {
+            Self::MalformedExtendedLine {
+                file,
+                member,
+                line,
+                reason,
+            } => write!(formatter, "{} line {line}: {reason}", place(file, member)),
+            Self::EmptyHashFile { file, member } | Self::EmptyDatabaseFile { file, member } => {
                 write!(formatter, "{} is empty", place(file, member))
             }
             Self::Image(reason) => write!(formatter, "{reason}"),
@@ -66,6 +87,7 @@ enum FileKind {
     Container,
     IgnoreList,
     Hashes(HashFile),
+    Extended(Category),
     NotYetCompiled,
 }
 
@@ -132,8 +154,8 @@ const FILE_KINDS: [(&str, FileKind); 37] = [
     ("ioc", FileKind::NotYetCompiled),
     ("ldb", FileKind::NotYetCompiled),
     ("ldu", FileKind::NotYetCompiled),
-    ("ndb", FileKind::NotYetCompiled),
-    ("ndu", FileKind::NotYetCompiled),
+    ("ndb", FileKind::Extended(Category::Malware)),
+    ("ndu", FileKind::Extended(Category::PotentiallyUnwanted)),
     ("pdb", FileKind::NotYetCompiled),
     ("pwdb", FileKind::NotYetCompiled),
     ("rmd", FileKind::NotYetCompiled),
@@ -175,6 +197,10 @@ fn kind_description(kind: FileKind) -> &'static str {
             }
             (HashPurpose::WholeObjectTrust, _) => "false-positive hashes",
         },
+        FileKind::Extended(Category::Malware) => "extended signatures",
+        FileKind::Extended(Category::PotentiallyUnwanted) => {
+            "extended signatures, potentially unwanted"
+        }
         FileKind::NotYetCompiled => "not yet compiled",
     }
 }
@@ -218,6 +244,7 @@ pub fn compile(
         image,
         ignored: IgnoreList::default(),
         account,
+        longest_part: 0,
     };
     for (file, kind) in databases {
         match kind {
@@ -225,6 +252,10 @@ pub fn compile(
             _ => loader.load(&Source::loose(file.name), kind, file.contents)?,
         }
     }
+    loader.image.set_report_windows(ReportWindows {
+        length: SCAN_WINDOW_LENGTH,
+        overlap: loader.longest_part,
+    });
     Ok(loader.account)
 }
 
@@ -248,6 +279,7 @@ struct Loader<'i> {
     image: &'i mut ImageBuilder,
     ignored: IgnoreList,
     account: Account,
+    longest_part: u32,
 }
 
 impl Loader<'_> {
@@ -300,6 +332,7 @@ impl Loader<'_> {
     ) -> Result<(), DatabaseError> {
         match kind {
             FileKind::Hashes(hash_file) => self.load_hashes(source, hash_file, kind, contents),
+            FileKind::Extended(category) => self.load_extended(source, category, kind, contents),
             FileKind::IgnoreList => {
                 self.ignored.add_entries_from(contents);
                 self.account_every_line(
@@ -377,6 +410,75 @@ impl Loader<'_> {
         Ok(())
     }
 
+    fn load_extended(
+        &mut self,
+        source: &Source<'_>,
+        category: Category,
+        kind: FileKind,
+        contents: &[u8],
+    ) -> Result<(), DatabaseError> {
+        if contents.is_empty() {
+            return Err(DatabaseError::EmptyDatabaseFile {
+                file: source.file.to_owned(),
+                member: source.member.map(str::to_owned),
+            });
+        }
+        let mut outcomes = Vec::new();
+        let mut unofficial_name = String::new();
+        for (index, line) in lines(contents).enumerate() {
+            let read =
+                extended_lines::read_line(category, without_line_ending(line), &self.ignored)
+                    .map_err(|reason| DatabaseError::MalformedExtendedLine {
+                        file: source.file.to_owned(),
+                        member: source.member.map(str::to_owned),
+                        line: index.saturating_add(1),
+                        reason,
+                    })?;
+            outcomes.push(match read {
+                ReadExtendedLine::Comment => LineOutcome::Comment,
+                ReadExtendedLine::Ignored => LineOutcome::Ignored,
+                ReadExtendedLine::OutsideFunctionalityLevel => {
+                    LineOutcome::OutsideFunctionalityLevel
+                }
+                ReadExtendedLine::TargetNotLoaded => LineOutcome::TargetNotLoaded,
+                ReadExtendedLine::NeverReports => LineOutcome::NeverReports,
+                ReadExtendedLine::NeedsExecutableFacts => LineOutcome::NeedsExecutableFacts,
+                ReadExtendedLine::TargetNotYetCompiled
+                | ReadExtendedLine::BodyNotYetCompiled(_) => LineOutcome::NotYetCompiled,
+                ReadExtendedLine::Signature(signature) => {
+                    let name = if source.official {
+                        signature.name
+                    } else {
+                        unofficial_name.clear();
+                        unofficial_name.push_str(signature.name);
+                        unofficial_name.push_str(UNOFFICIAL_SUFFIX);
+                        &unofficial_name
+                    };
+                    self.longest_part = self
+                        .longest_part
+                        .max(longest_part_of(&signature.pattern.elements));
+                    self.image
+                        .add_pattern_signature(&PatternSignature {
+                            category: signature.category,
+                            placement: signature.placement,
+                            report_rank: if signature.plain_bytes {
+                                RANK_OF_PLAIN_BYTES
+                            } else {
+                                RANK_OF_OTHER_BODIES
+                            },
+                            pattern: &signature.pattern,
+                            name,
+                            indicator: signature.indicator,
+                        })
+                        .map_err(DatabaseError::Image)?;
+                    LineOutcome::Compiled
+                }
+            });
+        }
+        self.record(source, kind_description(kind), outcomes);
+        Ok(())
+    }
+
     fn account_every_line(
         &mut self,
         source: &Source<'_>,
@@ -407,4 +509,28 @@ fn member_kind(member: &Member) -> Option<FileKind> {
         return None;
     }
     kind_of(&member.name)
+}
+
+fn longest_part_of(elements: &[debar_image::PatternElement]) -> u32 {
+    use debar_image::PatternElement;
+    let mut longest: u32 = 0;
+    let mut current: u32 = 0;
+    for element in elements {
+        let width = match element {
+            PatternElement::Gap { .. } => {
+                current = 0;
+                continue;
+            }
+            PatternElement::Byte(_) | PatternElement::OneOf(_) => 1,
+            PatternElement::Choice(alternatives) => alternatives
+                .iter()
+                .map(|alternative| u32::try_from(alternative.len()).unwrap_or(u32::MAX))
+                .max()
+                .unwrap_or(0),
+            PatternElement::NoneOf { width, .. } => *width,
+        };
+        current = current.saturating_add(width);
+        longest = longest.max(current);
+    }
+    longest
 }

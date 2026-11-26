@@ -277,6 +277,7 @@ pub struct ContainerMember {
     pub container: String,
     pub member: String,
     pub lines: usize,
+    pub contents: Vec<u8>,
 }
 
 pub fn members_of_pinned_databases(databases: &Path) -> Outcome<Vec<ContainerMember>> {
@@ -317,6 +318,7 @@ pub fn members_of_pinned_databases(databases: &Path) -> Outcome<Vec<ContainerMem
                 container: container.to_owned(),
                 member: name,
                 lines: line_count(contents),
+                contents: contents.to_vec(),
             });
             offset = start.saturating_add(size.next_multiple_of(512));
         }
