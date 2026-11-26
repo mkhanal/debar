@@ -1,0 +1,42 @@
+name: Comparison with the reference scanner
+
+on:
+  push:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixtures:
+    name: the harness's fixtures
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@d3c9e67982ac5c62048c4802b23027709705cea5 # main
+    with:
+      harness-ref: d3c9e67982ac5c62048c4802b23027709705cea5
+      known-differences: debar-known-differences.jsonl
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  built-inputs:
+    name: inputs built from every generic extended signature, and across window boundaries
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@d3c9e67982ac5c62048c4802b23027709705cea5 # main
+    with:
+      harness-ref: d3c9e67982ac5c62048c4802b23027709705cea5
+      known-differences: debar-known-differences.jsonl
+      built-target: "0"
+      boundary-sample: "2000"
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image "$HARNESS_INPUT" "$HARNESS_REPORT"

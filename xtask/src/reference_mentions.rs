@@ -17,9 +17,12 @@ pub enum AllowedPath {
     Under(&'static str),
 }
 
-pub const MAY_NAME_THE_REFERENCE_SCANNER: [AllowedPath; 6] = [
+pub const COMPARISON_WORKFLOW: &str = ".github/workflows/comparison.yml";
+
+pub const MAY_NAME_THE_REFERENCE_SCANNER: [AllowedPath; 7] = [
     AllowedPath::File("PRODUCT.md"),
     AllowedPath::File("README.md"),
+    AllowedPath::File(COMPARISON_WORKFLOW),
     AllowedPath::Under("specs/"),
     AllowedPath::Under("crates/compat-clamav/"),
     AllowedPath::Under("crates/clamav-signatures/"),

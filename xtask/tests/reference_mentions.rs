@@ -1,4 +1,4 @@
-use xtask::reference_mentions::{REFERENCE_SCANNER_NAMES, mentions};
+use xtask::reference_mentions::{COMPARISON_WORKFLOW, REFERENCE_SCANNER_NAMES, mentions};
 
 fn every_name() -> impl Iterator<Item = &'static str> {
     REFERENCE_SCANNER_NAMES.iter().copied()
@@ -113,4 +113,22 @@ fn a_mention_beside_the_part_name_is_still_reported() {
     let line = format!("debar-{name}-signatures reads what {name} reads");
 
     assert_eq!(mentions("Cargo.toml", line.as_bytes()).len(), 1);
+}
+
+#[test]
+fn only_the_workflow_dedicated_to_comparison_may_name_the_harness_it_calls() {
+    let line = format!(
+        "uses: mkhanal/debar-{}-harness/.github/workflows/compare.yml@0123abcd",
+        REFERENCE_SCANNER_NAMES[0]
+    );
+
+    assert_eq!(mentions(COMPARISON_WORKFLOW, line.as_bytes()), vec![]);
+    assert_eq!(
+        mentions(".github/workflows/checks.yml", line.as_bytes()).len(),
+        1
+    );
+    assert_eq!(
+        mentions(".github/workflows/comparison.yml.orig", line.as_bytes()).len(),
+        1
+    );
 }
