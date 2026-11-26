@@ -49,4 +49,6 @@ Later initiatives are listed in [DEFERRED.md](./DEFERRED.md).
 
 ## Licence
 
-GNU General Public License version 2 only. The text is in [COPYING](./COPYING).
+Mozilla Public License 2.0. The text is in [COPYING](./COPYING).
+
+Anyone, a company included, may use, run, host, sell and ship Debar, and call it as a library from their own program, without asking anyone. Their own program keeps its own licence. Whoever ships a changed Debar shares the changes to Debar's own files under the same licence. Everyone gets the same terms, its authors included.

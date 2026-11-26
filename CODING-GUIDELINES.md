@@ -65,7 +65,7 @@ The footprint and start-time aims are met by design in a few places, not by tuni
 
 - **Use a maintained crate before writing our own**, unless it cannot produce what the reference scanner produces from a damaged file, or it breaks a resource budget. Record the reason in `architecture-overview/DECISIONS.md` when we write our own.
 - **Every dependency names one exact version** (`=1.2.3`), the lockfile is committed, and builds run `--locked`. The toolchain is pinned the same way. A dependency then changes only when someone changes it in review.
-- **Licences compatible with GPL version 2 only:** MIT, BSD, ISC, Zlib and Unicode, and a crate offered under a choice that includes one of them. A crate under the Apache License 2.0 alone is not on this list; adding one needs a person's decision, recorded.
+- **Licences for anything linked into a release:** MIT, BSD, ISC, Zlib, Unicode, NCSA, Apache-2.0, Apache-2.0 WITH LLVM-exception and MPL-2.0, and a crate offered under a choice that includes one of them. A licence that reaches beyond its own files (GPL, LGPL, AGPL) would bind every program that links Debar (Constitution §14), so adding one needs a person's decision, recorded. A tool used only to build, test or measure Debar needs only to permit that use.
 
 ## Test what is promised
 

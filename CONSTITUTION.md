@@ -67,9 +67,12 @@ A statement about start time, memory or speed comes with a measurement anyone ca
 
 A build that is not a release may link a reference scanner's code to measure progress before Debar's own piece exists. Every borrowed piece is listed in [architecture-overview/ROADMAP.md](./architecture-overview/ROADMAP.md), and no release is cut while that list has an entry.
 
-## 14. GPL Version 2 Only
+## 14. Open Source, The Same Terms For Everyone
 
-Debar is licensed under the GNU General Public License version 2 only. Every dependency carries a licence compatible with it; the list is in [CODING-GUIDELINES.md](./CODING-GUIDELINES.md).
+Debar is licensed under the Mozilla Public License 2.0, and only under it. No one holds rights over Debar that others lack, and no part of it is offered under closed terms.
+
+- Every contribution is made under the same licence and signed off under the Developer Certificate of Origin.
+- Everything linked into a released program carries a licence that keeps Debar usable by any program that links it; the list is in [CODING-GUIDELINES.md](./CODING-GUIDELINES.md). A tool used only to build, test or measure Debar is not linked into it and needs only to permit that use.
 
 ## 15. Fail Loud
 

@@ -68,6 +68,7 @@ Use these words in code, specifications and documents, and no second word for th
 
 - The message says what changed and why. That is where the journey lives (Constitution §17).
 - A commit, pull request, issue or comment never credits a tool or an AI as author or co-author.
+- Every commit is signed off (`git commit -s`) under the Developer Certificate of Origin (Constitution §14).
 - Study material is never committed to this repository (Constitution §4). Changes to the notes are committed in the study repository.
 
 ## Commands

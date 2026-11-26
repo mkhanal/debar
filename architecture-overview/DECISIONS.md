@@ -67,3 +67,19 @@ Compatibility is not copying: it is stated as the surface a user sees (commands,
 **Decision.** Requirements live in `specs/*.lazyspec.md`, each married to a test that repeats its words (Constitution §7).
 
 **Why.** A requirement that nothing proves drifts from the code. One area for the whole repository until the layers exist as crates.
+
+### 2026-11-27 — Mozilla Public License 2.0, the same terms for everyone
+
+**Decision.** Debar is licensed under the Mozilla Public License 2.0. No one, its authors included, holds rights others lack, and no part of Debar is closed. Contributions are signed off under the Developer Certificate of Origin instead of a contributor licence agreement (Constitution §14).
+
+**Why.** The owner will release Debar as real open source and compete on the hosted service, support and a compiled image feed: may the best service survive. Anyone, a company included, may use, host, sell and ship Debar and link it as a library from their own program without asking. Changes to Debar's own files come back when a changed Debar is shipped. Corporate licence policies generally accept the MPL, where the AGPL is often refused on its name alone. Contributors give their work on the same terms as everyone else, which is the promise that Debar can never be closed. Debar is written from scratch, so no other code fixes its licence, and loading signature databases as data does not bind it.
+
+**Considered.**
+
+- GPL version 2 only: anyone may host a changed Debar without sharing, and linking it binds the linking program.
+- AGPL version 3, alone or with a linking exception and commercial licences: makes hosted competitors share changes, but its name deters companies, and the exception would need custom legal text.
+- EUPL 1.2: covers network use and allows linking, but is little known to corporate policies.
+- PolyForm Shield or the Elastic License 2.0: forbid competing or hosted resale without permission, and are not open source.
+- Open core, with closed paid add-ons: not open source as a whole, and deters contributors.
+
+**Replaces** "GPL version 2 only" of 2026-11-26.

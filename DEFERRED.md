@@ -25,7 +25,3 @@ Scanning files as they are opened or written.
 ## Windows and macOS
 
 The first release is Linux only. Techniques tied to Linux stay inside the platform layer so other systems are not ruled out.
-
-## A more permissive licence
-
-Debar is GPL version 2 only. Offering it under other terms needs legal advice first.

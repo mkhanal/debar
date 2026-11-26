@@ -13,4 +13,4 @@ What it is and what it promises: [PRODUCT.md](./PRODUCT.md).
 
 ## Licence
 
-GNU General Public License version 2 only. See [COPYING](./COPYING).
+Mozilla Public License 2.0. See [COPYING](./COPYING). Contributions are signed off under the [Developer Certificate of Origin](https://developercertificate.org/).
