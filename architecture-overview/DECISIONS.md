@@ -89,3 +89,29 @@ Compatibility is not copying: it is stated as the surface a user sees (commands,
 **Decision.** Debar's updater fetches databases from a mirror Debar's operators run, never from the format publisher's own servers. The mirror is filled with the publisher's supported mirroring tool.
 
 **Why.** A publisher may rate-limit or block clients it does not recognise. A mirror filled the supported way keeps Debar's supply within the publisher's rules, and lets a hosted service compile once and hand images to every scanner. The reasoning that names the publisher is in the format's study folder.
+
+### 2026-11-27 — The toolkit
+
+**Decision.**
+
+- **Build.** One Cargo workspace, one crate per layer, each crate created when its piece starts. Rust 1.100.0 is pinned in `rust-toolchain.toml`; one dated nightly is pinned beside it for fuzzing, Miri and sanitizers only.
+- **Environment.** One container image, pinned by digest, built in CI and published to GitHub's container registry. CI and developer machines run the same image; on macOS it runs in a Linux virtual machine. Linux-only code, checks and measurements run in it.
+- **Checks.** Every check is an `xtask` command, so the same command runs locally and in CI, and the CI workflows stay thin.
+- **Lints.** clippy pedantic, and denied in the workspace lint table: `unwrap_used`, `expect_used`, `panic`, `indexing_slicing`, `arithmetic_side_effects`, `as_conversions`, `string_slice`, `todo`, `unreachable` and `undocumented_unsafe_blocks`. `unsafe_code` is forbidden in every crate but the platform crate.
+- **Gates and layers.** clippy's `disallowed_methods` and `disallowed_types` keep files, sockets, memory maps, the clock and randomness inside the platform crate (Constitution §9). cargo-deny `bans` with `wrappers` allow only the platform crate to depend on crates that reach those resources, and allow each layer's crate only as a dependency of the layers above it (Constitution §10). An `xtask` check over `cargo metadata` stands in wherever `wrappers` cannot express a rule.
+- **Supply chain.** Exact versions and `--locked`; cargo-deny for licences, sources, advisories and bans; Cargo's minimum publish age of 14 days; cargo-vet for audits.
+- **Tests.** cargo-nextest; proptest; cargo-fuzz with `arbitrary` for every format module; Miri on the platform crate; cargo-mutants and longer fuzzing weekly; cargo-llvm-cov for coverage.
+- **Measurement.** Budgets (Constitution §12) are gated on instruction counts from gungraun, allocation counts, and proportional set size read from `/proc`, which counts a shared image fairly. Start time is measured with hyperfine. Wall-clock figures are recorded and never gate a change.
+- **CI.** GitHub Actions on standard amd64 and arm64 runners. Actions are pinned to commit SHAs, each job gets only the token permissions it needs, `pull_request_target` is never used, and workflows are linted with zizmor. ClusterFuzzLite fuzzes each change; Debar applies to OSS-Fuzz once it has format modules.
+
+**Why.** The aims are footprint and start time, so the budgets must be measured the same way on every run. Shared runners make time noisy, hence instruction and allocation counts. Hostile input is met by the compiler and lints, not by review. Every choice is one an agent arriving cold already knows, or reads as ordinary Rust. Standard runners are free for a public repository.
+
+**Considered.** Buck2 and Bazel (a second build graph for little gain); Nix (most hermetic, hard for agents to read); `just` and `cargo-make` (a second language for every command); dylint and cargo-pup (nightly-bound or young); criterion (wall time, noisy in CI).
+
+**Not yet verified,** checked when each is set up: whether clippy reads a separate `clippy.toml` per crate, whether rust-lld is the default linker on arm64 Linux, and whether `wrappers` expresses every layer rule.
+
+### 2026-11-27 — The comparison harness is public, in its own repository
+
+**Decision.** The harness that runs a reference scanner beside Debar lives in its own public repository, one per signature format. Debar's CI calls it as a reusable workflow pinned to a commit, against the change under test. It runs the reference scanner from its pinned image as a black box, through its public interfaces, and compares what a user or signature could observe. The databases come from that pinned image, never from the publisher's servers. How a reference scanner works inside stays in the private study folder.
+
+**Why.** Comparison on every change, on free public runners, without the reference scanner's name or image entering this repository (Constitution §4) or any format entering the engine's repository (Constitution §11). The harness's own design is settled with piece 2.

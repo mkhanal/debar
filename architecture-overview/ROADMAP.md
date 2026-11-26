@@ -47,6 +47,13 @@ Ideas for inside the layers. None is decided; each is settled in the design of i
 - **Streaming with fixed memory per scan.** Content flows through matching as it is produced, with no temporary files, except where a signature needs random access.
 - **Hashes behind a small in-memory filter.** The full table stays on disk and is touched only when the filter says a hash may be present.
 - **Signature programs compiled ahead of time**, when the image is built.
+- **The image laid out by hand and read in place** with `zerocopy`, with no validation pass at start.
+- **Our own matcher**: a literal prefilter laid out in the image as a double-array automaton, then verification of wildcards and gaps. `daachorse` and `aho-corasick` are the measured starting points.
+- **Hand-written readers** for scanned formats over the input gate, so a damaged file is handled as the reference scanner handles it.
+- **A binary fuse filter** in the image in front of the hash tables.
+- **An interpreter for signature programs**, with their bytecode checked and lowered when the image is built.
+- **A fixed thread pool** for the daemon, with blocking I/O through the gates, instead of an async runtime.
+- **mimalloc and an arena per scan**, kept only if they measure better.
 - **Compile once, map everywhere.** The updater is the only thing that compiles; every scanner process maps the same image.
 
 ## Checks to build
