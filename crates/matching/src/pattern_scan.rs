@@ -253,19 +253,23 @@ impl ArmedParts {
             .is_some_and(|word| word & (1u64 << (window & 63)) != 0)
     }
 
-    fn arm(&mut self, part: ArmedPart) -> Option<usize> {
+    fn arm(&mut self, part: ArmedPart) -> Arming {
         let key = (part.group, part.program.0);
         if let Some(existing) = self
             .by_program
             .get(&key)
             .and_then(|index| self.parts.get_mut(*index))
         {
+            let admitted = existing.last_start.map(|last| {
+                last.saturating_add(u64::from(existing.displacement.farthest))
+                    .saturating_add(1)
+            });
             existing.first_start = existing.first_start.min(part.first_start);
             existing.last_start = existing
                 .last_start
                 .zip(part.last_start)
                 .map(|(a, b)| a.max(b));
-            return None;
+            return Arming::AlreadyAdmittedBefore(admitted);
         }
         let index = self.parts.len();
         if let Some(anchor) = part.anchor.map(ascii_lowercase) {
@@ -280,8 +284,13 @@ impl ArmedParts {
         }
         self.by_program.insert(key, index);
         self.parts.push(part);
-        Some(index)
+        Arming::New
     }
+}
+
+enum Arming {
+    New,
+    AlreadyAdmittedBefore(Option<u64>),
 }
 
 struct GroupProbe<'m> {
@@ -910,8 +919,14 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             first_start,
             last_start,
         };
-        let Some(index) = self.armed.arm(part.clone()) else {
-            return Ok(());
+        let searched_from = if anchor.is_some() {
+            match self.armed.arm(part.clone()) {
+                Arming::New => 0,
+                Arming::AlreadyAdmittedBefore(Some(position)) => position,
+                Arming::AlreadyAdmittedBefore(None) => return Ok(()),
+            }
+        } else {
+            0
         };
         if anchor.is_none() {
             let last = last_start.unwrap_or(first_start);
@@ -927,32 +942,9 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             {
                 let from = first_start
                     .saturating_add(u64::from(displacement.nearest))
+                    .max(searched_from)
                     .max(self.first_retained);
-                let mut found = Vec::new();
-                let first =
-                    usize::try_from(from.saturating_sub(self.first_retained)).unwrap_or(usize::MAX);
-                let last = usize::try_from(
-                    self.probed_to
-                        .saturating_sub(self.first_retained)
-                        .saturating_add(1),
-                )
-                .unwrap_or(usize::MAX)
-                .min(self.retained.len());
-                if let Some(searched) = self.retained.get(first..last) {
-                    for (offset, window) in searched.windows(SHORT_ANCHOR_LENGTH).enumerate() {
-                        let Ok(window) = <[u8; SHORT_ANCHOR_LENGTH]>::try_from(window) else {
-                            continue;
-                        };
-                        let position = from.saturating_add(u64::try_from(offset).unwrap_or(0));
-                        if position < self.probed_to
-                            && part.anchored_by(window)
-                            && part.admits_anchor_at(position)
-                        {
-                            found.push(position);
-                        }
-                    }
-                }
-                let _ = index;
+                let found = self.anchors_already_probed(&part, from);
                 for position in found {
                     let Some(last) = position.checked_sub(u64::from(displacement.nearest)) else {
                         continue;
@@ -969,6 +961,39 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             }
         }
         Ok(())
+    }
+
+    fn anchors_already_probed(&self, part: &ArmedPart, from: u64) -> Vec<u64> {
+        let mut found = Vec::new();
+        let first = usize::try_from(from.saturating_sub(self.first_retained)).unwrap_or(usize::MAX);
+        let searched_to = part.last_start.map_or(self.probed_to, |last| {
+            self.probed_to.min(
+                last.saturating_add(u64::from(part.displacement.farthest))
+                    .saturating_add(1),
+            )
+        });
+        let last = usize::try_from(
+            searched_to
+                .saturating_sub(self.first_retained)
+                .saturating_add(1),
+        )
+        .unwrap_or(usize::MAX)
+        .min(self.retained.len());
+        if let Some(searched) = self.retained.get(first..last) {
+            for (offset, window) in searched.windows(SHORT_ANCHOR_LENGTH).enumerate() {
+                let Ok(window) = <[u8; SHORT_ANCHOR_LENGTH]>::try_from(window) else {
+                    continue;
+                };
+                let position = from.saturating_add(u64::try_from(offset).unwrap_or(0));
+                if position < self.probed_to
+                    && part.anchored_by(window)
+                    && part.admits_anchor_at(position)
+                {
+                    found.push(position);
+                }
+            }
+        }
+        found
     }
 
     fn insert_in_order(&mut self, candidate: Candidate) {

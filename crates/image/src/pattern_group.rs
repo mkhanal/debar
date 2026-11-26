@@ -1051,6 +1051,11 @@ impl<'m> PatternGroup<'m> {
         self.signatures.len()
     }
 
+    #[must_use]
+    pub fn all_signature_count(&self) -> usize {
+        self.signatures.len()
+    }
+
     pub fn signature(
         &self,
         id: PatternSignatureId,

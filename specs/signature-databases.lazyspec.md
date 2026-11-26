@@ -35,3 +35,15 @@ What becomes of the databases a user loads: every line accounted for, and the im
 
 - A line with too few or too many fields, an empty name, a malformed level, target, offset or body fails the compile, naming the file and line.
 - No image is written.
+
+## Every Logical Signature Line In The Pinned Databases Is Accounted For In The Image
+
+- Every logical signature line has one outcome: compiled, outside the functionality level, ignored, a comment, its target not loaded, not loaded for an unknown attribute or type, or not yet compiled.
+- A line is not yet compiled only when it holds a regular-expression, byte-comparison, image fuzzy hash or macro subsignature.
+- Every other loaded line is compiled.
+- The image holds one logical signature for each compiled line.
+
+## A Malformed Logical Signature Line Fails The Compile
+
+- A line with too few fields, a malformed expression, a subsignature count that disagrees with the expression, a malformed attribute, no target or a malformed subsignature fails the compile, naming the file and line.
+- No image is written.

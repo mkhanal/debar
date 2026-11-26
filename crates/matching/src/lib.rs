@@ -5,6 +5,8 @@ mod logical_state;
 mod part_ends;
 mod pattern_scan;
 mod second_pass_search;
+
+pub use second_pass_search::largest_armed_search_bytes;
 mod verification;
 
 pub use digests::{DigestNeed, ObjectDigests};

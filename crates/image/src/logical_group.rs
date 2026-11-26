@@ -526,6 +526,17 @@ impl<'m> LogicalGroup<'m> {
     }
 
     #[must_use]
+    pub fn counted_matches_at_most(&self) -> u64 {
+        self.subsignatures
+            .iter()
+            .map(|entry| entry.ceiling.get())
+            .filter(|ceiling| *ceiling > 1)
+            .fold(0u64, |total, ceiling| {
+                total.saturating_add(u64::from(ceiling))
+            })
+    }
+
+    #[must_use]
     pub fn second_pass_subsignature_count(&self) -> u32 {
         self.header.second_pass_subsignature_count.get()
     }

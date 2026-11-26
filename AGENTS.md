@@ -85,6 +85,8 @@ Everything builds and runs inside the toolchain image, on CI and on a developer 
 | compile a folder of databases into an image | `./in-toolchain cargo run --release --locked --bin debar-compiler -- --databases DIRECTORY --image FILE --account FILE` |
 | write the comparison harness's report for one file | `./in-toolchain target/release/debar comparison-report --image FILE INPUT REPORT` |
 | measure hash lookups per second | `./in-toolchain cargo run --release --locked -p debar-matching --example hash_lookup_rate -- IMAGE` |
+| measure scanning throughput over files | `./in-toolchain target/release/debar measure-scan --image FILE PATH...` |
+| bound the per-scan logical state of an image | `./in-toolchain cargo run --release --locked -p debar-matching --example logical_state_bound -- IMAGE` |
 | check that a release may be cut | `./in-toolchain cargo xtask release-check` |
 | format the code | `./in-toolchain cargo fmt --all` |
 | open a shell in the image | `./in-toolchain` |

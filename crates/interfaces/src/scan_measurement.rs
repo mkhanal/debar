@@ -8,7 +8,7 @@ use debar_platform::stopwatch::Stopwatch;
 use serde_json::{Value, json};
 
 use crate::comparison_report::{ReadyImageError, ready_image};
-use crate::object_scan::{ObjectScanError, scan_top_level_object};
+use crate::object_scan::{ObjectScanError, ScanSettings, scan_top_level_object};
 
 #[derive(Debug)]
 pub enum ScanMeasurementError {
@@ -52,9 +52,11 @@ pub fn measure_scan(image_path: &Path, inputs: &[PathBuf]) -> Result<Value, Scan
         let object = read_scanned_file(path).map_err(ScanMeasurementError::Input)?;
         reading = reading.saturating_add(read.elapsed());
         let outcome =
-            scan_top_level_object(&image, &object).map_err(|error| ScanMeasurementError::Scan {
-                path: path.clone(),
-                error,
+            scan_top_level_object(&image, &object, ScanSettings::default()).map_err(|error| {
+                ScanMeasurementError::Scan {
+                    path: path.clone(),
+                    error,
+                }
             })?;
         detections = detections.saturating_add(outcome.detections.len());
         scanned_bytes = scanned_bytes.saturating_add(u64::try_from(object.len()).unwrap_or(0));

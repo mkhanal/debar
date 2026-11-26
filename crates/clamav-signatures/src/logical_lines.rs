@@ -677,19 +677,16 @@ fn widened(text: &[u8]) -> Vec<u8> {
                 wide.extend_from_slice(text.get(at..at.saturating_add(3)).unwrap_or_default());
                 at = at.saturating_add(3);
             }
-            b'{' => {
+            b'{' | b'[' => {
+                let closing = if *byte == b'{' { b'}' } else { b']' };
                 let end = text
                     .get(at..)
-                    .and_then(|rest| rest.iter().position(|byte| *byte == b'}'))
+                    .and_then(|rest| rest.iter().position(|byte| *byte == closing))
                     .map_or(text.len(), |close| {
                         at.saturating_add(close).saturating_add(1)
                     });
-                wide.extend_from_slice(text.get(at..end).unwrap_or_default());
+                wide.extend(brackets_as_gaps(text.get(at..end).unwrap_or_default()));
                 at = end;
-            }
-            b'[' | b']' => {
-                wide.push(if *byte == b'[' { b'{' } else { b'}' });
-                at = next;
             }
             b'*' | b'|' | b'(' | b')' | b'!' => {
                 wide.push(*byte);

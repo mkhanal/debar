@@ -15,9 +15,9 @@ jobs:
     name: the harness's fixtures
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@c5f831b2c32a39557d1cd94d389f2590a3414c64 # main
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
     with:
-      harness-ref: c5f831b2c32a39557d1cd94d389f2590a3414c64
+      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
       known-differences: debar-known-differences.jsonl
       build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
       debar-command: >-
@@ -29,9 +29,9 @@ jobs:
     name: inputs built from every generic extended signature, and across window boundaries
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@c5f831b2c32a39557d1cd94d389f2590a3414c64 # main
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
     with:
-      harness-ref: c5f831b2c32a39557d1cd94d389f2590a3414c64
+      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
       known-differences: debar-known-differences.jsonl
       built-target: "0"
       boundary-sample: "2000"
@@ -45,9 +45,9 @@ jobs:
     name: inputs built from every extended signature for web pages
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@c5f831b2c32a39557d1cd94d389f2590a3414c64 # main
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
     with:
-      harness-ref: c5f831b2c32a39557d1cd94d389f2590a3414c64
+      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
       known-differences: debar-known-differences-web-pages.jsonl
       built-target: "3"
       boundary-sample: "0"
@@ -61,9 +61,9 @@ jobs:
     name: inputs built from every extended signature for mail
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@c5f831b2c32a39557d1cd94d389f2590a3414c64 # main
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
     with:
-      harness-ref: c5f831b2c32a39557d1cd94d389f2590a3414c64
+      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
       known-differences: debar-known-differences.jsonl
       built-target: "4"
       boundary-sample: "0"
@@ -77,12 +77,84 @@ jobs:
     name: inputs built from every extended signature for text
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@c5f831b2c32a39557d1cd94d389f2590a3414c64 # main
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
     with:
-      harness-ref: c5f831b2c32a39557d1cd94d389f2590a3414c64
+      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
       known-differences: debar-known-differences-text.jsonl
       built-target: "7"
       boundary-sample: "0"
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  built-logical-0:
+    name: inputs built from every generic logical signature
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
+    with:
+      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
+      known-differences: debar-known-differences.jsonl
+      built-target: "0"
+      boundary-sample: "0"
+      extended-sample: "0"
+      logical-sample: "1000000"
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  built-logical-3:
+    name: inputs built from every logical signature for web pages
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
+    with:
+      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
+      known-differences: debar-known-differences-web-pages.jsonl
+      built-target: "3"
+      boundary-sample: "0"
+      extended-sample: "0"
+      logical-sample: "1000000"
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  built-logical-4:
+    name: inputs built from every logical signature for mail
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
+    with:
+      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
+      known-differences: debar-known-differences.jsonl
+      built-target: "4"
+      boundary-sample: "0"
+      extended-sample: "0"
+      logical-sample: "1000000"
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  built-logical-7:
+    name: inputs built from every logical signature for text
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
+    with:
+      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
+      known-differences: debar-known-differences-text.jsonl
+      built-target: "7"
+      boundary-sample: "0"
+      extended-sample: "0"
+      logical-sample: "1000000"
       build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
       debar-command: >-
         { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"

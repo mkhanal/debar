@@ -6,7 +6,17 @@ use debar_image::{
 
 use crate::pattern_scan::PatternScanError;
 
-const MOST_PROGRAMS: usize = 16_384;
+const MOST_PROGRAMS: usize = 8_192;
+const DENSE_DEPTH_OF_A_LARGE_SEARCH: usize = 1;
+const MOST_PROGRAMS_IN_A_TABLE: usize = 1_024;
+
+fn automaton_kind(patterns: usize) -> AhoCorasickKind {
+    if patterns <= MOST_PROGRAMS_IN_A_TABLE {
+        AhoCorasickKind::DFA
+    } else {
+        AhoCorasickKind::ContiguousNFA
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct Entry {
@@ -37,7 +47,8 @@ impl Searcher {
         }
         let (patterns, entries): (Vec<Vec<u8>>, Vec<Entry>) = anchors.into_iter().unzip();
         let automaton = AhoCorasick::builder()
-            .kind(Some(AhoCorasickKind::DFA))
+            .kind(Some(automaton_kind(patterns.len())))
+            .dense_depth(DENSE_DEPTH_OF_A_LARGE_SEARCH)
             .match_kind(MatchKind::Standard)
             .ascii_case_insensitive(case == AnchorCase::Folded)
             .build(&patterns)
@@ -69,6 +80,28 @@ impl Searcher {
             ));
         }
     }
+}
+
+pub fn largest_armed_search_bytes() -> Result<usize, PatternScanError> {
+    let patterns: Vec<Vec<u8>> = (0..MOST_PROGRAMS)
+        .map(|index| {
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
+            index.wrapping_mul(0x9e37_79b1).to_le_bytes().to_vec()
+        })
+        .collect();
+    let entries = patterns.len().saturating_mul(std::mem::size_of::<Entry>());
+    let mut bytes = entries;
+    for case in [AnchorCase::Exact, AnchorCase::Folded] {
+        let automaton = AhoCorasick::builder()
+            .kind(Some(automaton_kind(patterns.len())))
+            .dense_depth(DENSE_DEPTH_OF_A_LARGE_SEARCH)
+            .match_kind(MatchKind::Standard)
+            .ascii_case_insensitive(case == AnchorCase::Folded)
+            .build(&patterns)
+            .map_err(|_| PatternScanError::ArmedSearchNotBuilt)?;
+        bytes = bytes.saturating_add(automaton.memory_usage());
+    }
+    Ok(bytes)
 }
 
 pub(crate) struct SecondPassSearch {

@@ -405,16 +405,10 @@ fn begins_with_prefilter_elements(tokens: &[Token]) -> bool {
         .iter()
         .filter(|token| !matches!(token, Token::LoneByteDistance { .. }))
         .collect();
-    let has_wildcard_prefix =
-        matches!(elements.first(), Some(Token::Byte(byte)) if !byte.is_exact());
-    let skipped = if has_wildcard_prefix {
-        0
-    } else {
-        elements
-            .iter()
-            .take_while(|token| is_prefilter_special(token))
-            .count()
-    };
+    let skipped = elements
+        .iter()
+        .take_while(|token| is_prefilter_special(token))
+        .count();
     elements
         .iter()
         .skip(skipped)

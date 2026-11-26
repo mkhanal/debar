@@ -278,3 +278,29 @@ Each becomes a requirement in `specs/` with its married test in the piece that f
 | Comparison | Inputs built for targets 0 (40,001, with the boundary inputs) and 4 (1,064): every one detected by both scanners under its signature. Targets 3 (3,958) and 7 (1,565): detected by the reference only, through normalisation not built yet, judged by their own ratchets. The top-level type agrees on every input and fixture, which closes the rule for untyped objects; no other known difference changed |
 
 **Not yet settled.** Recovering the throughput the reference's part split costs (anchoring a bounded part from its predecessor instead of the filter is the first candidate), with the throughput budget in slice 4.
+
+### 2026-11-27 — Logical signatures and the throughput budget, as built
+
+**Decision.** Slice 4 of the image and the matching engine is in place, with these settled where the design left them open:
+
+- **Every logical line is read as the reference loads it,** check by check in the reference's order: what fails the whole compile, what is skipped and why, the expression without operator precedence (lenient leaves, rejected modifiers on a single group), the target description block, and content subsignatures with their offsets and the `i`, `w`, `f` and `a` modifiers. A line holding a regular-expression, byte-comparison, image fuzzy hash or macro subsignature is accounted as not yet compiled (slice 5); an unknown attribute or type name is accounted as not loaded. The prefilter load rule the study found also applies to extended bodies. Expressions nest at most 256 deep, where the reference has no limit; nothing official nests deeper than 3.
+- **The image holds a logical section per group:** postfix expressions, a count ceiling per subsignature (counts saturate there, deciding as exact counts do), the conditions, and the signatures that would hold with no match (none officially). Subsignatures compile into the group's pattern section. A section names the category of every potentially unwanted signature, filtered at scan time by a "category contains" or "does not contain" setting that the compatibility part will fill from the scanner's options. The section directory may now span more than one page.
+- **Gated matching.** Each signature is gated on the cheapest set of its subsignatures whose absence makes the expression false; only those enter the main filter. After the main pass, if a gate fired for a signature with subsignatures left out, the object is matched a second time with an automaton built for the armed signatures alone (`aho-corasick`, MIT, the design's named baseline; a DFA up to 1,024 programs, a contiguous NFA up to 8,192, the full stored tables above that). Results equal a single full pass; a property test against a naive evaluator proves it.
+- **Counting** follows the study: a single-part subsignature counts each distinct start; a subsignature in parts counts each completion. Counts are kept as a set of starts bounded by the ceiling, so the order a second pass finds them in does not matter.
+- **Throughput levers** besides gating: a filter precomputed in the image for each set of groups an object kind selects, probed once per position before any group's own filter; later parts with only a two-byte anchor searched only once their predecessor matched; case-insensitive anchors in their own filter; a subsignature skipped once its count is saturated.
+- **Per-scan state (A8)** is bounded by the image: at most 4.8 MiB per scan for the largest kind (Windows executables), of which 1.4 MiB is the second pass's automaton (`cargo run --release -p debar-matching --example logical_state_bound -- IMAGE`).
+- **The throughput budget** is a requirement (`specs/scan-speed.lazyspec.md`). Its gate counts instructions per MiB on fixed generated slices of each corpus kind and on system files from the toolchain image, against a budget per kind: the instructions Debar would execute at twice the reference's single-threaded wall-clock rate, at the instructions per nanosecond Debar measured on that kind of the standard corpus (13.4 to 15.5 on the measuring machine). The reference was measured with every parser, normaliser and signature program Debar lacks switched off (study folder, `measure-raw-scan.sh`).
+- **`debar measure-scan`** reports scanning throughput over files, for measurement; **`debar comparison-report`** takes `--potentially-unwanted` with an optional category filter.
+- **Not built, recorded as gaps in the harness's ratchets:** `HandlerType` re-scans (reported to the caller as a rescan request; the scan core is piece 5), icon groups (piece 6), the reference's second matching pass over binary data and normalised text (pieces 5 and 6).
+
+**Why.** Each keeps the format in the part (Constitution §11), reproduces what a signature can observe (§2), and bounds memory by the image rather than the input (§8).
+
+**Measured** on the pinned databases, in the toolchain image on an Apple Silicon Mac (aarch64 Linux VM):
+
+| Figure | Value |
+| --- | --- |
+| Logical lines | 321,093 compiled, 1,303 not yet compiled (slice 5), 7 ignored, of 322,403; 1,511,984 content subsignatures |
+| Image | 465 MB (the PE pattern section 278 MB); compile 14.5 s |
+| Start, readiness and one small scan | 3,335,557 instructions; 2.0 ms wall-clock median; 64 KiB of the image resident, 160 KiB private once ready |
+| Throughput, Debar against the reference (MiB/s, one thread) | system files 53.6 / 16.1; text 89.9 / 30.5; binary 93.5 / 26.8; PDF 65.8 / 25.3; OLE2 62.9 / 15.9; tar 73.9 / 28.5; gzip 89 / 32.4; tar.gz 90 / 30.9; ZIP 74 / 2.0; OOXML 75 / 2.0; HTML not matched raw / 14.2 |
+| Comparison | Inputs built from logical signatures: target 0, 749 of 750 detected (the other needs a regular expression); target 4, 5 of 5; targets 3 and 7 only through normalisation, judged by their own ratchets. Extended inputs of target 0 now all 40,001 detected |

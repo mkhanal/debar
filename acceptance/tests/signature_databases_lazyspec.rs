@@ -306,3 +306,149 @@ fn a_malformed_extended_signature_line_fails_the_compile() {
         assert!(!image.exists(), "{REQUIREMENT}: {case}");
     }
 }
+
+const LOGICAL_LINE_OUTCOMES: [&str; 7] = [
+    "compiled",
+    "outside_functionality_level",
+    "ignored",
+    "comment",
+    "target_not_loaded",
+    "not_loaded",
+    "not_yet_compiled",
+];
+
+fn holds_a_subsignature_not_yet_compiled(line: &str) -> bool {
+    line.split(';').skip(3).any(|field| {
+        field.starts_with('$')
+            || field.contains('/')
+            || field.starts_with("fuzzy_img#")
+            || (field.contains('(') && field.matches('#').count() >= 2)
+    })
+}
+
+#[test]
+fn every_logical_signature_line_in_the_pinned_databases_is_accounted_for_in_the_image() {
+    const REQUIREMENT: &str =
+        "Every Logical Signature Line In The Pinned Databases Is Accounted For In The Image";
+    let compiled = official_image().unwrap();
+    let files = compiled.account["files"].as_array().unwrap();
+    let members = members_of_pinned_databases(&pinned_databases().unwrap()).unwrap();
+    let mut compiled_lines = 0u64;
+    let mut logical_files = 0;
+    for file in files.iter().filter(|file| {
+        file["kind"]
+            .as_str()
+            .unwrap()
+            .starts_with("logical signatures")
+    }) {
+        logical_files += 1;
+        let member = members
+            .iter()
+            .find(|member| member.member == file["member"].as_str().unwrap())
+            .unwrap();
+        let outcomes = &file["outcomes"];
+        let accounted: u64 = LOGICAL_LINE_OUTCOMES
+            .iter()
+            .map(|outcome| count(outcomes, outcome))
+            .sum();
+        assert_eq!(
+            accounted,
+            u64::try_from(member.lines).unwrap(),
+            "{REQUIREMENT}: every line of {} has one outcome",
+            member.member
+        );
+        let left_out: Vec<usize> = file["lines_not_compiled"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| usize::try_from(line["line"].as_u64().unwrap()).unwrap())
+            .collect();
+        let loaded: Vec<String> = String::from_utf8_lossy(&member.contents)
+            .split('\n')
+            .zip(1usize..)
+            .filter(|(line, number)| !line.is_empty() && !left_out.contains(number))
+            .map(|(line, _)| line.to_owned())
+            .collect();
+        let not_yet = loaded
+            .iter()
+            .filter(|line| holds_a_subsignature_not_yet_compiled(line))
+            .count();
+        assert_eq!(
+            count(outcomes, "not_yet_compiled"),
+            u64::try_from(not_yet).unwrap(),
+            "{REQUIREMENT}: only lines with a subsignature of a later slice in {} wait",
+            member.member
+        );
+        assert_eq!(
+            count(outcomes, "compiled"),
+            u64::try_from(loaded.len() - not_yet).unwrap(),
+            "{REQUIREMENT}: every other loaded line of {} is compiled",
+            member.member
+        );
+        compiled_lines += count(outcomes, "compiled");
+    }
+    assert_eq!(
+        logical_files, 3,
+        "{REQUIREMENT}: main.ldb, daily.ldb and daily.ldu"
+    );
+    assert!(
+        compiled_lines > 300_000,
+        "{REQUIREMENT}: the pinned databases were read"
+    );
+    let image_signatures: u64 = compiled.account["image"]["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|section| section["kind"] == "logical signatures")
+        .map(|section| section["items"].as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        image_signatures, compiled_lines,
+        "{REQUIREMENT}: one image entry per compiled line"
+    );
+}
+
+#[test]
+fn a_malformed_logical_signature_line_fails_the_compile() {
+    const REQUIREMENT: &str = "A Malformed Logical Signature Line Fails The Compile";
+    let directory = scratch_directory("malformed-logical").unwrap();
+    for (case, line) in [
+        ("fields", "Test.Few;Target:0;0\n"),
+        (
+            "expression",
+            "Test.Expression;Target:0;(0&1;41424344;45464748\n",
+        ),
+        ("count", "Test.Count;Target:0;0&1;41424344\n"),
+        (
+            "attribute",
+            "Test.Attribute;Engine:51-255,Target:0,FileSize:9;0;41424344\n",
+        ),
+        ("target", "Test.Target;Engine:51-255;0;41424344\n"),
+        ("subsignature", "Test.Body;Target:0;0;4142zz\n"),
+    ] {
+        let databases = directory.join(case);
+        std::fs::create_dir(&databases).unwrap();
+        write_file(
+            &databases.join("local.ldb"),
+            format!("Test.Good;Target:0;0;41424344\n{line}").as_bytes(),
+        )
+        .unwrap();
+        let image = directory.join(format!("{case}.image"));
+        let output = std::process::Command::new(&release_binaries().unwrap().compiler)
+            .arg("--databases")
+            .arg(&databases)
+            .arg("--image")
+            .arg(&image)
+            .arg("--account")
+            .arg(directory.join(format!("{case}.json")))
+            .output()
+            .unwrap();
+        let message = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{REQUIREMENT}: {case}");
+        assert!(
+            message.contains("local.ldb line 2"),
+            "{REQUIREMENT}: {case}: {message}"
+        );
+        assert!(!image.exists(), "{REQUIREMENT}: {case}");
+    }
+}

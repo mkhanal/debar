@@ -41,6 +41,21 @@ pub enum Verdict {
     PotentiallyUnwanted,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanSettings<'s> {
+    pub potentially_unwanted: bool,
+    pub unwanted_categories: UnwantedCategories<'s>,
+}
+
+impl<'s> ScanSettings<'s> {
+    fn hashes(self) -> HashSettings<'s> {
+        HashSettings {
+            potentially_unwanted: self.potentially_unwanted,
+            unwanted_categories: self.unwanted_categories,
+        }
+    }
+}
+
 pub struct ScanOutcome {
     pub kind: Option<ObjectKind>,
     pub detections: Vec<String>,
@@ -55,6 +70,7 @@ struct Found {
 pub fn scan_top_level_object(
     image: &Image<'_>,
     object: &[u8],
+    settings: ScanSettings<'_>,
 ) -> Result<ScanOutcome, ObjectScanError> {
     let size = u64::try_from(object.len()).unwrap_or(u64::MAX);
     if size <= LARGEST_OBJECT_LEFT_UNSCANNED {
@@ -88,14 +104,17 @@ pub fn scan_top_level_object(
     } else {
         GroupSelection::ForKind(matched_as)
     };
-    let outcomes = pattern_outcomes(image, object, size, selection)?;
+    let outcomes = pattern_outcomes(image, object, size, selection, settings)?;
     let kind = kind_after_full_scan(image, kind, &outcomes.types_found)
         .map_err(ObjectScanError::Typing)?;
-    let need = whole_object_digest_need(image, size, HashSettings::default())
-        .map_err(ObjectScanError::Image)?;
+    let need =
+        whole_object_digest_need(image, size, settings.hashes()).map_err(ObjectScanError::Image)?;
     let digests = ObjectDigests::of(object, need);
     let mut found = found_from(outcomes.detections);
-    found.extend(hash_detections(image, size, &digests).map_err(ObjectScanError::Image)?);
+    found.extend(
+        hash_detections(image, size, &digests, settings.hashes())
+            .map_err(ObjectScanError::Image)?,
+    );
     found.extend(found_from(outcomes.logical.detections));
     let (detections, verdict) =
         verdict_of(image, size, &digests, &found).map_err(ObjectScanError::Image)?;
@@ -121,12 +140,13 @@ fn pattern_outcomes(
     object: &[u8],
     size: u64,
     selection: GroupSelection,
+    settings: ScanSettings<'_>,
 ) -> Result<PatternOutcomes, ObjectScanError> {
     let request = PatternRequest {
         selection,
         settings: PatternSettings {
-            potentially_unwanted: false,
-            unwanted_categories: UnwantedCategories::Every,
+            potentially_unwanted: settings.potentially_unwanted,
+            unwanted_categories: settings.unwanted_categories,
             every_match: true,
         },
         object_length: size,
@@ -139,16 +159,15 @@ fn hash_detections(
     image: &Image<'_>,
     size: u64,
     digests: &ObjectDigests,
+    settings: HashSettings<'_>,
 ) -> Result<Vec<Found>, ImageError> {
-    Ok(
-        whole_object_detections(image, size, digests, HashSettings::default())?
-            .into_iter()
-            .map(|detection| Found {
-                name: detection.name,
-                indicator: detection.indicator,
-            })
-            .collect(),
-    )
+    Ok(whole_object_detections(image, size, digests, settings)?
+        .into_iter()
+        .map(|detection| Found {
+            name: detection.name,
+            indicator: detection.indicator,
+        })
+        .collect())
 }
 
 fn verdict_of(

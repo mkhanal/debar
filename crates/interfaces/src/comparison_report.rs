@@ -8,7 +8,7 @@ use debar_platform::mapped_file::{ExpectedAccess, MappedFile, MappingError};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
-use crate::object_scan::{ObjectScanError, Verdict, scan_top_level_object};
+use crate::object_scan::{ObjectScanError, ScanSettings, Verdict, scan_top_level_object};
 
 const REPORT_SCHEMA_VERSION: u32 = 1;
 const SCANNER_NAME: &str = "Debar";
@@ -46,6 +46,7 @@ pub fn write_comparison_report(
     image_path: &Path,
     input: &Path,
     report: &Path,
+    settings: ScanSettings<'_>,
 ) -> Result<(), ComparisonReportError> {
     let mapped = MappedFile::open(image_path).map_err(ComparisonReportError::Mapping)?;
     let image = ready_image(&mapped).map_err(|error| match error {
@@ -53,7 +54,7 @@ pub fn write_comparison_report(
         ReadyImageError::Image(error) => ComparisonReportError::Image(error),
     })?;
     let object = read_scanned_file(input).map_err(ComparisonReportError::Input)?;
-    let record = top_level_record(&image, &object)?;
+    let record = top_level_record(&image, &object, settings)?;
     write_file_atomically(report, format!("{record}\n").as_bytes())
         .map_err(ComparisonReportError::Report)
 }
@@ -82,9 +83,14 @@ pub fn ready_image(mapped: &MappedFile) -> Result<Image<'_>, ReadyImageError> {
     Ok(image)
 }
 
-fn top_level_record(image: &Image<'_>, object: &[u8]) -> Result<Value, ComparisonReportError> {
+fn top_level_record(
+    image: &Image<'_>,
+    object: &[u8],
+    settings: ScanSettings<'_>,
+) -> Result<Value, ComparisonReportError> {
     let size = u64::try_from(object.len()).map_err(|_| ComparisonReportError::InputTooLarge)?;
-    let scanned = scan_top_level_object(image, object).map_err(ComparisonReportError::Scan)?;
+    let scanned =
+        scan_top_level_object(image, object, settings).map_err(ComparisonReportError::Scan)?;
     let type_name = scanned
         .kind
         .map(|kind| format_name(image, kind))

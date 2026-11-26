@@ -33,6 +33,7 @@ pub fn account_report(account: &Account, image: &[u8]) -> Result<Value, ImageErr
                         json!({
                             "subsignatures": group.subsignature_count(),
                             "counted_subsignatures": group.counted_subsignature_count(),
+                            "counted_matches_at_most": group.counted_matches_at_most(),
                             "second_pass_subsignatures": group.second_pass_subsignature_count(),
                         })
                     })

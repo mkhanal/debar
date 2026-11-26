@@ -11,8 +11,8 @@ use std::collections::BTreeSet;
 use debar_image::{
     Category, ContentSubsignature, CountComparison, CountTest, Expression, Image, ImageBuilder,
     InclusiveRange, Indicator, KindCondition, KindDescription, LogicalConditions, LogicalSignature,
-    MaskedByte, ObjectKind, OwnBytes, Pattern, PatternElement, Placement, RecognitionRank,
-    SignatureGroup, UnwantedCategory,
+    MaskedByte, ObjectKind, OwnBytes, PartMemory, Pattern, PatternElement, Placement,
+    RecognitionRank, SignatureGroup, UnwantedCategory,
 };
 use debar_matching::{
     GroupSelection, ObjectContext, PatternRequest, PatternScan, PatternSettings, ScanEnd,
@@ -576,4 +576,64 @@ fn potentially_unwanted_logical_signatures_need_the_setting_and_an_admitted_cate
     assert_eq!(with(true, UnwantedCategories::Containing(".Tool.")), 0);
     assert_eq!(with(true, UnwantedCategories::NotContaining(".Win.")), 0);
     assert_eq!(with(true, UnwantedCategories::NotContaining(".Tool.")), 1);
+}
+
+#[test]
+fn a_subsignature_in_parts_counts_every_completed_occurrence() {
+    let mut elements: Vec<PatternElement> = b"ABCD"
+        .iter()
+        .map(|byte| PatternElement::Byte(MaskedByte::exactly(*byte)))
+        .collect();
+    elements.push(PatternElement::PartBreak {
+        minimum: 2,
+        maximum: Some(6),
+    });
+    elements.extend(
+        b"xy"
+            .iter()
+            .map(|byte| PatternElement::Byte(MaskedByte::exactly(*byte))),
+    );
+    let pattern = Pattern {
+        before: None,
+        elements,
+        after: None,
+    };
+    let subsignatures = [ContentSubsignature {
+        placement: Placement::Anywhere,
+        patterns: vec![pattern],
+    }];
+    let expression = Expression::Subsignature {
+        index: 0,
+        count: Some(CountTest {
+            comparison: CountComparison::MoreThan(2),
+            distinct_at_least: 0,
+        }),
+    };
+    let mut builder = ImageBuilder::new();
+    builder
+        .add_logical_signature(&LogicalSignature {
+            group: GENERIC,
+            category: Category::Malware,
+            name: "Test.Parts",
+            indicator: Indicator::Strong,
+            expression: &expression,
+            subsignatures: &subsignatures,
+            conditions: &LogicalConditions::default(),
+        })
+        .unwrap();
+    builder.set_part_memory(GENERIC, PartMemory::FirstAndLatestEnds { latest: 8 });
+    builder.describe_object_kind(ObjectKind::BinaryData, binary_data());
+    let bytes = builder.finish().unwrap();
+    let image = Image::open(&bytes).unwrap();
+    let occurrence = b"ABCD...xy";
+    let spaced = |count: usize| {
+        let mut object = Vec::new();
+        for _ in 0..count {
+            object.extend_from_slice(occurrence);
+            object.extend_from_slice(&[b'.'; 9000]);
+        }
+        object
+    };
+    assert_eq!(detected(&image, &spaced(2)), Vec::<String>::new());
+    assert_eq!(detected(&image, &spaced(3)), ["Test.Parts"]);
 }

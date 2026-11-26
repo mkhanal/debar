@@ -380,3 +380,45 @@ pub fn median_seconds_to_scan_one_small_file(image: &Path, into: &Path) -> Outco
         .copied()
         .ok_or_else(|| Failure("hyperfine recorded no runs".to_owned()))
 }
+
+pub fn instructions_to_measure_scan(image: &Path, inputs: &[PathBuf], into: &Path) -> Outcome<u64> {
+    let profile = into.join("callgrind.out");
+    run(Command::new("valgrind")
+        .arg("--tool=callgrind")
+        .arg(format!("--callgrind-out-file={}", profile.display()))
+        .arg(&release_binaries()?.debar)
+        .arg("measure-scan")
+        .arg("--image")
+        .arg(image)
+        .args(inputs))?;
+    let text = fs::read_to_string(&profile)?;
+    text.lines()
+        .find_map(|line| {
+            line.strip_prefix("summary:")
+                .or_else(|| line.strip_prefix("totals:"))
+        })
+        .and_then(|count| count.trim().parse().ok())
+        .ok_or_else(|| Failure(format!("{} holds no instruction total", profile.display())))
+}
+
+pub fn comparison_report_with(
+    image: &Path,
+    options: &[&str],
+    input: &Path,
+    into: &Path,
+) -> Outcome<Value> {
+    let report = into.join("report.jsonl");
+    run(Command::new(&release_binaries()?.debar)
+        .arg("comparison-report")
+        .arg("--image")
+        .arg(image)
+        .args(options)
+        .arg(input)
+        .arg(&report))?;
+    let text = fs::read_to_string(&report)?;
+    let first = text
+        .lines()
+        .next()
+        .ok_or_else(|| Failure("the report is empty".to_owned()))?;
+    Ok(serde_json::from_str(first)?)
+}
