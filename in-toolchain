@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+repository="$(cd "$(dirname "$0")" && pwd)"
+
+if [ -n "${DEBAR_TOOLCHAIN_IMAGE:-}" ]; then
+    image="$DEBAR_TOOLCHAIN_IMAGE"
+elif [ -f "$repository/toolchain-image" ]; then
+    image="$(cat "$repository/toolchain-image")"
+else
+    echo "in-toolchain: $repository/toolchain-image is missing; publish the image with the toolchain-image workflow and commit its digest there, or set DEBAR_TOOLCHAIN_IMAGE" >&2
+    exit 1
+fi
+
+if [ "$#" -eq 0 ]; then
+    set -- bash
+fi
+
+set -- \
+    --volume "$repository:/work" \
+    --workdir /work \
+    --volume debar-cargo-registry:/usr/local/cargo/registry \
+    --volume debar-cargo-git:/usr/local/cargo/git \
+    --volume debar-cargo-advisory-dbs:/usr/local/cargo/advisory-dbs \
+    --env CARGO_TERM_COLOR \
+    --env GH_TOKEN \
+    "$image" "$@"
+
+git_common_directory="$(git -C "$repository" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+case "$git_common_directory" in
+    "" | "$repository/.git") ;;
+    *) set -- --volume "$git_common_directory:$git_common_directory" "$@" ;;
+esac
+
+if [ -t 0 ] && [ -t 1 ]; then
+    set -- --tty "$@"
+fi
+
+exec docker run --rm --interactive "$@"
