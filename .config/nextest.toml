@@ -1,0 +1,7 @@
+[test-groups]
+acceptance = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "package(acceptance)"
+test-group = "acceptance"
+slow-timeout = { period = "120s" }

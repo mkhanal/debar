@@ -25,3 +25,6 @@ unreachable = "deny"
 undocumented_unsafe_blocks = "deny"
 disallowed_methods = "allow"
 disallowed_types = "allow"
+
+[dependencies]
+memmap2.workspace = true

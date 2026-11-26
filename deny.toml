@@ -36,7 +36,7 @@ wildcards = "deny"
 allow-wildcard-paths = true
 highlight = "all"
 deny = [
-    { crate = "libc", reason = "reaches outside the process; only the platform crate may (Constitution §9)", wrappers = ["debar-platform", "nix", "rustix", "linux-raw-sys", "errno", "memmap2", "getrandom", "rand", "rand_core", "fastrand", "socket2", "mio", "tokio", "io-uring", "polling", "signal-hook", "tempfile"] },
+    { crate = "libc", reason = "reaches outside the process; only the platform crate may (Constitution §9); cpufeatures only asks the kernel which processor features exist", wrappers = ["debar-platform", "cpufeatures", "nix", "rustix", "linux-raw-sys", "errno", "memmap2", "getrandom", "rand", "rand_core", "fastrand", "socket2", "mio", "tokio", "io-uring", "polling", "signal-hook", "tempfile"] },
     { crate = "nix", reason = "reaches outside the process; only the platform crate may (Constitution §9)", wrappers = ["debar-platform", "libc", "rustix", "linux-raw-sys", "errno", "memmap2", "getrandom", "rand", "rand_core", "fastrand", "socket2", "mio", "tokio", "io-uring", "polling", "signal-hook", "tempfile"] },
     { crate = "rustix", reason = "reaches outside the process; only the platform crate may (Constitution §9)", wrappers = ["debar-platform", "libc", "nix", "linux-raw-sys", "errno", "memmap2", "getrandom", "rand", "rand_core", "fastrand", "socket2", "mio", "tokio", "io-uring", "polling", "signal-hook", "tempfile"] },
     { crate = "linux-raw-sys", reason = "reaches outside the process; only the platform crate may (Constitution §9)", wrappers = ["debar-platform", "libc", "nix", "rustix", "errno", "memmap2", "getrandom", "rand", "rand_core", "fastrand", "socket2", "mio", "tokio", "io-uring", "polling", "signal-hook", "tempfile"] },

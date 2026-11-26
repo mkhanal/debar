@@ -1,0 +1,46 @@
+[package]
+name = "debar-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+debar-clamav-signatures = { path = "../crates/clamav-signatures" }
+debar-image = { path = "../crates/image" }
+libfuzzer-sys = "=0.4.13"
+md-5 = { version = "=0.10.6", default-features = false }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "database_files"
+path = "../crates/clamav-signatures/fuzz_targets/database_files.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signed_container"
+path = "../crates/clamav-signatures/fuzz_targets/signed_container.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "image_open"
+path = "fuzz_targets/image_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "image_sections"
+path = "fuzz_targets/image_sections.rs"
+test = false
+doc = false
+bench = false

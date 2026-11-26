@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+part="$(cd "$(dirname "$0")" && pwd)"
+destination="${1:?usage: fetch-pinned-databases DIRECTORY}"
+image="$(cat "$part/pinned-databases-image")"
+databases_in_image=/var/lib/clamav
+
+if command -v sha256sum >/dev/null 2>&1; then
+    check_sums() { sha256sum --check --quiet "$1"; }
+else
+    check_sums() { shasum -a 256 --check --quiet "$1"; }
+fi
+
+if [ -d "$destination" ] && (cd "$destination" && check_sums "$part/pinned-databases.sha256") 2>/dev/null; then
+    exit 0
+fi
+
+mkdir -p "$destination"
+container="$(docker create "$image")"
+trap 'docker rm "$container" >/dev/null' EXIT
+while read -r _ file; do
+    docker cp --quiet "$container:$databases_in_image/$file" "$destination/$file"
+done < "$part/pinned-databases.sha256"
+(cd "$destination" && check_sums "$part/pinned-databases.sha256")
+echo "fetch-pinned-databases: the pinned databases are in $destination"

@@ -1,6 +1,16 @@
 [workspace]
 resolver = "3"
-members = ["crates/platform", "xtask"]
+members = [
+    "acceptance",
+    "crates/clamav-signatures",
+    "crates/compiler",
+    "crates/image",
+    "crates/interfaces",
+    "crates/matching",
+    "crates/platform",
+    "xtask",
+]
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2024"
@@ -9,7 +19,17 @@ license = "MPL-2.0"
 publish = false
 
 [workspace.dependencies]
+debar-clamav-signatures = { path = "crates/clamav-signatures" }
+debar-image = { path = "crates/image" }
+debar-matching = { path = "crates/matching" }
+debar-platform = { path = "crates/platform" }
+flate2 = { version = "=1.1.11", default-features = false, features = ["rust_backend"] }
+md-5 = { version = "=0.10.6", default-features = false }
+memmap2 = "=0.9.12"
 serde_json = "=1.0.154"
+sha1 = { version = "=0.10.7", default-features = false }
+sha2 = { version = "=0.10.9", default-features = false }
+zerocopy = { version = "=0.8.63", features = ["derive"] }
 toml = { version = "=1.2.1", default-features = false, features = ["parse", "serde", "std"] }
 
 [workspace.lints.rust]

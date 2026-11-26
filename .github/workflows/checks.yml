@@ -24,9 +24,33 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Fetch the pinned databases from the comparison harness's image
+        run: crates/clamav-signatures/fetch-pinned-databases target/pinned-databases
       - run: ./in-toolchain cargo xtask check
         env:
           GH_TOKEN: ${{ github.token }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: official-image-sha256-${{ matrix.runner }}
+          path: target/acceptance/official-image.sha256
+          if-no-files-found: error
+
+  same-image-on-every-platform:
+    name: the same image on amd64 and arm64
+    needs: check
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: official-image-sha256-*
+      - name: Compare the image digests
+        run: |
+          amd64="$(cat official-image-sha256-ubuntu-24.04/official-image.sha256)"
+          arm64="$(cat official-image-sha256-ubuntu-24.04-arm/official-image.sha256)"
+          echo "amd64: $amd64"
+          echo "arm64: $arm64"
+          test "$amd64" = "$arm64"
 
   miri:
     name: cargo xtask miri
@@ -38,3 +62,14 @@ jobs:
         with:
           persist-credentials: false
       - run: ./in-toolchain cargo xtask miri
+
+  fuzz:
+    name: cargo xtask fuzz
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: ./in-toolchain cargo xtask fuzz 30
