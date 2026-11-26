@@ -305,3 +305,28 @@ Each becomes a requirement in `specs/` with its married test in the piece that f
 | Start, readiness and one small scan | 3,335,557 instructions; 2.0 ms wall-clock median; 8 KiB of the image resident from a cold cache, 148 KiB private once ready |
 | Throughput, Debar against the reference (MiB/s, one thread) | system files 53.6 / 16.1; text 89.9 / 30.5; binary 93.5 / 26.8; PDF 65.8 / 25.3; OLE2 62.9 / 15.9; tar 73.9 / 28.5; gzip 89 / 32.4; tar.gz 90 / 30.9; ZIP 74 / 2.0; OOXML 75 / 2.0; HTML not matched raw / 14.2 |
 | Comparison | Inputs built from logical signatures: target 0, 749 of 750 detected (the other needs a regular expression); target 4, 5 of 5; targets 3 and 7 only through normalisation, judged by their own ratchets. Extended inputs of target 0 now all 40,001 detected |
+
+### 2026-11-27 — Regular expressions, byte comparisons, image hashes and container signatures, as built
+
+**Decision.** Slice 5 of the image and the matching engine is in place, with these settled where the design left them open:
+
+- **Regular expressions run in `regex-automata`** (`=0.4.18`, MIT or Apache-2.0, with `regex-syntax` `=0.8.11`), on bytes with Unicode off and leftmost-first matching, in linear time. The supervisor chose it to make progress; **the owner has not decided the engine**, and the choice is recorded as open in the study folder together with the alternatives.
+- **The part translates each pattern itself** into the engine's syntax tree, with the signature format's semantics written into the tree: ASCII-only classes and case folding, `.` short of a newline, the end of the subject also before a final newline, and the `U` flag swapping greed. A pattern needing a backreference, lookaround, an atomic group, a possessive quantifier, recursion, a conditional or a control verb is accounted as needing a backtracking engine and not loaded; on the pinned databases that is 56 lines (62 subsignatures). A pattern the format would refuse fails the compile.
+- **The image holds a section per group** of regular expressions (trigger, placement, flags, the stored pattern, and forward and reverse dense automata read in place when they fit in 256 KiB together), byte comparisons and a sorted table of image fuzzy hashes, and one section of container signatures with an automaton for each entry name, in the order they are tested. Automata start on 8-byte boundaries; where a mapping is not aligned, they are copied before use.
+- **Matching after the walk.** A scan whose groups hold any of these asks for the whole object once the passes are done (`ScanEnd::WholeObjectNeeded`), then, per group, applies byte comparisons, then image hashes, then regular expressions in load order, each counted as the format counts it, before evaluating. A signature holding one of these keeps every content subsignature in the main pass, so the second pass never depends on them.
+- **The regular-expression size limit** is a setting (`largest_object_for_regular_expressions`); `debar comparison-report` defaults it to the format's 104,857,600 bytes and takes `--largest-regular-expression-object`.
+- **The image fuzzy hash is a fact the caller supplies** (`PatternRequest::image_fuzzy_hash`); computing it is piece 6. **Container signatures are matched against entry facts the caller supplies** (`container_entry_detections`); parsing archives is piece 6. Both are tested with synthetic facts.
+- **Not kept across scans:** compiled patterns that are not in the image are compiled again in each scan that needs them (45 on the pinned databases). A bounded cache comes with the daemon if measurement asks for it.
+
+**Why.** A linear engine bounds the time any input can take (Constitution §8) and its automata can be shared from the image rather than built per process; translating the patterns in the part keeps the format out of the engine (§11).
+
+**Measured** on the pinned databases, in the toolchain image on an Apple Silicon Mac (aarch64 Linux VM):
+
+| Figure | Value |
+| --- | --- |
+| Logical lines | 322,340 compiled, 56 needing a backtracking engine, 7 ignored, none not yet compiled; 1,161 regular expressions (1,114 with automata in the image, 21 MB), 1 byte comparison, 109 image fuzzy hashes |
+| Container signatures | 133 compiled, 2 ignored; section 1.2 MB |
+| Image | 488 MB; compile 15.6 s (`hyperfine`, 3 runs) |
+| Start, readiness and one small scan | 4,053,061 instructions; 8 KiB of the image resident from a cold cache, 184 KiB private once ready |
+| Throughput, share of the budget (twice the reference) | text 77 %, binary 67 %, PDF 86 %, OLE2 55 %, tar 70 %, system files 54 % |
+| Comparison | The 27 acceptance cases for regular expressions and byte comparisons gave the same detections in both scanners |
