@@ -115,3 +115,21 @@ Compatibility is not copying: it is stated as the surface a user sees (commands,
 **Decision.** The harness that runs a reference scanner beside Debar lives in its own public repository, one per signature format. Debar's CI calls it as a reusable workflow pinned to a commit, against the change under test. It runs the reference scanner from its pinned image as a black box, through its public interfaces, and compares what a user or signature could observe. The databases come from that pinned image, never from the publisher's servers. How a reference scanner works inside stays in the private study folder.
 
 **Why.** Comparison on every change, on free public runners, without the reference scanner's name or image entering this repository (Constitution §4) or any format entering the engine's repository (Constitution §11). The harness's own design is settled with piece 2.
+
+### 2026-11-27 — The toolkit, as set up
+
+**Decision.** The toolkit of the entry above is in place, with these settled while setting it up:
+
+- **The image** is published by the `toolchain-image` workflow to `ghcr.io/mkhanal/debar-toolchain`, built natively on each architecture, and run by the digest committed in `toolchain-image`. `./in-toolchain` runs any command in it, locally and in CI.
+- **The gates' exemption** for the platform crate is in its own lint table, not a `clippy.toml` beside it. The workspace forbids `unsafe_code`, `disallowed_methods` and `disallowed_types`, so no crate can allow them with an attribute; only the platform crate and `xtask` keep their own lint table, and `cargo xtask lint-tables` checks that each equals the workspace's but for its exemptions.
+- **`missing_errors_doc` and `missing_panics_doc` are allowed.** Both are in clippy pedantic and demand doc comments, which the no-comments rule forbids.
+- **The layer table** is `xtask/src/layers.rs`. It names each layer's crate (`debar-interfaces`, `debar-scan`, `debar-formats`, `debar-matching`, `debar-image`, `debar-platform`) and the tools beside the layers (`debar-compiler`, `debar-updater`), so every crate is placed before it is used.
+- **A married test** for `specs/<stem>.lazyspec.md` is `<crate>/tests/<stem>_lazyspec.rs`, holding each requirement's text word for word.
+
+**Why.** Each of these is the smallest arrangement that makes the rule a machine check rather than a review comment.
+
+**What setting up found,** answering the three items the entry above left unverified:
+
+- **Clippy reads a separate `clippy.toml` per crate.** It takes the nearest one to the crate and does not merge it with the root's, so a crate with its own file silently drops every gate. `cargo xtask lint-tables` therefore rejects any `clippy.toml` but the root's.
+- **rust-lld is the default linker on amd64 Linux but not on arm64 Linux.** With Rust 1.100.0, `cargo rustc -- --print link-args` shows `-fuse-ld=lld` on `x86_64-unknown-linux-gnu` and the system linker through `cc` on `aarch64-unknown-linux-gnu`.
+- **cargo-deny's `wrappers` expresses every rule between crates that exist and are named in `deny.toml`,** for normal, build and dev dependencies between workspace crates alike. It cannot reject a crate missing from the table, which `cargo xtask layers` does, and it does not know the table, so `cargo xtask layers` also checks that `deny.toml`'s wrappers match it.

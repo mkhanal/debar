@@ -73,4 +73,27 @@ Use these words in code, specifications and documents, and no second word for th
 
 ## Commands
 
-The repository holds no Rust code yet. Build, lint and test commands are added here with the first crate.
+Everything builds and runs inside the toolchain image, on CI and on a developer machine alike; nothing needs Rust installed on the host. `./in-toolchain` runs any command in that image with the repository at `/work` and Cargo's caches in named Docker volumes. It needs Docker (on macOS, a Linux virtual machine such as OrbStack or Docker Desktop).
+
+| To… | Run |
+| --- | --- |
+| run every check a change must pass | `./in-toolchain cargo xtask check` |
+| run one of them | `./in-toolchain cargo xtask <check>`, where `<check>` is `format`, `lints`, `tests`, `dependencies`, `lint-tables`, `layers`, `reference-mentions`, `requirements` or `workflows` |
+| run the platform crate's tests under Miri | `./in-toolchain cargo xtask miri` |
+| check that a release may be cut | `./in-toolchain cargo xtask release-check` |
+| format the code | `./in-toolchain cargo fmt --all` |
+| open a shell in the image | `./in-toolchain` |
+
+What each check enforces:
+
+- **format**, **lints**, **tests**: `cargo fmt --check`, `cargo clippy` with warnings denied, `cargo nextest run`. The lints include the gates (Constitution §9): `clippy.toml` disallows files, sockets, processes, the environment, the clock, memory maps and randomness, and only the platform crate allows them.
+- **dependencies**: `cargo deny check` against `deny.toml` (licences from "Depend with care", crates.io as the only source, advisories, and bans that let only the platform crate depend on crates that reach outside the process), and every dependency naming one exact `=` version. Cargo refuses any version published less than 14 days ago (`.cargo/config.toml`).
+- **lint-tables**: every crate inherits `[workspace.lints]`, which forbids `unsafe_code` and the gate lints; only the exemptions in `xtask/src/lint_tables.rs` (the platform crate, and `xtask` for the gates) keep their own table, equal to the workspace's but for those lints. One `clippy.toml`, at the root.
+- **layers**: every crate is placed in the layer table in `xtask/src/layers.rs`, depends only on what that table allows (Constitution §10), and `deny.toml` bans each layer crate with exactly the dependents the table allows.
+- **reference-mentions**: no tracked file names a reference scanner outside the paths listed in `xtask/src/reference_mentions.rs` (Constitution §4).
+- **requirements**: every requirement in `specs/*.lazyspec.md` appears word for word in its one married test file, `<crate>/tests/<stem>_lazyspec.rs`, with the specification's stem joined by underscores. Put the requirement's text in the test, for example as the string a test asserts it proves.
+- **workflows**: `zizmor` over `.github/workflows`.
+
+CI (`.github/workflows/checks.yml`) runs `./in-toolchain cargo xtask check` on amd64 and arm64 and `cargo xtask miri` for every push and pull request, so a change that passes locally passes there.
+
+**The image.** `toolchain.Dockerfile` defines it; `toolchain-image` holds the published image's digest, which `./in-toolchain` runs. To change the image, edit the Dockerfile (or `rust-toolchain-nightly`, the one nightly used for Miri, fuzzing and sanitizers), try it locally with `docker build -f toolchain.Dockerfile -t debar-toolchain:local .` and `DEBAR_TOOLCHAIN_IMAGE=debar-toolchain:local ./in-toolchain cargo xtask check`, then push: the `toolchain-image` workflow builds both architectures, publishes them to `ghcr.io/mkhanal/debar-toolchain`, and prints the line to commit to `toolchain-image`. Keep the Rust version in the Dockerfile's base image and in `rust-toolchain.toml` the same.

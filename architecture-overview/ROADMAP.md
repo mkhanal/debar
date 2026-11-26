@@ -6,7 +6,10 @@ The pieces Debar is built from, their order, and what exists today. Each piece g
 
 - The governing documents in this repository.
 - The study folder for the first signature format, with its reference scanner and databases pinned and a first set of notes.
-- No Rust code, no build, and none of the checks listed under "Checks to build".
+- The toolchain image (`toolchain.Dockerfile`) and `./in-toolchain`, which runs any command in it, locally as in CI.
+- A Cargo workspace on Rust 1.100.0 with one crate, the platform layer's `debar-platform`, which holds no code yet, and the `xtask` crate.
+- `cargo xtask check`, run on every push and pull request on amd64 and arm64: formatting, lints (including the gates), tests, dependencies (exact versions, licences, sources, advisories, and bans that keep outside resources in the platform crate and layers in order), the lint tables that confine `unsafe` to the platform crate, the layer table, mentions of a reference scanner, requirements married to tests, and the workflows. Miri runs on the platform crate on every change.
+- `cargo xtask release-check`, which fails while "Borrowed pieces" lists anything.
 
 ## The pieces, in order
 
@@ -58,13 +61,10 @@ Ideas for inside the layers. None is decided; each is settled in the design of i
 
 ## Checks to build
 
-Rules that are written down but not yet enforced by a machine. Each is built in piece 1 and removed from this list when it runs on every change.
+Rules that are written down but not yet enforced by a machine. Each is removed from this list when it runs on every change.
 
-- Formatting, lints and the test suite, on every change.
-- Exact dependency versions and allowed licences (`CODING-GUIDELINES.md`, "Depend with care").
-- The gates: no file, memory map, socket, clock or random number outside the platform layer (Constitution §9).
-- `unsafe` only in the platform layer.
-- Layers depend downward only (Constitution §10).
-- No committed file mentions a reference scanner beyond its supported signature format and its compatibility surface (Constitution §4).
-- Every requirement is married to a test (`/lazyspec-validate`).
-- No release while "Borrowed pieces" has an entry (Constitution §13).
+- Every format module is fuzzed (Constitution §8). ClusterFuzzLite arrives with the first format module, on every change, with longer runs weekly.
+- Audits of every dependency with cargo-vet. The tool is in the toolchain image; the audit set is started with the first dependency linked into a release.
+- Mutation testing with cargo-mutants and coverage with cargo-llvm-cov, weekly. Both tools are in the toolchain image.
+- Resource budgets (Constitution §12), gated on instruction counts, allocations and proportional set size, once a requirement states one.
+- No release while "Borrowed pieces" has an entry (Constitution §13): `cargo xtask release-check` exists and runs in the release workflow, which comes with the first release.
