@@ -9,11 +9,12 @@ use acceptance::{
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-const HASH_LINE_OUTCOMES: [&str; 4] = [
+const HASH_LINE_OUTCOMES: [&str; 5] = [
     "compiled",
     "outside_functionality_level",
     "ignored",
     "comment",
+    "shadowed_by_duplicate",
 ];
 
 fn is_hash_file(kind: &str) -> bool {
@@ -131,24 +132,23 @@ fn the_same_databases_always_compile_to_the_same_image_byte_for_byte() {
     .unwrap();
 }
 
-const EXTENDED_LINE_OUTCOMES: [&str; 8] = [
+const EXTENDED_LINE_OUTCOMES: [&str; 6] = [
     "compiled",
     "outside_functionality_level",
     "ignored",
     "comment",
     "target_not_loaded",
     "never_reports",
-    "needs_executable_facts",
-    "not_yet_compiled",
 ];
 
-fn targets_any_file_type(line: &[u8]) -> bool {
-    if line.is_empty() {
-        return false;
-    }
-    let target = line.split(|byte| *byte == b':').nth(1).unwrap_or_default();
-    matches!(target, b"0" | b"*" | b"")
-}
+const FILE_TYPE_LINE_OUTCOMES: [&str; 4] = [
+    "compiled",
+    "outside_functionality_level",
+    "comment",
+    "not_a_signature",
+];
+
+const FILE_TYPE_LINES_THE_REFERENCE_SCANNER_LOADS: u64 = 256;
 
 #[test]
 fn every_extended_signature_line_in_the_pinned_databases_is_accounted_for_in_the_image() {
@@ -187,16 +187,16 @@ fn every_extended_signature_line_in_the_pinned_databases_is_accounted_for_in_the
             .iter()
             .map(|line| usize::try_from(line["line"].as_u64().unwrap()).unwrap())
             .collect();
-        let loaded_any_type = member
+        let loaded = member
             .contents
             .split(|byte| *byte == b'\n')
             .zip(1usize..)
-            .filter(|(line, number)| targets_any_file_type(line) && !left_out.contains(number))
+            .filter(|(line, number)| !line.is_empty() && !left_out.contains(number))
             .count();
         assert_eq!(
             count(outcomes, "compiled"),
-            u64::try_from(loaded_any_type).unwrap(),
-            "{REQUIREMENT}: every loaded line of {} for any file type is compiled",
+            u64::try_from(loaded).unwrap(),
+            "{REQUIREMENT}: every loaded line of {} is compiled",
             member.member
         );
         compiled_lines += count(outcomes, "compiled");
@@ -218,6 +218,52 @@ fn every_extended_signature_line_in_the_pinned_databases_is_accounted_for_in_the
         .sum();
     assert_eq!(
         image_signatures, compiled_lines,
+        "{REQUIREMENT}: one image entry per compiled line"
+    );
+}
+
+#[test]
+fn every_file_type_line_in_the_pinned_databases_is_accounted_for_in_the_image() {
+    const REQUIREMENT: &str =
+        "Every File-Type Line In The Pinned Databases Is Accounted For In The Image";
+    let compiled = official_image().unwrap();
+    let files = compiled.account["files"].as_array().unwrap();
+    let members = members_of_pinned_databases(&pinned_databases().unwrap()).unwrap();
+    let mut compiled_lines = 0u64;
+    for file in files.iter().filter(|file| file["kind"] == "file types") {
+        let member = members
+            .iter()
+            .find(|member| member.member == file["member"].as_str().unwrap())
+            .unwrap();
+        let outcomes = &file["outcomes"];
+        let accounted: u64 = FILE_TYPE_LINE_OUTCOMES
+            .iter()
+            .map(|outcome| count(outcomes, outcome))
+            .sum();
+        assert_eq!(
+            accounted,
+            u64::try_from(member.lines).unwrap(),
+            "{REQUIREMENT}: every line of {} has one outcome",
+            member.member
+        );
+        compiled_lines += count(outcomes, "compiled");
+    }
+    assert_eq!(
+        compiled_lines, FILE_TYPE_LINES_THE_REFERENCE_SCANNER_LOADS,
+        "{REQUIREMENT}: every loaded line is compiled"
+    );
+    let items_in = |kind: &str| -> u64 {
+        compiled.account["image"]["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|section| section["kind"] == kind)
+            .map(|section| section["items"].as_u64().unwrap())
+            .sum()
+    };
+    assert_eq!(
+        items_in("type magic") + items_in("type recognition signatures"),
+        compiled_lines,
         "{REQUIREMENT}: one image entry per compiled line"
     );
 }

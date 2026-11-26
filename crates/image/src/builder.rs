@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use sha2::{Digest as _, Sha256};
@@ -11,12 +11,16 @@ use crate::layout::{
     LAYOUT_VERSION, MAGIC, SECTION_ALIGNMENT, SectionKind,
 };
 use crate::model::{
-    Category, DatabaseRecord, Digest, HashSignature, HashedSize, Indicator, PatternSignature,
-    Placement, Provenance, ReportWindows,
+    Category, DatabaseRecord, Digest, HashSignature, HashedSize, Indicator, PartMemory,
+    PatternOutcome, PatternSignature, Placement, Provenance, ReportWindows, SignatureGroup,
+    TypeFinding,
 };
 use crate::names::{self, NameId};
-use crate::pattern_group::{self, GroupNotBuilt, PendingPatternSignature};
+use crate::object_kind::ObjectKind;
+use crate::object_kinds::{self, KindDescription, KindsNotBuilt, TypingRules};
+use crate::pattern_group::{self, GroupNotBuilt, PendingPatternSignature, RecordedOutcome};
 use crate::pattern_program::{PatternNotCompiled, Segment, segments_of};
+use crate::type_magic::{self, MagicTable, PendingMagic};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum BuildError {
@@ -35,7 +39,12 @@ pub enum BuildError {
         name: String,
         reason: PatternNotCompiled,
     },
-    PatternGroup(GroupNotBuilt),
+    PatternGroup {
+        group: SignatureGroup,
+        reason: GroupNotBuilt,
+    },
+    ObjectKinds(KindsNotBuilt),
+    TypeMagicTooLarge,
     Names,
     TooManySections,
 }
@@ -64,8 +73,19 @@ impl fmt::Display for BuildError {
                     "cannot compile the pattern of {name:?}: {reason:?}"
                 )
             }
-            Self::PatternGroup(reason) => {
-                write!(formatter, "cannot build the pattern signatures: {reason:?}")
+            Self::PatternGroup { group, reason } => write!(
+                formatter,
+                "cannot build the pattern signatures of group {}: {reason:?}",
+                group.0
+            ),
+            Self::ObjectKinds(reason) => {
+                write!(formatter, "cannot build the object kinds: {reason:?}")
+            }
+            Self::TypeMagicTooLarge => {
+                write!(
+                    formatter,
+                    "the type magic is larger than the image can hold"
+                )
             }
             Self::Names => write!(formatter, "cannot build the names section"),
             Self::TooManySections => write!(
@@ -79,9 +99,20 @@ impl fmt::Display for BuildError {
 impl std::error::Error for BuildError {}
 
 struct PendingHash {
+    id: HashEntryId,
     size: HashedSize,
     digest: Digest,
     name: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HashEntryId(pub u32);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashBucket {
+    pub key: PartitionKey,
+    pub size: HashedSize,
+    pub entries_in_load_order: Vec<(HashEntryId, Digest)>,
 }
 
 #[derive(Default)]
@@ -90,12 +121,37 @@ pub struct ImageBuilder {
     name_text: String,
     name_spans: Vec<NameSpan>,
     partitions: BTreeMap<PartitionKey, Vec<PendingHash>>,
+    hash_count: u32,
+    withdrawn_hashes: BTreeSet<HashEntryId>,
+    groups: BTreeMap<SignatureGroup, PendingGroup>,
+    kinds: BTreeMap<ObjectKind, KindDescription>,
+    typing: Option<TypingRules>,
+    magic: Vec<PendingMagic>,
+}
+
+struct PendingGroup {
     patterns: Vec<PendingPattern>,
     report_windows: Option<ReportWindows>,
+    part_memory: PartMemory,
+}
+
+impl Default for PendingGroup {
+    fn default() -> Self {
+        Self {
+            patterns: Vec::new(),
+            report_windows: None,
+            part_memory: PartMemory::EarliestEnd,
+        }
+    }
+}
+
+enum PendingOutcome {
+    Detection(u32),
+    TypeFound(TypeFinding),
 }
 
 struct PendingPattern {
-    name: u32,
+    outcome: PendingOutcome,
     category: Category,
     placement: Placement,
     report_rank: u8,
@@ -148,37 +204,122 @@ impl ImageBuilder {
         signature: &PatternSignature<'_>,
     ) -> Result<(), BuildError> {
         let segments = segments_of(signature.pattern).map_err(|reason| BuildError::Pattern {
-            name: signature.name.to_owned(),
+            name: match signature.outcome {
+                PatternOutcome::Detection { name, .. } => name.to_owned(),
+                PatternOutcome::TypeFound(finding) => format!("{finding:?}"),
+            },
             reason,
         })?;
-        let name = self.add_name(signature.name, signature.indicator)?;
-        self.patterns.push(PendingPattern {
-            name,
-            category: signature.category,
-            placement: signature.placement,
-            report_rank: signature.report_rank,
-            segments,
-        });
+        let outcome = match signature.outcome {
+            PatternOutcome::Detection { name, indicator } => {
+                PendingOutcome::Detection(self.add_name(name, indicator)?)
+            }
+            PatternOutcome::TypeFound(finding) => PendingOutcome::TypeFound(finding),
+        };
+        self.groups
+            .entry(signature.group)
+            .or_default()
+            .patterns
+            .push(PendingPattern {
+                outcome,
+                category: signature.category,
+                placement: signature.placement,
+                report_rank: signature.report_rank,
+                segments,
+            });
         Ok(())
     }
 
-    pub fn set_report_windows(&mut self, windows: ReportWindows) {
-        self.report_windows = Some(windows);
+    pub fn set_report_windows(&mut self, group: SignatureGroup, windows: ReportWindows) {
+        self.groups.entry(group).or_default().report_windows = Some(windows);
     }
 
-    pub fn add_hash_signature(&mut self, signature: &HashSignature<'_>) -> Result<(), BuildError> {
+    pub fn set_part_memory(&mut self, group: SignatureGroup, memory: PartMemory) {
+        self.groups.entry(group).or_default().part_memory = memory;
+    }
+
+    pub fn describe_object_kind(&mut self, kind: ObjectKind, description: KindDescription) {
+        self.kinds.insert(kind, description);
+    }
+
+    pub fn set_typing(&mut self, rules: TypingRules) {
+        self.typing = Some(rules);
+    }
+
+    pub fn add_type_magic(
+        &mut self,
+        table: MagicTable,
+        offset: u32,
+        bytes: &[u8],
+        found: ObjectKind,
+    ) {
+        self.magic.push(PendingMagic {
+            table,
+            offset,
+            bytes: bytes.to_vec(),
+            found,
+        });
+    }
+
+    pub fn add_hash_signature(
+        &mut self,
+        signature: &HashSignature<'_>,
+    ) -> Result<HashEntryId, BuildError> {
         let name = self.add_name(signature.name, signature.indicator)?;
         let key = PartitionKey {
             purpose: signature.purpose,
             category: signature.category,
             algorithm: signature.digest.algorithm(),
         };
+        let id = HashEntryId(self.hash_count);
+        self.hash_count = self
+            .hash_count
+            .checked_add(1)
+            .ok_or(BuildError::TooManySignatures)?;
         self.partitions.entry(key).or_default().push(PendingHash {
+            id,
             size: signature.size,
             digest: signature.digest,
             name,
         });
-        Ok(())
+        Ok(id)
+    }
+
+    #[must_use]
+    pub fn hash_buckets_with_repeated_keys(&self) -> Vec<HashBucket> {
+        let mut buckets = Vec::new();
+        for (key, pending) in &self.partitions {
+            let mut by_key: Vec<&PendingHash> = pending.iter().collect();
+            by_key.sort_by_key(|hash| (hash.size, hash.digest));
+            let mut sizes_with_repeats: Vec<HashedSize> = by_key
+                .windows(2)
+                .filter_map(|pair| match pair {
+                    [earlier, later]
+                        if earlier.size == later.size && earlier.digest == later.digest =>
+                    {
+                        Some(earlier.size)
+                    }
+                    _ => None,
+                })
+                .collect();
+            sizes_with_repeats.dedup();
+            for size in sizes_with_repeats {
+                buckets.push(HashBucket {
+                    key: *key,
+                    size,
+                    entries_in_load_order: pending
+                        .iter()
+                        .filter(|hash| hash.size == size)
+                        .map(|hash| (hash.id, hash.digest))
+                        .collect(),
+                });
+            }
+        }
+        buckets
+    }
+
+    pub fn withdraw_hash_signatures(&mut self, ids: impl IntoIterator<Item = HashEntryId>) {
+        self.withdrawn_hashes.extend(ids);
     }
 
     pub fn finish(self) -> Result<Vec<u8>, BuildError> {
@@ -187,102 +328,145 @@ impl ImageBuilder {
             name_text,
             name_spans,
             partitions,
-            patterns,
-            report_windows,
+            hash_count: _,
+            withdrawn_hashes,
+            groups,
+            kinds,
+            typing,
+            magic,
         } = self;
         let (sorted_names, name_ids) = distinct_sorted_names(&name_text, &name_spans)?;
-        let mut size_sections = Vec::new();
-        let mut filter_sections = Vec::new();
-        let mut entry_sections = Vec::new();
-        for (key, pending) in partitions {
-            let entries = pending
-                .into_iter()
-                .map(|hash| {
-                    Ok(PendingEntry {
-                        size: hash.size,
-                        digest: hash.digest.bytes().to_vec(),
-                        name: *usize::try_from(hash.name)
-                            .ok()
-                            .and_then(|index| name_ids.get(index))
-                            .ok_or(BuildError::Names)?,
-                    })
-                })
-                .collect::<Result<Vec<_>, BuildError>>()?;
-            let built = hash_partition::build(key.algorithm, entries).map_err(|reason| {
-                BuildError::HashPartition {
-                    key,
-                    reason: match reason {
-                        PartitionNotBuilt::TooLarge => "too many entries".to_owned(),
-                        PartitionNotBuilt::Filter(_) => {
-                            "the filter could not be constructed".to_owned()
-                        }
-                    },
-                }
-            })?;
-            let item_count =
-                u64::try_from(built.entry_count).map_err(|_| BuildError::TooManySignatures)?;
-            let qualifier = key.qualifier();
-            size_sections.push(Section {
-                kind: SectionKind::HashSizes,
-                qualifier,
-                item_count,
-                bytes: built.sizes,
-            });
-            filter_sections.push(Section {
-                kind: SectionKind::HashFilter,
-                qualifier,
-                item_count,
-                bytes: built.filter,
-            });
-            entry_sections.push(Section {
-                kind: SectionKind::HashEntries,
-                qualifier,
-                item_count,
-                bytes: built.entries,
+        let hash_sections = hash_sections(partitions, &withdrawn_hashes, &name_ids)?;
+        let pattern_sections = pattern_sections(groups, &name_ids)?;
+        let mut sections = vec![databases_section(&databases)?];
+        if !kinds.is_empty() || typing.is_some() {
+            sections.push(Section {
+                kind: SectionKind::ObjectKinds,
+                qualifier: 0,
+                item_count: u64::try_from(kinds.len()).map_err(|_| BuildError::TooManySections)?,
+                bytes: object_kinds::build(&kinds, typing).map_err(BuildError::ObjectKinds)?,
             });
         }
-        let pattern_section = if patterns.is_empty() {
-            None
-        } else {
-            let pending = patterns
-                .into_iter()
-                .map(|pattern| {
-                    Ok(PendingPatternSignature {
-                        name: *usize::try_from(pattern.name)
-                            .ok()
-                            .and_then(|index| name_ids.get(index))
-                            .ok_or(BuildError::Names)?,
-                        category: pattern.category,
-                        placement: pattern.placement,
-                        report_rank: pattern.report_rank,
-                        segments: pattern.segments,
-                    })
-                })
-                .collect::<Result<Vec<_>, BuildError>>()?;
-            let built =
-                pattern_group::build(&pending, report_windows).map_err(BuildError::PatternGroup)?;
-            Some(Section {
-                kind: SectionKind::PatternGroup,
+        if !magic.is_empty() {
+            sections.push(Section {
+                kind: SectionKind::TypeMagic,
                 qualifier: 0,
-                item_count: u64::try_from(built.signature_count)
-                    .map_err(|_| BuildError::TooManySignatures)?,
-                bytes: built.bytes,
-            })
-        };
-        let names_section = Section {
+                item_count: u64::try_from(magic.len())
+                    .map_err(|_| BuildError::TypeMagicTooLarge)?,
+                bytes: type_magic::build(&magic).map_err(|_| BuildError::TypeMagicTooLarge)?,
+            });
+        }
+        sections.extend(pattern_sections);
+        sections.extend(hash_sections);
+        sections.push(Section {
             kind: SectionKind::Names,
             qualifier: 0,
             item_count: u64::try_from(sorted_names.len()).map_err(|_| BuildError::Names)?,
             bytes: names::build(&sorted_names).map_err(|_| BuildError::Names)?,
-        };
-        let mut sections = vec![databases_section(&databases)?];
-        sections.extend(pattern_section);
-        sections.extend(size_sections);
-        sections.extend(filter_sections);
-        sections.extend(entry_sections);
-        sections.push(names_section);
+        });
         assemble(&sections)
     }
+}
+
+fn name_id(name_ids: &[NameId], pending: u32) -> Result<NameId, BuildError> {
+    usize::try_from(pending)
+        .ok()
+        .and_then(|index| name_ids.get(index))
+        .copied()
+        .ok_or(BuildError::Names)
+}
+
+fn hash_sections(
+    partitions: BTreeMap<PartitionKey, Vec<PendingHash>>,
+    withdrawn: &BTreeSet<HashEntryId>,
+    name_ids: &[NameId],
+) -> Result<Vec<Section>, BuildError> {
+    let mut size_sections = Vec::new();
+    let mut filter_sections = Vec::new();
+    let mut entry_sections = Vec::new();
+    for (key, pending) in partitions {
+        let entries = pending
+            .into_iter()
+            .filter(|hash| !withdrawn.contains(&hash.id))
+            .map(|hash| {
+                Ok(PendingEntry {
+                    size: hash.size,
+                    digest: hash.digest.bytes().to_vec(),
+                    name: name_id(name_ids, hash.name)?,
+                })
+            })
+            .collect::<Result<Vec<_>, BuildError>>()?;
+        let built = hash_partition::build(key.algorithm, entries).map_err(|reason| {
+            BuildError::HashPartition {
+                key,
+                reason: match reason {
+                    PartitionNotBuilt::TooLarge => "too many entries".to_owned(),
+                    PartitionNotBuilt::Filter(_) => {
+                        "the filter could not be constructed".to_owned()
+                    }
+                },
+            }
+        })?;
+        let item_count =
+            u64::try_from(built.entry_count).map_err(|_| BuildError::TooManySignatures)?;
+        let qualifier = key.qualifier();
+        let section = |kind, bytes| Section {
+            kind,
+            qualifier,
+            item_count,
+            bytes,
+        };
+        size_sections.push(section(SectionKind::HashSizes, built.sizes));
+        filter_sections.push(section(SectionKind::HashFilter, built.filter));
+        entry_sections.push(section(SectionKind::HashEntries, built.entries));
+    }
+    size_sections.extend(filter_sections);
+    size_sections.extend(entry_sections);
+    Ok(size_sections)
+}
+
+fn pattern_sections(
+    groups: BTreeMap<SignatureGroup, PendingGroup>,
+    name_ids: &[NameId],
+) -> Result<Vec<Section>, BuildError> {
+    let mut sections = Vec::with_capacity(groups.len());
+    for (group, pending_group) in groups {
+        if pending_group.patterns.is_empty() {
+            continue;
+        }
+        let pending = pending_group
+            .patterns
+            .into_iter()
+            .map(|pattern| {
+                Ok(PendingPatternSignature {
+                    outcome: match pattern.outcome {
+                        PendingOutcome::Detection(name) => {
+                            RecordedOutcome::Detection(name_id(name_ids, name)?)
+                        }
+                        PendingOutcome::TypeFound(finding) => RecordedOutcome::TypeFound(finding),
+                    },
+                    category: pattern.category,
+                    placement: pattern.placement,
+                    report_rank: pattern.report_rank,
+                    segments: pattern.segments,
+                })
+            })
+            .collect::<Result<Vec<_>, BuildError>>()?;
+        let built = pattern_group::build(
+            &pending,
+            pending_group.report_windows,
+            pending_group.part_memory,
+        )
+        .map_err(|reason| BuildError::PatternGroup { group, reason })?;
+        sections.push(Section {
+            kind: SectionKind::PatternGroup,
+            qualifier: group.0,
+            item_count: u64::try_from(built.signature_count)
+                .map_err(|_| BuildError::TooManySignatures)?,
+            bytes: built.bytes,
+        });
+    }
+    Ok(sections)
 }
 
 type DistinctNames<'a> = (Vec<(&'a str, Indicator)>, Vec<NameId>);

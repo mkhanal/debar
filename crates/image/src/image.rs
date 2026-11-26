@@ -10,9 +10,11 @@ use crate::layout::{
     BYTE_ORDER_MARK, CHECKSUM_LENGTH, DatabaseEntry, DirectoryEntry, Header, LAYOUT_VERSION, MAGIC,
     SECTION_ALIGNMENT, SectionKind,
 };
-use crate::model::{DatabaseRecord, Provenance, SignatureName};
+use crate::model::{DatabaseRecord, Provenance, SignatureGroup, SignatureName};
 use crate::names::{NameId, NamesMalformed, NamesView};
+use crate::object_kinds::{KindsMalformed, ObjectKinds};
 use crate::pattern_group::{GroupMalformed, PatternGroup};
+use crate::type_magic::{MagicMalformed, TypeMagic};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ImageError {
@@ -51,7 +53,12 @@ pub enum ImageError {
         reason: PartitionMalformed,
     },
     NamesMalformed(NamesMalformed),
-    PatternGroupMalformed(GroupMalformed),
+    PatternGroupMalformed {
+        group: SignatureGroup,
+        reason: GroupMalformed,
+    },
+    ObjectKindsMalformed(KindsMalformed),
+    TypeMagicMalformed(MagicMalformed),
 }
 
 impl fmt::Display for ImageError {
@@ -99,11 +106,16 @@ impl fmt::Display for ImageError {
             Self::NamesMalformed(reason) => {
                 write!(formatter, "the names section is malformed: {reason:?}")
             }
-            Self::PatternGroupMalformed(reason) => {
-                write!(
-                    formatter,
-                    "the pattern signatures are malformed: {reason:?}"
-                )
+            Self::PatternGroupMalformed { group, reason } => write!(
+                formatter,
+                "the pattern signatures of group {} are malformed: {reason:?}",
+                group.0
+            ),
+            Self::ObjectKindsMalformed(reason) => {
+                write!(formatter, "the object kinds are malformed: {reason:?}")
+            }
+            Self::TypeMagicMalformed(reason) => {
+                write!(formatter, "the type magic is malformed: {reason:?}")
             }
         }
     }
@@ -216,11 +228,28 @@ impl<'m> Image<'m> {
             .map_err(|reason| ImageError::HashPartitionMalformed { key, reason })
     }
 
-    pub fn pattern_group(&self) -> Result<Option<PatternGroup<'m>>, ImageError> {
-        self.optional_section_bytes(SectionKind::PatternGroup, 0)
+    pub fn pattern_group(
+        &self,
+        group: SignatureGroup,
+    ) -> Result<Option<PatternGroup<'m>>, ImageError> {
+        self.optional_section_bytes(SectionKind::PatternGroup, group.0)
             .map(PatternGroup::read)
             .transpose()
-            .map_err(ImageError::PatternGroupMalformed)
+            .map_err(|reason| ImageError::PatternGroupMalformed { group, reason })
+    }
+
+    pub fn object_kinds(&self) -> Result<Option<ObjectKinds<'m>>, ImageError> {
+        self.optional_section_bytes(SectionKind::ObjectKinds, 0)
+            .map(ObjectKinds::read)
+            .transpose()
+            .map_err(ImageError::ObjectKindsMalformed)
+    }
+
+    pub fn type_magic(&self) -> Result<Option<TypeMagic<'m>>, ImageError> {
+        self.optional_section_bytes(SectionKind::TypeMagic, 0)
+            .map(TypeMagic::read)
+            .transpose()
+            .map_err(ImageError::TypeMagicMalformed)
     }
 
     pub fn signature_name(&self, id: NameId) -> Result<SignatureName, ImageError> {

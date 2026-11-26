@@ -56,6 +56,7 @@ pub enum Anchor {
 pub struct Segment {
     steps: Vec<Step>,
     pub gap_before: u32,
+    pub gap_most: Option<u32>,
     pub shortest: u32,
     pub longest: u32,
     pub anchor: Anchor,
@@ -81,7 +82,7 @@ fn context_reach(test: Option<&ContextTest>) -> u32 {
 }
 
 pub fn segments_of(pattern: &Pattern) -> Result<Vec<Segment>, PatternNotCompiled> {
-    let mut pieces: Vec<(u32, Vec<Step>)> = vec![(0, Vec::new())];
+    let mut pieces: Vec<Piece> = vec![Piece::default()];
     for element in &pattern.elements {
         match element {
             PatternElement::Gap {
@@ -90,15 +91,25 @@ pub fn segments_of(pattern: &Pattern) -> Result<Vec<Segment>, PatternNotCompiled
             } => {
                 let follows_a_gap = pieces.len() > 1;
                 match pieces.last_mut() {
-                    Some((gap_before, steps)) if steps.is_empty() && follows_a_gap => {
-                        *gap_before = gap_before.saturating_add(*minimum);
+                    Some(piece) if piece.steps.is_empty() && follows_a_gap => {
+                        piece.gap_before = piece.gap_before.saturating_add(*minimum);
+                        piece.gap_most = None;
                     }
-                    _ => pieces.push((*minimum, Vec::new())),
+                    _ => pieces.push(Piece {
+                        gap_before: *minimum,
+                        gap_most: None,
+                        steps: Vec::new(),
+                    }),
                 }
             }
+            PatternElement::PartBreak { minimum, maximum } => pieces.push(Piece {
+                gap_before: *minimum,
+                gap_most: *maximum,
+                steps: Vec::new(),
+            }),
             other => {
-                if let Some((_, steps)) = pieces.last_mut() {
-                    push_step(steps, other);
+                if let Some(piece) = pieces.last_mut() {
+                    push_step(&mut piece.steps, other);
                 }
             }
         }
@@ -108,15 +119,16 @@ pub fn segments_of(pattern: &Pattern) -> Result<Vec<Segment>, PatternNotCompiled
     }
     let last = pieces.len().saturating_sub(1);
     let mut segments = Vec::with_capacity(pieces.len());
-    for (index, (gap_before, steps)) in pieces.into_iter().enumerate() {
-        let (shortest, longest) = span_of(&steps)?;
+    for (index, piece) in pieces.into_iter().enumerate() {
+        let (shortest, longest) = span_of(&piece.steps)?;
         if longest == 0 {
             return Err(PatternNotCompiled::NothingToMatch);
         }
         segments.push(Segment {
-            anchor: anchor_of(&steps),
-            steps,
-            gap_before,
+            anchor: anchor_of(&piece.steps),
+            steps: piece.steps,
+            gap_before: piece.gap_before,
+            gap_most: piece.gap_most,
             shortest,
             longest,
             before: if index == 0 {
@@ -134,6 +146,13 @@ pub fn segments_of(pattern: &Pattern) -> Result<Vec<Segment>, PatternNotCompiled
     Ok(segments)
 }
 
+#[derive(Default)]
+struct Piece {
+    gap_before: u32,
+    gap_most: Option<u32>,
+    steps: Vec<Step>,
+}
+
 fn push_step(steps: &mut Vec<Step>, element: &PatternElement) {
     match element {
         PatternElement::Byte(byte) => {
@@ -144,10 +163,13 @@ fn push_step(steps: &mut Vec<Step>, element: &PatternElement) {
             }
         }
         PatternElement::OneOf(set) => steps.push(Step::OneOf(*set)),
-        PatternElement::Gap { minimum, maximum } => steps.push(Step::Gap {
-            minimum: *minimum,
-            maximum: maximum.unwrap_or(*minimum),
-        }),
+        PatternElement::Gap { minimum, maximum }
+        | PatternElement::PartBreak { minimum, maximum } => {
+            steps.push(Step::Gap {
+                minimum: *minimum,
+                maximum: maximum.unwrap_or(*minimum),
+            });
+        }
         PatternElement::Choice(alternatives) => steps.push(Step::Choice(alternatives.clone())),
         PatternElement::NoneOf { width, excluded } => steps.push(Step::NoneOf {
             width: *width,
@@ -265,6 +287,7 @@ pub struct ProgramHeader {
     pub segment: U32,
     pub segment_count: U32,
     pub gap_before: U32,
+    pub gap_most: U32,
     pub shortest: U32,
     pub longest: U32,
     pub step_count: U32,
@@ -273,6 +296,7 @@ pub struct ProgramHeader {
 
 const HAS_BEFORE: u32 = 1;
 const HAS_AFTER: u32 = 2;
+const HAS_GAP_MOST: u32 = 4;
 const TAG_BYTES: u8 = 1;
 const TAG_ONE_OF: u8 = 2;
 const TAG_GAP: u8 = 3;
@@ -293,11 +317,15 @@ pub fn encode(segment: &Segment, place: &ProgramPlace) -> Result<Vec<u8>, Patter
     if segment.after.is_some() {
         context_flags |= HAS_AFTER;
     }
+    if segment.gap_most.is_some() {
+        context_flags |= HAS_GAP_MOST;
+    }
     let header = ProgramHeader {
         signature: U32::new(place.signature),
         segment: U32::new(place.segment),
         segment_count: U32::new(place.segment_count),
         gap_before: U32::new(segment.gap_before),
+        gap_most: U32::new(segment.gap_most.unwrap_or(0)),
         shortest: U32::new(segment.shortest),
         longest: U32::new(segment.longest),
         step_count: U32::new(
@@ -510,6 +538,11 @@ impl<'m> ProgramView<'m> {
             (step, rest) = read_step(rest)?;
             Ok(step)
         })
+    }
+
+    #[must_use]
+    pub fn gap_most(&self) -> Option<u32> {
+        (self.header.context_flags.get() & HAS_GAP_MOST != 0).then(|| self.header.gap_most.get())
     }
 
     #[must_use]

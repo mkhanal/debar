@@ -1,8 +1,11 @@
 #![no_main]
 
 use debar_clamav_signatures::{DatabaseFile, compile};
-use debar_image::{Image, ImageBuilder};
-use debar_matching::{PatternScan, PatternSettings};
+use debar_image::{Image, ImageBuilder, ObjectKind};
+use debar_matching::{
+    ExecutableLayout, ExecutableSection, GroupSelection, PatternRequest, PatternScan,
+    PatternSettings,
+};
 use libfuzzer_sys::fuzz_target;
 
 const OBJECT_SEPARATOR: &[u8] = b"\n--object--\n";
@@ -31,9 +34,36 @@ fuzz_target!(|data: &[u8]| {
         potentially_unwanted: true,
         every_match: true,
     };
-    let mut scan = PatternScan::new(&image, settings, object.len() as u64).expect("the scan starts");
-    for chunk in object.chunks(7) {
-        scan.feed(chunk).expect("a chunk is accepted");
+    let layout = ExecutableLayout {
+        entry_point: 9,
+        sections: vec![
+            ExecutableSection {
+                start: 0,
+                length: 12,
+            },
+            ExecutableSection {
+                start: 12,
+                length: 40,
+            },
+        ],
+        version_information: vec![3],
+    };
+    for kind in [
+        ObjectKind::Untyped,
+        ObjectKind::WindowsExecutable,
+        ObjectKind::Elf,
+        ObjectKind::Text,
+    ] {
+        let request = PatternRequest {
+            selection: GroupSelection::ForKindRecognisingTypes(kind),
+            settings,
+            object_length: object.len() as u64,
+        };
+        let layout = layout.clone();
+        let mut scan = PatternScan::new(&image, request, || Some(layout)).expect("the scan starts");
+        for chunk in object.chunks(7) {
+            scan.feed(chunk).expect("a chunk is accepted");
+        }
+        scan.finish().expect("the scan finishes");
     }
-    scan.finish().expect("the scan finishes");
 });

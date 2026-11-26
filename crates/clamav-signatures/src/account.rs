@@ -7,7 +7,7 @@ pub enum LineOutcome {
     NotASignature,
     TargetNotLoaded,
     NeverReports,
-    NeedsExecutableFacts,
+    ShadowedByDuplicate,
     NotYetCompiled,
 }
 
@@ -20,7 +20,7 @@ impl LineOutcome {
         Self::NotASignature,
         Self::TargetNotLoaded,
         Self::NeverReports,
-        Self::NeedsExecutableFacts,
+        Self::ShadowedByDuplicate,
         Self::NotYetCompiled,
     ];
 }

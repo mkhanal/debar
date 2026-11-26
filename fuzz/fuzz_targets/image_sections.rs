@@ -1,11 +1,20 @@
 #![no_main]
 
 use debar_image::{
-    Category, Digest, DigestAlgorithm, HashPurpose, HashSignature, HashedSize, Image,
-    ImageBuilder, Indicator, MaskedByte, PartitionKey, Pattern, PatternElement, PatternSignature,
-    Placement,
+    ByteSet, Category, Digest, DigestAlgorithm, ExecutableAnchor, HashPurpose, HashSignature,
+    HashedSize, Image, ImageBuilder, Indicator, KindDescription, MagicTable, MaskedByte,
+    ObjectKind, OwnBytes, PartMemory, PartitionKey, Pattern, PatternElement, PatternOutcome,
+    PatternSignature, Placement, RecognitionRank, SignatureGroup, TypeFinding, TypingRules,
+    WideTextRetry,
 };
-use debar_matching::{PatternScan, PatternSettings};
+use debar_matching::{
+    ExecutableLayout, ExecutableSection, GroupSelection, PatternRequest, PatternScan,
+    PatternSettings,
+};
+
+const GENERIC: SignatureGroup = SignatureGroup(0);
+const EXECUTABLES: SignatureGroup = SignatureGroup(1);
+const RECOGNITION: SignatureGroup = SignatureGroup(2);
 use libfuzzer_sys::fuzz_target;
 
 const SIGNATURE_COUNT: u8 = 24;
@@ -17,7 +26,9 @@ fn digest(seed: u8) -> [u8; 16] {
 }
 
 fn valid_image() -> Vec<u8> {
-    let names: Vec<String> = (0..SIGNATURE_COUNT).map(|index| format!("Fuzz.Name-{index}")).collect();
+    let names: Vec<String> = (0..SIGNATURE_COUNT)
+        .map(|index| format!("Fuzz.Name-{index}"))
+        .collect();
     let mut builder = ImageBuilder::new();
     for (index, name) in (0..SIGNATURE_COUNT).zip(&names) {
         let size = if index % 5 == 0 {
@@ -35,34 +46,132 @@ fn valid_image() -> Vec<u8> {
         });
     }
     let exact = |text: &[u8]| -> Vec<PatternElement> {
-        text.iter().map(|byte| PatternElement::Byte(MaskedByte::exactly(*byte))).collect()
+        text.iter()
+            .map(|byte| PatternElement::Byte(MaskedByte::exactly(*byte)))
+            .collect()
     };
     let mut chained = exact(b"fuzz");
-    chained.push(PatternElement::Gap { minimum: 0, maximum: None });
+    chained.push(PatternElement::Gap {
+        minimum: 0,
+        maximum: None,
+    });
     chained.extend(exact(b"zzuf"));
-    chained.push(PatternElement::Gap { minimum: 1, maximum: Some(9) });
+    chained.push(PatternElement::PartBreak {
+        minimum: 1,
+        maximum: Some(9),
+    });
     chained.extend(exact(b"ab"));
     let patterns = [
-        (Pattern { before: None, elements: chained, after: None }, Placement::Anywhere),
         (
-            Pattern { before: None, elements: exact(b"head"), after: None },
-            Placement::FromStart { distance: 0, shift: 4 },
+            Pattern {
+                before: None,
+                elements: chained,
+                after: None,
+            },
+            Placement::Anywhere,
         ),
         (
-            Pattern { before: None, elements: exact(b"xy"), after: None },
-            Placement::BeforeEnd { distance: 2, shift: 0 },
+            Pattern {
+                before: None,
+                elements: exact(b"head"),
+                after: None,
+            },
+            Placement::FromStart {
+                distance: 0,
+                shift: 4,
+            },
+        ),
+        (
+            Pattern {
+                before: None,
+                elements: exact(b"xy"),
+                after: None,
+            },
+            Placement::BeforeEnd {
+                distance: 2,
+                shift: 0,
+            },
         ),
     ];
     for ((pattern, placement), name) in patterns.iter().zip(["Fuzz.A", "Fuzz.B", "Fuzz.C"]) {
         let _ = builder.add_pattern_signature(&PatternSignature {
+            group: GENERIC,
             category: Category::Malware,
             placement: *placement,
             report_rank: 0,
             pattern,
-            name,
-            indicator: Indicator::Strong,
+            outcome: PatternOutcome::Detection {
+                name,
+                indicator: Indicator::Strong,
+            },
         });
     }
+    let _ = builder.add_pattern_signature(&PatternSignature {
+        group: EXECUTABLES,
+        category: Category::Malware,
+        placement: Placement::InExecutable {
+            anchor: ExecutableAnchor::SectionStart {
+                section: 0,
+                distance: 1,
+            },
+            shift: 3,
+        },
+        report_rank: 0,
+        pattern: &Pattern {
+            before: None,
+            elements: exact(b"of a"),
+            after: None,
+        },
+        outcome: PatternOutcome::Detection {
+            name: "Fuzz.D",
+            indicator: Indicator::Strong,
+        },
+    });
+    let _ = builder.add_pattern_signature(&PatternSignature {
+        group: RECOGNITION,
+        category: Category::Malware,
+        placement: Placement::Anywhere,
+        report_rank: 0,
+        pattern: &Pattern {
+            before: None,
+            elements: exact(b"zzuf"),
+            after: None,
+        },
+        outcome: PatternOutcome::TypeFound(TypeFinding {
+            found: ObjectKind::Html,
+            required: None,
+        }),
+    });
+    builder.set_part_memory(GENERIC, PartMemory::FirstAndLatestEnds { latest: 8 });
+    builder.describe_object_kind(
+        ObjectKind::WindowsExecutable,
+        KindDescription {
+            format_name: "executable".to_owned(),
+            groups: vec![EXECUTABLES, GENERIC],
+            recognition: RecognitionRank {
+                priority: 7,
+                always_replaces: true,
+                left_for_the_full_scan: false,
+                ends_recognition: false,
+            },
+            own_bytes: OwnBytes::Matched {
+                as_kind: None,
+                recognising_types: true,
+            },
+            found_in_full_scan_retypes: vec![ObjectKind::Text],
+            executable: true,
+        },
+    );
+    builder.set_typing(TypingRules {
+        prefix_length: 1024,
+        recognition_group: Some(RECOGNITION),
+        text_bytes: ByteSet::of(0x20..=0x7e),
+        wide_text_retry: Some(WideTextRetry {
+            found: ObjectKind::Html,
+            becomes: ObjectKind::HtmlUtf16,
+        }),
+    });
+    builder.add_type_magic(MagicTable::Files, 0, b"head", ObjectKind::WindowsExecutable);
     builder.finish().unwrap_or_default()
 }
 
@@ -73,7 +182,10 @@ fuzz_target!(|data: &[u8]| {
     let Ok(sections) = Image::open(&bytes).map(|image| image.sections().to_vec()) else {
         return;
     };
-    let section_bytes: Vec<usize> = sections.iter().flat_map(|section| section.range.clone()).collect();
+    let section_bytes: Vec<usize> = sections
+        .iter()
+        .flat_map(|section| section.range.clone())
+        .collect();
     for pair in data.chunks_exact(3) {
         let at = usize::from(u16::from_le_bytes([pair[0], pair[1]]));
         if let Some(offset) = section_bytes.get(at % section_bytes.len().max(1)) {
@@ -89,8 +201,33 @@ fuzz_target!(|data: &[u8]| {
         algorithm: DigestAlgorithm::Md5,
     };
     let _ = image.databases();
-    let settings = PatternSettings { potentially_unwanted: true, every_match: true };
-    if let Ok(mut scan) = PatternScan::new(&image, settings, OBJECT.len() as u64) {
+    if let Ok(Some(kinds)) = image.object_kinds() {
+        let _ = kinds.describe(ObjectKind::WindowsExecutable);
+        let _ = kinds.described().count();
+    }
+    if let Ok(Some(magic)) = image.type_magic() {
+        let _ = magic.first_match(MagicTable::Files, OBJECT);
+    }
+    let settings = PatternSettings {
+        potentially_unwanted: true,
+        every_match: true,
+    };
+    let request = PatternRequest {
+        selection: GroupSelection::ForKindRecognisingTypes(ObjectKind::WindowsExecutable),
+        settings,
+        object_length: OBJECT.len() as u64,
+    };
+    let layout = || {
+        Some(ExecutableLayout {
+            entry_point: 3,
+            sections: vec![ExecutableSection {
+                start: 4,
+                length: 9,
+            }],
+            version_information: Vec::new(),
+        })
+    };
+    if let Ok(mut scan) = PatternScan::new(&image, request, layout) {
         for chunk in OBJECT.chunks(5) {
             if scan.feed(chunk).is_err() {
                 break;
@@ -100,7 +237,9 @@ fuzz_target!(|data: &[u8]| {
     }
     if let Ok(Some(partition)) = image.hash_partition(key) {
         for index in 0..SIGNATURE_COUNT {
-            if let Ok(Some(name)) = partition.lookup_exact_size(u32::from(index % 4) + 1, &digest(index)) {
+            if let Ok(Some(name)) =
+                partition.lookup_exact_size(u32::from(index % 4) + 1, &digest(index))
+            {
                 let _ = image.signature_name(name);
             }
             if let Ok(Some(name)) = partition.lookup_any_size(&digest(index)) {

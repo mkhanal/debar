@@ -1,20 +1,28 @@
 use std::fmt;
 
+use std::collections::BTreeMap;
+
 use debar_image::{
-    BuildError, Category, DatabaseRecord, HashPurpose, HashSignature, ImageBuilder,
-    PatternSignature, Provenance, ReportWindows,
+    BuildError, Category, DatabaseRecord, HashEntryId, HashPurpose, HashSignature, ImageBuilder,
+    MagicTable, PartMemory, Pattern, PatternOutcome, PatternSignature, Placement, Provenance,
+    ReportWindows, SignatureGroup, TypeFinding,
 };
 
 use crate::account::{Account, FileAccount, LineOutcome};
 use crate::container::{self, ContainerError, Member};
 use crate::extended_lines::{self, MalformedExtendedLine, ReadExtendedLine};
+use crate::file_type_lines::{self, MagicTarget, MalformedFileTypeLine, ReadFileTypeLine};
+use crate::hash_duplicates::entries_not_reported;
 use crate::hash_lines::{FieldOrder, HashFile, MalformedLine, ReadLine, read_line};
 use crate::ignore_list::IgnoreList;
 use crate::line_text::{lines, without_line_ending};
+use crate::logical_lines;
+use crate::type_names::{GENERIC_GROUP, TYPE_RECOGNITION_GROUP, describe_object_kinds};
 
 const UNOFFICIAL_SUFFIX: &str = ".UNOFFICIAL";
 const LICENCE_MEMBER: &str = "COPYING";
 const SCAN_WINDOW_LENGTH: u32 = 131_072;
+const LATEST_PART_ENDS_REMEMBERED: u32 = 8;
 const RANK_OF_PLAIN_BYTES: u8 = 0;
 const RANK_OF_OTHER_BODIES: u8 = 1;
 
@@ -40,6 +48,12 @@ pub enum DatabaseError {
         member: Option<String>,
         line: usize,
         reason: MalformedExtendedLine,
+    },
+    MalformedFileTypeLine {
+        file: String,
+        member: Option<String>,
+        line: usize,
+        reason: MalformedFileTypeLine,
     },
     EmptyHashFile {
         file: String,
@@ -72,6 +86,12 @@ impl fmt::Display for DatabaseError {
                 line,
                 reason,
             } => write!(formatter, "{} line {line}: {reason}", place(file, member)),
+            Self::MalformedFileTypeLine {
+                file,
+                member,
+                line,
+                reason,
+            } => write!(formatter, "{} line {line}: {reason}", place(file, member)),
             Self::EmptyHashFile { file, member } | Self::EmptyDatabaseFile { file, member } => {
                 write!(formatter, "{} is empty", place(file, member))
             }
@@ -88,6 +108,8 @@ enum FileKind {
     IgnoreList,
     Hashes(HashFile),
     Extended(Category),
+    FileTypes,
+    Logical,
     NotYetCompiled,
 }
 
@@ -147,13 +169,13 @@ const FILE_KINDS: [(&str, FileKind); 37] = [
     ("crb", FileKind::NotYetCompiled),
     ("cud", FileKind::NotYetCompiled),
     ("db", FileKind::NotYetCompiled),
-    ("ftm", FileKind::NotYetCompiled),
+    ("ftm", FileKind::FileTypes),
     ("gdb", FileKind::NotYetCompiled),
     ("idb", FileKind::NotYetCompiled),
     ("imp", FileKind::NotYetCompiled),
     ("ioc", FileKind::NotYetCompiled),
-    ("ldb", FileKind::NotYetCompiled),
-    ("ldu", FileKind::NotYetCompiled),
+    ("ldb", FileKind::Logical),
+    ("ldu", FileKind::Logical),
     ("ndb", FileKind::Extended(Category::Malware)),
     ("ndu", FileKind::Extended(Category::PotentiallyUnwanted)),
     ("pdb", FileKind::NotYetCompiled),
@@ -201,6 +223,8 @@ fn kind_description(kind: FileKind) -> &'static str {
         FileKind::Extended(Category::PotentiallyUnwanted) => {
             "extended signatures, potentially unwanted"
         }
+        FileKind::FileTypes => "file types",
+        FileKind::Logical => "logical signatures, not yet compiled",
         FileKind::NotYetCompiled => "not yet compiled",
     }
 }
@@ -244,7 +268,9 @@ pub fn compile(
         image,
         ignored: IgnoreList::default(),
         account,
-        longest_part: 0,
+        longest_parts: BTreeMap::new(),
+        hash_lines: Vec::new(),
+        magic: Vec::new(),
     };
     for (file, kind) in databases {
         match kind {
@@ -252,11 +278,7 @@ pub fn compile(
             _ => loader.load(&Source::loose(file.name), kind, file.contents)?,
         }
     }
-    loader.image.set_report_windows(ReportWindows {
-        length: SCAN_WINDOW_LENGTH,
-        overlap: loader.longest_part,
-    });
-    Ok(loader.account)
+    loader.finish()
 }
 
 struct Source<'a> {
@@ -279,10 +301,89 @@ struct Loader<'i> {
     image: &'i mut ImageBuilder,
     ignored: IgnoreList,
     account: Account,
-    longest_part: u32,
+    longest_parts: BTreeMap<SignatureGroup, u32>,
+    hash_lines: Vec<LinePlace>,
+    magic: Vec<file_type_lines::MagicLine>,
+}
+
+#[derive(Clone, Copy)]
+struct LinePlace {
+    file: usize,
+    line: usize,
 }
 
 impl Loader<'_> {
+    fn finish(mut self) -> Result<Account, DatabaseError> {
+        self.withdraw_unreported_duplicates()?;
+        for magic in self.magic.iter().rev() {
+            let table = match magic.target {
+                MagicTarget::File => MagicTable::Files,
+                MagicTarget::Partition => MagicTable::Partitions,
+            };
+            self.image
+                .add_type_magic(table, magic.offset, &magic.magic, magic.found);
+        }
+        let generic_overlap = self
+            .longest_parts
+            .get(&GENERIC_GROUP)
+            .copied()
+            .unwrap_or(0)
+            .max(
+                self.longest_parts
+                    .get(&TYPE_RECOGNITION_GROUP)
+                    .copied()
+                    .unwrap_or(0),
+            );
+        let groups: Vec<SignatureGroup> = self.longest_parts.keys().copied().collect();
+        for group in groups {
+            let own = self.longest_parts.get(&group).copied().unwrap_or(0);
+            let overlap = if group == TYPE_RECOGNITION_GROUP || group == GENERIC_GROUP {
+                generic_overlap
+            } else {
+                own
+            };
+            self.image.set_report_windows(
+                group,
+                ReportWindows {
+                    length: SCAN_WINDOW_LENGTH,
+                    overlap,
+                },
+            );
+            self.image.set_part_memory(
+                group,
+                PartMemory::FirstAndLatestEnds {
+                    latest: LATEST_PART_ENDS_REMEMBERED,
+                },
+            );
+        }
+        describe_object_kinds(self.image);
+        Ok(self.account)
+    }
+
+    fn withdraw_unreported_duplicates(&mut self) -> Result<(), DatabaseError> {
+        let mut withdrawn: Vec<HashEntryId> = Vec::new();
+        for bucket in self.image.hash_buckets_with_repeated_keys() {
+            withdrawn.extend(entries_not_reported(&bucket));
+        }
+        for id in &withdrawn {
+            let place = usize::try_from(id.0)
+                .ok()
+                .and_then(|index| self.hash_lines.get(index))
+                .copied()
+                .ok_or(DatabaseError::Image(BuildError::TooManySignatures))?;
+            if let Some(outcome) = self
+                .account
+                .files
+                .get_mut(place.file)
+                .and_then(|file| file.lines.get_mut(place.line))
+            {
+                *outcome = LineOutcome::ShadowedByDuplicate;
+            }
+        }
+        self.image.withdraw_hash_signatures(withdrawn);
+        Ok(())
+    }
+
     fn load_container(&mut self, file: &DatabaseFile<'_>) -> Result<(), DatabaseError> {
         let failed = |reason| DatabaseError::Container {
             file: file.name.to_owned(),
@@ -333,6 +434,23 @@ impl Loader<'_> {
         match kind {
             FileKind::Hashes(hash_file) => self.load_hashes(source, hash_file, kind, contents),
             FileKind::Extended(category) => self.load_extended(source, category, kind, contents),
+            FileKind::FileTypes => self.load_file_types(source, kind, contents),
+            FileKind::Logical => {
+                for line in lines(contents) {
+                    if let Some(content) =
+                        logical_lines::loaded_content(without_line_ending(line), &self.ignored)
+                    {
+                        self.lengthen(SignatureGroup(content.target), content.longest_part);
+                    }
+                }
+                self.account_every_line(
+                    source,
+                    kind_description(kind),
+                    contents,
+                    LineOutcome::NotYetCompiled,
+                );
+                Ok(())
+            }
             FileKind::IgnoreList => {
                 self.ignored.add_entries_from(contents);
                 self.account_every_line(
@@ -370,6 +488,7 @@ impl Loader<'_> {
         }
         let mut outcomes = Vec::new();
         let mut unofficial_name = String::new();
+        let file = self.account.files.len();
         for (index, line) in lines(contents).enumerate() {
             let read = read_line(hash_file, without_line_ending(line), &self.ignored).map_err(
                 |reason| DatabaseError::MalformedLine {
@@ -392,7 +511,8 @@ impl Loader<'_> {
                         unofficial_name.push_str(UNOFFICIAL_SUFFIX);
                         &unofficial_name
                     };
-                    self.image
+                    let id = self
+                        .image
                         .add_hash_signature(&HashSignature {
                             purpose: signature.purpose,
                             category: signature.category,
@@ -402,6 +522,10 @@ impl Loader<'_> {
                             indicator: signature.indicator,
                         })
                         .map_err(DatabaseError::Image)?;
+                    if usize::try_from(id.0).ok() != Some(self.hash_lines.len()) {
+                        return Err(DatabaseError::Image(BuildError::TooManySignatures));
+                    }
+                    self.hash_lines.push(LinePlace { file, line: index });
                     LineOutcome::Compiled
                 }
             });
@@ -441,10 +565,14 @@ impl Loader<'_> {
                     LineOutcome::OutsideFunctionalityLevel
                 }
                 ReadExtendedLine::TargetNotLoaded => LineOutcome::TargetNotLoaded,
-                ReadExtendedLine::NeverReports => LineOutcome::NeverReports,
-                ReadExtendedLine::NeedsExecutableFacts => LineOutcome::NeedsExecutableFacts,
-                ReadExtendedLine::TargetNotYetCompiled
-                | ReadExtendedLine::BodyNotYetCompiled(_) => LineOutcome::NotYetCompiled,
+                ReadExtendedLine::NeverReports(loaded) => {
+                    self.lengthen(SignatureGroup(loaded.target), loaded.longest_part);
+                    LineOutcome::NeverReports
+                }
+                ReadExtendedLine::BodyNotYetCompiled { loaded, .. } => {
+                    self.lengthen(SignatureGroup(loaded.target), loaded.longest_part);
+                    LineOutcome::NotYetCompiled
+                }
                 ReadExtendedLine::Signature(signature) => {
                     let name = if source.official {
                         signature.name
@@ -454,29 +582,109 @@ impl Loader<'_> {
                         unofficial_name.push_str(UNOFFICIAL_SUFFIX);
                         &unofficial_name
                     };
-                    self.longest_part = self
-                        .longest_part
-                        .max(longest_part_of(&signature.pattern.elements));
-                    self.image
-                        .add_pattern_signature(&PatternSignature {
-                            category: signature.category,
-                            placement: signature.placement,
-                            report_rank: if signature.plain_bytes {
-                                RANK_OF_PLAIN_BYTES
-                            } else {
-                                RANK_OF_OTHER_BODIES
-                            },
-                            pattern: &signature.pattern,
+                    self.lengthen(SignatureGroup(signature.target), signature.longest_part);
+                    self.add_pattern(
+                        SignatureGroup(signature.target),
+                        signature.category,
+                        signature.placement,
+                        &signature.pattern,
+                        signature.plain_bytes,
+                        PatternOutcome::Detection {
                             name,
                             indicator: signature.indicator,
-                        })
-                        .map_err(DatabaseError::Image)?;
+                        },
+                    )?;
                     LineOutcome::Compiled
                 }
             });
         }
         self.record(source, kind_description(kind), outcomes);
         Ok(())
+    }
+
+    fn load_file_types(
+        &mut self,
+        source: &Source<'_>,
+        kind: FileKind,
+        contents: &[u8],
+    ) -> Result<(), DatabaseError> {
+        let mut outcomes = Vec::new();
+        for (index, line) in lines(contents).enumerate() {
+            let read = file_type_lines::read_line(without_line_ending(line)).map_err(|reason| {
+                DatabaseError::MalformedFileTypeLine {
+                    file: source.file.to_owned(),
+                    member: source.member.map(str::to_owned),
+                    line: index.saturating_add(1),
+                    reason,
+                }
+            })?;
+            outcomes.push(match read {
+                ReadFileTypeLine::Comment => LineOutcome::Comment,
+                ReadFileTypeLine::OutsideFunctionalityLevel => {
+                    LineOutcome::OutsideFunctionalityLevel
+                }
+                ReadFileTypeLine::OtherMode => LineOutcome::NotASignature,
+                ReadFileTypeLine::NeverReports { longest_part } => {
+                    self.lengthen(TYPE_RECOGNITION_GROUP, longest_part);
+                    LineOutcome::NeverReports
+                }
+                ReadFileTypeLine::BodyNotYetCompiled { longest_part, .. } => {
+                    self.lengthen(TYPE_RECOGNITION_GROUP, longest_part);
+                    LineOutcome::NotYetCompiled
+                }
+                ReadFileTypeLine::Magic(magic) => {
+                    self.magic.push(magic);
+                    LineOutcome::Compiled
+                }
+                ReadFileTypeLine::Recognition(recognition) => {
+                    self.lengthen(TYPE_RECOGNITION_GROUP, recognition.longest_part);
+                    self.add_pattern(
+                        TYPE_RECOGNITION_GROUP,
+                        Category::Malware,
+                        recognition.placement,
+                        &recognition.pattern,
+                        recognition.plain_bytes,
+                        PatternOutcome::TypeFound(TypeFinding {
+                            found: recognition.found,
+                            required: recognition.required,
+                        }),
+                    )?;
+                    LineOutcome::Compiled
+                }
+            });
+        }
+        self.record(source, kind_description(kind), outcomes);
+        Ok(())
+    }
+
+    fn add_pattern(
+        &mut self,
+        group: SignatureGroup,
+        category: Category,
+        placement: Placement,
+        pattern: &Pattern,
+        plain_bytes: bool,
+        outcome: PatternOutcome<'_>,
+    ) -> Result<(), DatabaseError> {
+        self.image
+            .add_pattern_signature(&PatternSignature {
+                group,
+                category,
+                placement,
+                report_rank: if plain_bytes {
+                    RANK_OF_PLAIN_BYTES
+                } else {
+                    RANK_OF_OTHER_BODIES
+                },
+                pattern,
+                outcome,
+            })
+            .map_err(DatabaseError::Image)
+    }
+
+    fn lengthen(&mut self, group: SignatureGroup, longest_part: u32) {
+        let longest = self.longest_parts.entry(group).or_insert(0);
+        *longest = (*longest).max(longest_part);
     }
 
     fn account_every_line(
@@ -509,28 +717,4 @@ fn member_kind(member: &Member) -> Option<FileKind> {
         return None;
     }
     kind_of(&member.name)
-}
-
-fn longest_part_of(elements: &[debar_image::PatternElement]) -> u32 {
-    use debar_image::PatternElement;
-    let mut longest: u32 = 0;
-    let mut current: u32 = 0;
-    for element in elements {
-        let width = match element {
-            PatternElement::Gap { .. } => {
-                current = 0;
-                continue;
-            }
-            PatternElement::Byte(_) | PatternElement::OneOf(_) => 1,
-            PatternElement::Choice(alternatives) => alternatives
-                .iter()
-                .map(|alternative| u32::try_from(alternative.len()).unwrap_or(u32::MAX))
-                .max()
-                .unwrap_or(0),
-            PatternElement::NoneOf { width, .. } => *width,
-        };
-        current = current.saturating_add(width);
-        longest = longest.max(current);
-    }
-    longest
 }

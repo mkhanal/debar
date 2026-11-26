@@ -131,3 +131,33 @@ fn a_signature_from_a_file_outside_a_signed_container_is_reported_with_unofficia
         "{REQUIREMENT}"
     );
 }
+
+#[test]
+fn a_hash_listed_twice_is_detected_under_the_name_the_reference_scanner_reports() {
+    const REQUIREMENT: &str =
+        "A Hash Listed Twice Is Detected Under The Name The Reference Scanner Reports";
+    let key = format!("{}:{}", lowercase_hex(&Md5::digest(SAMPLE)), sample_size());
+    for (names, reported) in [
+        (&["First", "Second"][..], "Second"),
+        (&["D1", "D2", "D3"][..], "D3"),
+        (&["D1", "D2", "D3", "D4", "D5"][..], "D4"),
+        (&["D1", "D2", "D3", "D4", "D5", "D6", "D7"][..], "D5"),
+    ] {
+        let lines = names.iter().fold(String::new(), |mut lines, name| {
+            lines.push_str(&key);
+            lines.push_str(":Debar.Test.");
+            lines.push_str(name);
+            lines.push('\n');
+            lines
+        });
+        let (directory, compiled) = loose_databases("hash-listed-twice", &[("listed.hdb", lines)]);
+
+        let scanned = scan(&directory, &compiled.image, SAMPLE);
+
+        assert_eq!(
+            detections(&scanned.report),
+            [format!("Debar.Test.{reported}.UNOFFICIAL")],
+            "{REQUIREMENT}: {names:?}"
+        );
+    }
+}

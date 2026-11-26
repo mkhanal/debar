@@ -132,3 +132,78 @@ fn a_body_is_detected_wherever_it_lies_in_a_large_file() {
         "{REQUIREMENT}"
     );
 }
+
+fn databases_with(test: &str, files: &[(&str, &str)]) -> (PathBuf, CompiledImage) {
+    let directory = scratch_directory(test).unwrap();
+    let databases = directory.join("databases");
+    std::fs::create_dir(&databases).unwrap();
+    for (name, contents) in files {
+        write_file(&databases.join(name), contents.as_bytes()).unwrap();
+    }
+    let compiled = compile(&databases, &directory, "loose").unwrap();
+    (directory, compiled)
+}
+
+#[test]
+fn a_signature_for_one_kind_of_object_is_not_reported_on_another_kind() {
+    const REQUIREMENT: &str = "A Signature For One Kind Of Object Is Not Reported On Another Kind";
+    let (directory, compiled) = databases_with(
+        "pattern-kinds",
+        &[
+            (
+                "types.ftm",
+                "0:0:4d5a:DOS executable:CL_TYPE_ANY:CL_TYPE_MSEXE\n",
+            ),
+            (
+                "local.ndb",
+                "Test.Executable:1:*:4558454355544142\nTest.Anything:0:*:414e595448494e47\n",
+            ),
+        ],
+    );
+    let image = &compiled.image;
+    let scan = |contents: Vec<u8>| detected(&directory, image, &contents);
+
+    assert_eq!(
+        scan(file_with(100, 40, b"EXECUTAB ANYTHING")),
+        ["Test.Anything.UNOFFICIAL"],
+        "{REQUIREMENT}"
+    );
+    let mut executable = file_with(100, 40, b"EXECUTAB ANYTHING");
+    executable[..2].copy_from_slice(b"MZ");
+    let mut found = scan(executable);
+    found.sort();
+    assert_eq!(
+        found,
+        ["Test.Anything.UNOFFICIAL", "Test.Executable.UNOFFICIAL"],
+        "{REQUIREMENT}"
+    );
+}
+
+#[test]
+fn a_body_whose_parts_are_a_bounded_distance_apart_is_missed_where_the_reference_scanner_misses_it()
+{
+    const REQUIREMENT: &str = "A Body Whose Parts Are A Bounded Distance Apart Is Missed Where The Reference Scanner Misses It";
+    let (directory, compiled) = databases_with(
+        "pattern-part-memory",
+        &[("local.ndb", "Test.Parts:0:*:41424344{40-100}5a5a5a5a\n")],
+    );
+    let image = &compiled.image;
+    for (too_close, expected) in [(0, true), (7, true), (8, false), (10, false)] {
+        let mut contents = b"ABCD".to_vec();
+        contents.extend(vec![b'.'; 300]);
+        contents.extend_from_slice(b"ABCD");
+        let second = contents.len() + 90;
+        contents.resize(second - 4 * too_close, b'.');
+        for _ in 0..too_close {
+            contents.extend_from_slice(b"ABCD");
+        }
+        contents.extend_from_slice(b"ZZZZ");
+        contents.extend(vec![b'.'; 10]);
+        let found = detected(&directory, image, &contents);
+        assert_eq!(
+            !found.is_empty(),
+            expected,
+            "{REQUIREMENT}: {too_close} occurrences too close"
+        );
+    }
+}

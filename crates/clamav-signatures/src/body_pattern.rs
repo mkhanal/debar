@@ -11,7 +11,8 @@ const LARGEST_LONE_BYTE_DISTANCE: u32 = 32;
 const MOST_LONE_BYTE_DISTANCES: usize = 2;
 const DEEPEST_ALTERNATIVES: usize = 16;
 const MOST_EXPANDED_ALTERNATIVES: usize = 4096;
-const SHORTEST_PLAIN_BODY: usize = 3;
+const SHORTEST_PLAIN_EXTENDED_BODY: usize = 3;
+const SHORTEST_PLAIN_TYPE_RECOGNITION_BODY: usize = 2;
 const SHORTEST_PART: usize = 2;
 const SHORTEST_FIXED_RUN: usize = 2;
 
@@ -91,8 +92,15 @@ pub enum UnsupportedBody {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadBody {
-    Pattern { pattern: Pattern, plain_bytes: bool },
-    Unsupported(UnsupportedBody),
+    Pattern {
+        pattern: Pattern,
+        plain_bytes: bool,
+        longest_part: u32,
+    },
+    Unsupported {
+        reason: UnsupportedBody,
+        longest_part: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +136,14 @@ enum Token {
 }
 
 pub fn read_body(text: &[u8]) -> Result<ReadBody, MalformedBody> {
+    read_body_at_least(text, SHORTEST_PLAIN_EXTENDED_BODY)
+}
+
+pub fn read_type_recognition_body(text: &[u8]) -> Result<ReadBody, MalformedBody> {
+    read_body_at_least(text, SHORTEST_PLAIN_TYPE_RECOGNITION_BODY)
+}
+
+fn read_body_at_least(text: &[u8], shortest_plain_body: usize) -> Result<ReadBody, MalformedBody> {
     let mut reader = Reader { text, at: 0 };
     let mut tokens = Vec::new();
     while reader.peek().is_some() {
@@ -137,9 +153,10 @@ pub fn read_body(text: &[u8]) -> Result<ReadBody, MalformedBody> {
         return Err(MalformedBody::Empty);
     }
     let plain_bytes = text.iter().all(u8::is_ascii_hexdigit);
-    if plain_bytes && tokens.len() < SHORTEST_PLAIN_BODY {
+    if plain_bytes && tokens.len() < shortest_plain_body {
         return Err(MalformedBody::PlainBodyTooShort);
     }
+    let longest_part = longest_part_as_the_reference_counts(&tokens, ByteWidth::Narrow);
     expand_leading_small_gaps(&mut tokens);
     let before = match tokens.first() {
         Some(Token::Class {
@@ -167,9 +184,10 @@ pub fn read_body(text: &[u8]) -> Result<ReadBody, MalformedBody> {
             || matches!(part.tokens.last(), Some(Token::Class { .. }))
     }) && parts.len() > 1;
     if inner_edge_class {
-        return Ok(ReadBody::Unsupported(
-            UnsupportedBody::ClassAtAnInnerPartEdge,
-        ));
+        return Ok(ReadBody::Unsupported {
+            reason: UnsupportedBody::ClassAtAnInnerPartEdge,
+            longest_part,
+        });
     }
     let mut elements = Vec::new();
     for part in parts {
@@ -185,7 +203,89 @@ pub fn read_body(text: &[u8]) -> Result<ReadBody, MalformedBody> {
             after,
         },
         plain_bytes,
+        longest_part,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteWidth {
+    Narrow,
+    Wide,
+}
+
+pub fn longest_part_of_body(text: &[u8], width: ByteWidth) -> Result<u32, MalformedBody> {
+    let mut reader = Reader { text, at: 0 };
+    let mut tokens = Vec::new();
+    while reader.peek().is_some() {
+        tokens.push(reader.token()?);
+    }
+    Ok(longest_part_as_the_reference_counts(&tokens, width))
+}
+
+fn longest_part_as_the_reference_counts(tokens: &[Token], width: ByteWidth) -> u32 {
+    let byte_length: u32 = match width {
+        ByteWidth::Narrow => 1,
+        ByteWidth::Wide => 2,
+    };
+    let widened = |length: u32| length.saturating_mul(byte_length);
+    let first_other_gap = tokens
+        .iter()
+        .position(|token| {
+            matches!(
+                token,
+                Token::Gap {
+                    exact_small: false,
+                    ..
+                }
+            )
+        })
+        .unwrap_or(tokens.len());
+    let mut longest: u32 = 0;
+    let mut current: u32 = 0;
+    let mut part_tokens: u32 = 0;
+    let mut skip_next_byte = false;
+    for (index, token) in tokens.iter().enumerate() {
+        let length = match token {
+            Token::Gap {
+                minimum,
+                exact_small: true,
+                ..
+            } if index < first_other_gap => Some(*minimum),
+            Token::Star | Token::Gap { .. } => None,
+            Token::Byte(_) if skip_next_byte => {
+                skip_next_byte = false;
+                Some(0)
+            }
+            Token::Byte(_) => Some(byte_length),
+            Token::Choice(alternatives) => Some(widened(
+                alternatives
+                    .iter()
+                    .map(|alternative| u32::try_from(alternative.len()).unwrap_or(u32::MAX))
+                    .max()
+                    .unwrap_or(0),
+            )),
+            Token::NoneOf { width, .. } => Some(widened(*width)),
+            Token::Class { .. } => Some(0),
+            Token::LoneByteDistance { .. } => {
+                if part_tokens == 1 {
+                    current = current.saturating_sub(byte_length);
+                } else {
+                    skip_next_byte = true;
+                }
+                Some(0)
+            }
+        };
+        if let Some(length) = length {
+            current = current.saturating_add(length);
+            part_tokens = part_tokens.saturating_add(1);
+            longest = longest.max(current);
+        } else {
+            current = 0;
+            part_tokens = 0;
+            skip_next_byte = false;
+        }
+    }
+    longest
 }
 
 fn expand_leading_small_gaps(tokens: &mut Vec<Token>) {
@@ -247,7 +347,7 @@ fn split_into_parts(tokens: Vec<Token>) -> Result<Vec<Part>, MalformedBody> {
         match (gap, token) {
             (Some((minimum, maximum)), _) => {
                 parts.push(Part {
-                    gap_before: Some(PatternElement::Gap { minimum, maximum }),
+                    gap_before: Some(PatternElement::PartBreak { minimum, maximum }),
                     tokens: Vec::new(),
                 });
             }

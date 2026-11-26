@@ -8,6 +8,7 @@ members = [
     "crates/interfaces",
     "crates/matching",
     "crates/platform",
+    "crates/scan",
     "xtask",
 ]
 exclude = ["fuzz"]
@@ -23,6 +24,7 @@ debar-clamav-signatures = { path = "crates/clamav-signatures" }
 debar-image = { path = "crates/image" }
 debar-matching = { path = "crates/matching" }
 debar-platform = { path = "crates/platform" }
+debar-scan = { path = "crates/scan" }
 flate2 = { version = "=1.1.11", default-features = false, features = ["rust_backend"] }
 md-5 = { version = "=0.10.6", default-features = false }
 memmap2 = "=0.9.12"

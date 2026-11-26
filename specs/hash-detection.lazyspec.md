@@ -26,3 +26,7 @@ What a scan reports for a file whose hash a database lists.
 
 - A signature from a loose database file is reported as its name followed by `.UNOFFICIAL`.
 - A signature from inside a signed container is reported under its name alone.
+
+## A Hash Listed Twice Is Detected Under The Name The Reference Scanner Reports
+
+- When lines with the same hash and size carry different names, the detection carries the one name the reference scanner reports for that hash, which is not always the line loaded first or last.

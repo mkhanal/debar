@@ -1,8 +1,9 @@
-use zerocopy::little_endian::U32;
+use zerocopy::little_endian::{U16, U32};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use crate::model::{Category, Placement, ReportWindows};
+use crate::model::{Category, ExecutableAnchor, PartMemory, Placement, ReportWindows, TypeFinding};
 use crate::names::NameId;
+use crate::object_kind::ObjectKind;
 use crate::pattern_program::{
     Anchor, Displacement, LONG_ANCHOR_LENGTH, PatternNotCompiled, ProgramMalformed, ProgramPlace,
     ProgramView, SHORT_ANCHOR_LENGTH, Segment, encode,
@@ -67,7 +68,8 @@ struct GroupHeader {
     lookback: U32,
     report_window: U32,
     report_overlap: U32,
-    reserved: U32,
+    executable_placements: U32,
+    latest_part_ends: U32,
     parts: [PartExtent; PART_COUNT],
 }
 
@@ -92,13 +94,16 @@ struct ShortAnchorEntry {
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Clone, Copy)]
 #[repr(C)]
 struct SignatureEntry {
-    name: U32,
+    outcome_value: U32,
+    required_kind: U16,
+    outcome: u8,
     category: u8,
     placement: u8,
     report_rank: u8,
-    reserved: u8,
+    reserved: U16,
     distance: U32,
     shift: U32,
+    section: U32,
     first_program: U32,
     segment_count: U32,
 }
@@ -106,8 +111,19 @@ struct SignatureEntry {
 const PLACEMENT_ANYWHERE: u8 = 1;
 const PLACEMENT_FROM_START: u8 = 2;
 const PLACEMENT_BEFORE_END: u8 = 3;
+const PLACEMENT_AFTER_ENTRY_POINT: u8 = 4;
+const PLACEMENT_BEFORE_ENTRY_POINT: u8 = 5;
+const PLACEMENT_SECTION_START: u8 = 6;
+const PLACEMENT_LAST_SECTION_START: u8 = 7;
+const PLACEMENT_WHOLE_SECTION: u8 = 8;
+const PLACEMENT_BEFORE_EXECUTABLE_END: u8 = 9;
+const PLACEMENT_VERSION_INFORMATION: u8 = 10;
+const PLACEMENT_WHOLE_SECTION_BUT_ITS_START_IN_LARGE_OBJECTS: u8 = 11;
 const CATEGORY_MALWARE: u8 = 1;
 const CATEGORY_POTENTIALLY_UNWANTED: u8 = 2;
+const OUTCOME_DETECTION: u8 = 1;
+const OUTCOME_TYPE_FOUND: u8 = 2;
+const ANY_REQUIRED_KIND: u16 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PatternSignatureId(pub u32);
@@ -116,8 +132,14 @@ pub struct PatternSignatureId(pub u32);
 pub struct ProgramId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordedOutcome {
+    Detection(NameId),
+    TypeFound(TypeFinding),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatternSignatureRecord {
-    pub name: NameId,
+    pub outcome: RecordedOutcome,
     pub category: Category,
     pub placement: Placement,
     pub report_rank: u8,
@@ -132,7 +154,7 @@ pub struct AnchoredProgram {
 }
 
 pub struct PendingPatternSignature {
-    pub name: NameId,
+    pub outcome: RecordedOutcome,
     pub category: Category,
     pub placement: Placement,
     pub report_rank: u8,
@@ -168,11 +190,13 @@ struct PlacedPrograms {
     program_starts: Vec<U32>,
     programs: Vec<u8>,
     lookback: u32,
+    executable_placements: bool,
 }
 
 pub fn build(
     signatures: &[PendingPatternSignature],
     windows: Option<ReportWindows>,
+    part_memory: PartMemory,
 ) -> Result<BuiltGroup, GroupNotBuilt> {
     let mut placed = PlacedPrograms::default();
     for (signature_index, signature) in signatures.iter().enumerate() {
@@ -187,6 +211,7 @@ pub fn build(
         mut program_starts,
         programs,
         lookback,
+        executable_placements,
     } = placed;
     program_starts.push(U32::new(
         u32::try_from(programs.len()).map_err(|_| GroupNotBuilt::TooLarge)?,
@@ -202,7 +227,11 @@ pub fn build(
         lookback: U32::new(lookback),
         report_window: U32::new(windows.map_or(0, |windows| windows.length)),
         report_overlap: U32::new(windows.map_or(0, |windows| windows.overlap)),
-        reserved: U32::new(0),
+        executable_placements: U32::new(u32::from(executable_placements)),
+        latest_part_ends: U32::new(match part_memory {
+            PartMemory::EarliestEnd => 0,
+            PartMemory::FirstAndLatestEnds { latest } => latest,
+        }),
         parts: [PartExtent {
             offset: U32::new(0),
             length: U32::new(0),
@@ -255,18 +284,26 @@ impl PlacedPrograms {
         let signature_id = u32::try_from(signature_index).map_err(too_large)?;
         let first_program = u32::try_from(self.program_starts.len()).map_err(too_large)?;
         let segment_count = u32::try_from(signature.segments.len()).map_err(too_large)?;
-        let (placement, distance, shift) = placement_fields(signature.placement);
+        let fields = placement_fields(signature.placement);
+        let placement = fields.code;
         if placement != PLACEMENT_ANYWHERE {
             self.positional.push(U32::new(signature_id));
         }
+        if fields.in_executable {
+            self.executable_placements = true;
+        }
+        let (outcome, outcome_value, required_kind) = outcome_fields(signature.outcome);
         self.entries.push(SignatureEntry {
-            name: U32::new(signature.name.0),
+            outcome_value: U32::new(outcome_value),
+            required_kind: U16::new(required_kind),
+            outcome,
             category: category_code(signature.category),
             placement,
             report_rank: signature.report_rank,
-            reserved: 0,
-            distance: U32::new(distance),
-            shift: U32::new(shift),
+            reserved: U16::new(0),
+            distance: U32::new(fields.distance),
+            shift: U32::new(fields.shift),
+            section: U32::new(fields.section),
             first_program: U32::new(first_program),
             segment_count: U32::new(segment_count),
         });
@@ -336,11 +373,126 @@ fn reach_before(segment: &Segment, displacement: Displacement) -> u32 {
         .saturating_add(segment.context_reach_before())
 }
 
-fn placement_fields(placement: Placement) -> (u8, u32, u32) {
+struct PlacementFields {
+    code: u8,
+    distance: u32,
+    shift: u32,
+    section: u32,
+    in_executable: bool,
+}
+
+fn placement_fields(placement: Placement) -> PlacementFields {
+    let plain = |code, distance, shift| PlacementFields {
+        code,
+        distance,
+        shift,
+        section: 0,
+        in_executable: false,
+    };
     match placement {
-        Placement::Anywhere => (PLACEMENT_ANYWHERE, 0, 0),
-        Placement::FromStart { distance, shift } => (PLACEMENT_FROM_START, distance, shift),
-        Placement::BeforeEnd { distance, shift } => (PLACEMENT_BEFORE_END, distance, shift),
+        Placement::Anywhere => plain(PLACEMENT_ANYWHERE, 0, 0),
+        Placement::FromStart { distance, shift } => plain(PLACEMENT_FROM_START, distance, shift),
+        Placement::BeforeEnd { distance, shift } => plain(PLACEMENT_BEFORE_END, distance, shift),
+        Placement::InExecutable { anchor, shift } => {
+            let (code, distance, section) = match anchor {
+                ExecutableAnchor::AfterEntryPoint { distance } => {
+                    (PLACEMENT_AFTER_ENTRY_POINT, distance, 0)
+                }
+                ExecutableAnchor::BeforeEntryPoint { distance } => {
+                    (PLACEMENT_BEFORE_ENTRY_POINT, distance, 0)
+                }
+                ExecutableAnchor::SectionStart { section, distance } => {
+                    (PLACEMENT_SECTION_START, distance, section)
+                }
+                ExecutableAnchor::LastSectionStart { distance } => {
+                    (PLACEMENT_LAST_SECTION_START, distance, 0)
+                }
+                ExecutableAnchor::WholeSection {
+                    section,
+                    start_only_from_length: None,
+                } => (PLACEMENT_WHOLE_SECTION, 0, section),
+                ExecutableAnchor::WholeSection {
+                    section,
+                    start_only_from_length: Some(length),
+                } => (
+                    PLACEMENT_WHOLE_SECTION_BUT_ITS_START_IN_LARGE_OBJECTS,
+                    length,
+                    section,
+                ),
+                ExecutableAnchor::BeforeEnd { distance } => {
+                    (PLACEMENT_BEFORE_EXECUTABLE_END, distance, 0)
+                }
+                ExecutableAnchor::VersionInformation => (PLACEMENT_VERSION_INFORMATION, 0, 0),
+            };
+            PlacementFields {
+                code,
+                distance,
+                shift,
+                section,
+                in_executable: true,
+            }
+        }
+    }
+}
+
+fn placement_of(code: u8, distance: u32, shift: u32, section: u32) -> Option<Placement> {
+    let in_executable = |anchor| Some(Placement::InExecutable { anchor, shift });
+    match code {
+        PLACEMENT_ANYWHERE => Some(Placement::Anywhere),
+        PLACEMENT_FROM_START => Some(Placement::FromStart { distance, shift }),
+        PLACEMENT_BEFORE_END => Some(Placement::BeforeEnd { distance, shift }),
+        PLACEMENT_AFTER_ENTRY_POINT => {
+            in_executable(ExecutableAnchor::AfterEntryPoint { distance })
+        }
+        PLACEMENT_BEFORE_ENTRY_POINT => {
+            in_executable(ExecutableAnchor::BeforeEntryPoint { distance })
+        }
+        PLACEMENT_SECTION_START => {
+            in_executable(ExecutableAnchor::SectionStart { section, distance })
+        }
+        PLACEMENT_LAST_SECTION_START => {
+            in_executable(ExecutableAnchor::LastSectionStart { distance })
+        }
+        PLACEMENT_WHOLE_SECTION => in_executable(ExecutableAnchor::WholeSection {
+            section,
+            start_only_from_length: None,
+        }),
+        PLACEMENT_WHOLE_SECTION_BUT_ITS_START_IN_LARGE_OBJECTS => {
+            in_executable(ExecutableAnchor::WholeSection {
+                section,
+                start_only_from_length: Some(distance),
+            })
+        }
+        PLACEMENT_BEFORE_EXECUTABLE_END => in_executable(ExecutableAnchor::BeforeEnd { distance }),
+        PLACEMENT_VERSION_INFORMATION => in_executable(ExecutableAnchor::VersionInformation),
+        _ => None,
+    }
+}
+
+fn outcome_fields(outcome: RecordedOutcome) -> (u8, u32, u16) {
+    match outcome {
+        RecordedOutcome::Detection(name) => (OUTCOME_DETECTION, name.0, ANY_REQUIRED_KIND),
+        RecordedOutcome::TypeFound(finding) => (
+            OUTCOME_TYPE_FOUND,
+            u32::from(finding.found.code()),
+            finding.required.map_or(ANY_REQUIRED_KIND, ObjectKind::code),
+        ),
+    }
+}
+
+fn outcome_of(code: u8, value: u32, required_kind: u16) -> Option<RecordedOutcome> {
+    match code {
+        OUTCOME_DETECTION => Some(RecordedOutcome::Detection(NameId(value))),
+        OUTCOME_TYPE_FOUND => {
+            let found = ObjectKind::from_code(u16::try_from(value).ok()?)?;
+            let required = if required_kind == ANY_REQUIRED_KIND {
+                None
+            } else {
+                Some(ObjectKind::from_code(required_kind)?)
+            };
+            Some(RecordedOutcome::TypeFound(TypeFinding { found, required }))
+        }
+        _ => None,
     }
 }
 
@@ -474,6 +626,8 @@ impl ShortAnchorFilter<'_> {
 #[derive(Clone, Copy)]
 pub struct PatternGroup<'m> {
     lookback: u32,
+    executable_placements: bool,
+    part_memory: PartMemory,
     report_windows: Option<ReportWindows>,
     long_filter: LongAnchorFilter<'m>,
     bucket_shift: u32,
@@ -527,6 +681,11 @@ impl<'m> PatternGroup<'m> {
             });
         Ok(Self {
             lookback: header.lookback.get(),
+            executable_placements: header.executable_placements.get() != 0,
+            part_memory: match header.latest_part_ends.get() {
+                0 => PartMemory::EarliestEnd,
+                latest => PartMemory::FirstAndLatestEnds { latest },
+            },
             report_windows,
             long_filter: LongAnchorFilter {
                 bits: long_filter,
@@ -551,6 +710,16 @@ impl<'m> PatternGroup<'m> {
     #[must_use]
     pub fn lookback(&self) -> u32 {
         self.lookback
+    }
+
+    #[must_use]
+    pub fn part_memory(&self) -> PartMemory {
+        self.part_memory
+    }
+
+    #[must_use]
+    pub fn has_executable_placements(&self) -> bool {
+        self.executable_placements
     }
 
     #[must_use]
@@ -651,16 +820,21 @@ impl<'m> PatternGroup<'m> {
             CATEGORY_POTENTIALLY_UNWANTED => Category::PotentiallyUnwanted,
             _ => return Err(malformed),
         };
-        let distance = entry.distance.get();
-        let shift = entry.shift.get();
-        let placement = match entry.placement {
-            PLACEMENT_ANYWHERE => Placement::Anywhere,
-            PLACEMENT_FROM_START => Placement::FromStart { distance, shift },
-            PLACEMENT_BEFORE_END => Placement::BeforeEnd { distance, shift },
-            _ => return Err(malformed),
-        };
+        let placement = placement_of(
+            entry.placement,
+            entry.distance.get(),
+            entry.shift.get(),
+            entry.section.get(),
+        )
+        .ok_or(malformed)?;
+        let outcome = outcome_of(
+            entry.outcome,
+            entry.outcome_value.get(),
+            entry.required_kind.get(),
+        )
+        .ok_or(malformed)?;
         Ok(PatternSignatureRecord {
-            name: NameId(entry.name.get()),
+            outcome,
             category,
             placement,
             report_rank: entry.report_rank,

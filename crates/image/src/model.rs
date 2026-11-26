@@ -1,3 +1,5 @@
+use crate::object_kind::ObjectKind;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DigestAlgorithm {
     Md5,
@@ -165,6 +167,10 @@ pub enum PatternElement {
         minimum: u32,
         maximum: Option<u32>,
     },
+    PartBreak {
+        minimum: u32,
+        maximum: Option<u32>,
+    },
     Choice(Vec<Vec<MaskedByte>>),
     NoneOf {
         width: u32,
@@ -175,9 +181,47 @@ pub enum PatternElement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Placement {
     Anywhere,
-    FromStart { distance: u32, shift: u32 },
-    BeforeEnd { distance: u32, shift: u32 },
+    FromStart {
+        distance: u32,
+        shift: u32,
+    },
+    BeforeEnd {
+        distance: u32,
+        shift: u32,
+    },
+    InExecutable {
+        anchor: ExecutableAnchor,
+        shift: u32,
+    },
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExecutableAnchor {
+    AfterEntryPoint {
+        distance: u32,
+    },
+    BeforeEntryPoint {
+        distance: u32,
+    },
+    SectionStart {
+        section: u32,
+        distance: u32,
+    },
+    LastSectionStart {
+        distance: u32,
+    },
+    WholeSection {
+        section: u32,
+        start_only_from_length: Option<u32>,
+    },
+    BeforeEnd {
+        distance: u32,
+    },
+    VersionInformation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SignatureGroup(pub u32);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pattern {
@@ -188,12 +232,30 @@ pub struct Pattern {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternSignature<'a> {
+    pub group: SignatureGroup,
     pub category: Category,
     pub placement: Placement,
     pub report_rank: u8,
     pub pattern: &'a Pattern,
-    pub name: &'a str,
-    pub indicator: Indicator,
+    pub outcome: PatternOutcome<'a>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternOutcome<'a> {
+    Detection { name: &'a str, indicator: Indicator },
+    TypeFound(TypeFinding),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TypeFinding {
+    pub found: ObjectKind,
+    pub required: Option<ObjectKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartMemory {
+    EarliestEnd,
+    FirstAndLatestEnds { latest: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

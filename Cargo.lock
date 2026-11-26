@@ -97,6 +97,7 @@ dependencies = [
  "debar-image",
  "debar-matching",
  "debar-platform",
+ "debar-scan",
  "serde_json",
  "sha2",
 ]
@@ -117,6 +118,14 @@ name = "debar-platform"
 version = "0.0.0"
 dependencies = [
  "memmap2",
+]
+
+[[package]]
+name = "debar-scan"
+version = "0.0.0"
+dependencies = [
+ "debar-image",
+ "debar-matching",
 ]
 
 [[package]]

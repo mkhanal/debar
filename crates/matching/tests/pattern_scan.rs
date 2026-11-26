@@ -10,10 +10,13 @@
 use std::collections::BTreeSet;
 
 use debar_image::{
-    ByteSet, Category, ContextTest, Image, ImageBuilder, Indicator, MaskedByte, Pattern,
-    PatternElement, PatternSignature, Placement,
+    ByteSet, Category, ContextTest, Image, ImageBuilder, Indicator, KindDescription, MaskedByte,
+    ObjectKind, OwnBytes, Pattern, PatternElement, PatternOutcome, PatternSignature, Placement,
+    RecognitionRank, SignatureGroup,
 };
-use debar_matching::{PatternScan, PatternSettings, ScanProgress};
+use debar_matching::{GroupSelection, PatternRequest, PatternScan, PatternSettings, ScanProgress};
+
+const GENERIC: SignatureGroup = SignatureGroup(0);
 
 struct Random(u64);
 
@@ -173,15 +176,32 @@ impl Model {
         {
             builder
                 .add_pattern_signature(&PatternSignature {
+                    group: GENERIC,
                     category: Category::Malware,
                     placement: *placement,
                     report_rank: 0,
                     pattern,
-                    name,
-                    indicator: Indicator::Strong,
+                    outcome: PatternOutcome::Detection {
+                        name,
+                        indicator: Indicator::Strong,
+                    },
                 })
                 .unwrap();
         }
+        builder.describe_object_kind(
+            ObjectKind::BinaryData,
+            KindDescription {
+                format_name: "binary data".to_owned(),
+                groups: vec![GENERIC],
+                recognition: RecognitionRank::default(),
+                own_bytes: OwnBytes::Matched {
+                    as_kind: None,
+                    recognising_types: false,
+                },
+                found_in_full_scan_retypes: Vec::new(),
+                executable: false,
+            },
+        );
         builder.finish().unwrap()
     }
 }
@@ -247,7 +267,8 @@ fn matches_from(
         PatternElement::OneOf(set) => {
             object.get(position).is_some_and(|byte| set.contains(*byte)) && next(position + 1)
         }
-        PatternElement::Gap { minimum, maximum } => {
+        PatternElement::Gap { minimum, maximum }
+        | PatternElement::PartBreak { minimum, maximum } => {
             let minimum = *minimum as usize;
             let longest = maximum.map_or(object.len(), |maximum| maximum as usize);
             (minimum..=longest)
@@ -288,6 +309,7 @@ fn naive_detections(model: &Model, object: &[u8]) -> BTreeSet<String> {
                     None => Vec::new(),
                 }
             }
+            Placement::InExecutable { .. } => Vec::new(),
         };
         let hit = starts
             .into_iter()
@@ -313,7 +335,12 @@ fn engine_detections(
         potentially_unwanted: false,
         every_match,
     };
-    let mut scan = PatternScan::new(image, settings, object.len() as u64).unwrap();
+    let request = PatternRequest {
+        selection: GroupSelection::ForKind(ObjectKind::BinaryData),
+        settings,
+        object_length: object.len() as u64,
+    };
+    let mut scan = PatternScan::new(image, request, || None).unwrap();
     let mut rest = object;
     let mut sizes = chunks.iter().cycle();
     while !rest.is_empty() {
@@ -332,6 +359,7 @@ fn engine_detections(
     }
     scan.finish()
         .unwrap()
+        .detections
         .into_iter()
         .map(|detection| detection.name)
         .collect()

@@ -4,7 +4,12 @@ use debar_clamav_signatures::{
     Account, DatabaseError, DatabaseFile, LineOutcome, MalformedBody, MalformedExtendedLine,
     compile,
 };
-use debar_image::{Image, ImageBuilder, PatternSignatureId, Placement};
+use debar_image::{
+    ExecutableAnchor, Image, ImageBuilder, PatternSignatureId, Placement, RecordedOutcome,
+    SignatureGroup,
+};
+
+const GENERIC: SignatureGroup = SignatureGroup(0);
 
 fn compile_ndb(name: &str, text: &str) -> Result<(Vec<u8>, Account), DatabaseError> {
     let files = [DatabaseFile {
@@ -30,9 +35,13 @@ fn malformed(text: &str) -> MalformedExtendedLine {
 }
 
 fn placements(text: &str) -> Vec<Placement> {
+    placements_in(text, GENERIC)
+}
+
+fn placements_in(text: &str, group: SignatureGroup) -> Vec<Placement> {
     let (bytes, _) = compile_ndb("test.ndb", text).unwrap();
     let image = Image::open(&bytes).unwrap();
-    let group = image.pattern_group().unwrap().unwrap();
+    let group = image.pattern_group(group).unwrap().unwrap();
     (0..group.signature_count())
         .map(|index| {
             group
@@ -47,13 +56,16 @@ fn placements(text: &str) -> Vec<Placement> {
 fn a_generic_line_is_compiled_under_its_unofficial_name() {
     let (bytes, account) = compile_ndb("local.ndb", "Test.Body-1:0:*:4142434445\n").unwrap();
     let image = Image::open(&bytes).unwrap();
-    let group = image.pattern_group().unwrap().unwrap();
+    let group = image.pattern_group(GENERIC).unwrap().unwrap();
     let record = group.signature(PatternSignatureId(0)).unwrap();
+    let RecordedOutcome::Detection(name) = record.outcome else {
+        panic!("an extended signature is a detection")
+    };
 
     assert_eq!(account.files[0].lines, [LineOutcome::Compiled]);
     assert_eq!(account.files[0].kind, "extended signatures");
     assert_eq!(
-        image.signature_name(record.name).unwrap().text,
+        image.signature_name(name).unwrap().text,
         "Test.Body-1.UNOFFICIAL"
     );
 }
@@ -79,8 +91,8 @@ Test.Generic:*:*:4142434445
             LineOutcome::OutsideFunctionalityLevel,
             LineOutcome::OutsideFunctionalityLevel,
             LineOutcome::TargetNotLoaded,
-            LineOutcome::NotYetCompiled,
-            LineOutcome::NeedsExecutableFacts,
+            LineOutcome::Compiled,
+            LineOutcome::Compiled,
             LineOutcome::NeverReports,
             LineOutcome::Compiled,
         ]
@@ -235,7 +247,7 @@ fn potentially_unwanted_extended_files_compile_into_their_own_category() {
     let (bytes, account) = compile_ndb("local.ndu", "PUA.Test:0:*:4142434445\n").unwrap();
     let image = Image::open(&bytes).unwrap();
     let record = image
-        .pattern_group()
+        .pattern_group(GENERIC)
         .unwrap()
         .unwrap()
         .signature(PatternSignatureId(0))
@@ -275,4 +287,146 @@ fn an_empty_extended_file_fails_the_compile() {
         compile_ndb("empty.ndb", ""),
         Err(DatabaseError::EmptyDatabaseFile { .. })
     ));
+}
+
+#[test]
+fn each_target_compiles_into_its_own_group() {
+    let text = "\
+Test.Generic:0:*:4142434445
+Test.Pe:1:*:4142434445
+Test.Elf:6:*:4142434445
+Test.Ascii:7:*:4142434445
+Test.Other:14:*:4142434445
+";
+    let (bytes, account) = compile_ndb("test.ndb", text).unwrap();
+    let image = Image::open(&bytes).unwrap();
+
+    assert!(
+        account.files[0]
+            .lines
+            .iter()
+            .all(|outcome| *outcome == LineOutcome::Compiled)
+    );
+    for target in [0, 1, 6, 7, 14] {
+        assert_eq!(
+            image
+                .pattern_group(SignatureGroup(target))
+                .unwrap()
+                .unwrap()
+                .signature_count(),
+            1,
+            "target {target}"
+        );
+    }
+    assert!(image.pattern_group(SignatureGroup(2)).unwrap().is_none());
+}
+
+#[test]
+fn executable_offsets_are_read_into_positions_in_an_executable() {
+    let text = "\
+Test.AfterEp:1:EP+10:4142434445
+Test.BeforeEp:1:EP-4,8:4142434445
+Test.Section:1:S2+16,4:4142434445
+Test.Last:1:SL+0:4142434445
+Test.Whole:1:SE3:4142434445
+Test.WholeShifted:1:SE0,5:4142434445
+Test.VersionInfo:1:VI:4142434445
+Test.Eof:1:EOF-20:4142434445
+Test.Absolute:1:100:4142434445
+";
+    let in_executable = |anchor, shift| Placement::InExecutable { anchor, shift };
+    assert_eq!(
+        placements_in(text, SignatureGroup(1)),
+        [
+            in_executable(ExecutableAnchor::AfterEntryPoint { distance: 10 }, 0),
+            in_executable(ExecutableAnchor::BeforeEntryPoint { distance: 4 }, 8),
+            in_executable(
+                ExecutableAnchor::SectionStart {
+                    section: 2,
+                    distance: 16
+                },
+                4
+            ),
+            in_executable(ExecutableAnchor::LastSectionStart { distance: 0 }, 0),
+            in_executable(
+                ExecutableAnchor::WholeSection {
+                    section: 3,
+                    start_only_from_length: Some(262_144)
+                },
+                0
+            ),
+            in_executable(
+                ExecutableAnchor::WholeSection {
+                    section: 0,
+                    start_only_from_length: None
+                },
+                5
+            ),
+            in_executable(ExecutableAnchor::VersionInformation, 0),
+            in_executable(ExecutableAnchor::BeforeEnd { distance: 20 }, 0),
+            Placement::FromStart {
+                distance: 100,
+                shift: 0
+            },
+        ]
+    );
+}
+
+#[test]
+fn an_executable_offset_outside_an_executable_target_fails_the_compile() {
+    assert_eq!(
+        malformed("Test.Ep:0:EP+0:4142434445\n"),
+        MalformedExtendedLine::ExecutableOffsetOnTarget { target: 0 }
+    );
+    assert_eq!(
+        malformed("Test.Ep:7:S1+0:4142434445\n"),
+        MalformedExtendedLine::ExecutableOffsetOnTarget { target: 7 }
+    );
+}
+
+#[test]
+fn executable_offsets_follow_the_formats_lenient_grammar() {
+    let text = "\
+Test.EmptyEp:1:EP+:4142434445
+Test.EmptySection:1:SE:4142434445
+Test.Trailing:1:S1+2junk:4142434445
+Test.VersionInfoAnything:1:VIrest:4142434445
+Test.WholeSectionChoice:1:SE1:41(42|43)434445
+";
+    let in_executable = |anchor, shift| Placement::InExecutable { anchor, shift };
+    assert_eq!(
+        placements_in(text, SignatureGroup(1)),
+        [
+            in_executable(ExecutableAnchor::AfterEntryPoint { distance: 0 }, 0),
+            in_executable(
+                ExecutableAnchor::WholeSection {
+                    section: 0,
+                    start_only_from_length: Some(262_144)
+                },
+                0
+            ),
+            in_executable(
+                ExecutableAnchor::SectionStart {
+                    section: 1,
+                    distance: 2
+                },
+                0
+            ),
+            in_executable(ExecutableAnchor::VersionInformation, 0),
+            in_executable(
+                ExecutableAnchor::WholeSection {
+                    section: 1,
+                    start_only_from_length: None
+                },
+                0
+            ),
+        ]
+    );
+    for offset in ["SE1+5", "S1+", "S+1", "EP+x", "Sx"] {
+        assert_eq!(
+            malformed(&format!("Test.Bad:1:{offset}:4142434445\n")),
+            MalformedExtendedLine::OffsetMalformed,
+            "{offset}"
+        );
+    }
 }

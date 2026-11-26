@@ -1,0 +1,332 @@
+use std::collections::BTreeMap;
+
+use zerocopy::little_endian::{U16, U32};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
+use crate::model::{ByteSet, SignatureGroup};
+use crate::object_kind::ObjectKind;
+
+const ALWAYS_REPLACES: u8 = 1;
+const LEFT_FOR_THE_FULL_SCAN: u8 = 2;
+const ENDS_RECOGNITION: u8 = 4;
+const EXECUTABLE: u8 = 8;
+const OWN_BYTES_MATCHED: u8 = 16;
+const RECOGNISES_TYPES_IN_FULL_SCAN: u8 = 32;
+const NO_KIND: u16 = 0;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KindDescription {
+    pub format_name: String,
+    pub groups: Vec<SignatureGroup>,
+    pub recognition: RecognitionRank,
+    pub own_bytes: OwnBytes,
+    pub found_in_full_scan_retypes: Vec<ObjectKind>,
+    pub executable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RecognitionRank {
+    pub priority: u32,
+    pub always_replaces: bool,
+    pub left_for_the_full_scan: bool,
+    pub ends_recognition: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnBytes {
+    NotMatched,
+    Matched {
+        as_kind: Option<ObjectKind>,
+        recognising_types: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WideTextRetry {
+    pub found: ObjectKind,
+    pub becomes: ObjectKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypingRules {
+    pub prefix_length: u32,
+    pub recognition_group: Option<SignatureGroup>,
+    pub text_bytes: ByteSet,
+    pub wide_text_retry: Option<WideTextRetry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KindsNotBuilt {
+    TooLarge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KindsMalformed {
+    Layout,
+    UnknownKind,
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct KindsHeader {
+    prefix_length: U32,
+    has_recognition_group: U32,
+    recognition_group: U32,
+    text_bytes: [u8; 32],
+    wide_text_found: U16,
+    wide_text_becomes: U16,
+    kind_count: U32,
+    group_count: U32,
+    retype_count: U32,
+    name_bytes: U32,
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Clone, Copy)]
+#[repr(C)]
+struct KindEntry {
+    kind: U16,
+    matched_as: U16,
+    flags: u8,
+    reserved: [u8; 3],
+    priority: U32,
+    name_start: U32,
+    name_length: U32,
+    first_group: U32,
+    group_count: U32,
+    first_retype: U32,
+    retype_count: U32,
+}
+
+fn code_or_none(kind: Option<ObjectKind>) -> u16 {
+    kind.map_or(NO_KIND, ObjectKind::code)
+}
+
+fn kind_or_none(code: u16) -> Result<Option<ObjectKind>, KindsMalformed> {
+    if code == NO_KIND {
+        return Ok(None);
+    }
+    ObjectKind::from_code(code)
+        .map(Some)
+        .ok_or(KindsMalformed::UnknownKind)
+}
+
+fn flags_of(description: &KindDescription) -> u8 {
+    let rank = description.recognition;
+    let mut flags = 0;
+    for (set, flag) in [
+        (rank.always_replaces, ALWAYS_REPLACES),
+        (rank.left_for_the_full_scan, LEFT_FOR_THE_FULL_SCAN),
+        (rank.ends_recognition, ENDS_RECOGNITION),
+        (description.executable, EXECUTABLE),
+    ] {
+        if set {
+            flags |= flag;
+        }
+    }
+    if let OwnBytes::Matched {
+        recognising_types, ..
+    } = description.own_bytes
+    {
+        flags |= OWN_BYTES_MATCHED;
+        if recognising_types {
+            flags |= RECOGNISES_TYPES_IN_FULL_SCAN;
+        }
+    }
+    flags
+}
+
+pub fn build(
+    kinds: &BTreeMap<ObjectKind, KindDescription>,
+    typing: Option<TypingRules>,
+) -> Result<Vec<u8>, KindsNotBuilt> {
+    let count = |value: usize| u32::try_from(value).map_err(|_| KindsNotBuilt::TooLarge);
+    let mut entries = Vec::with_capacity(kinds.len());
+    let mut groups: Vec<U32> = Vec::new();
+    let mut retypes: Vec<U16> = Vec::new();
+    let mut names = Vec::new();
+    for (kind, description) in kinds {
+        let matched_as = match description.own_bytes {
+            OwnBytes::Matched { as_kind, .. } => code_or_none(as_kind),
+            OwnBytes::NotMatched => NO_KIND,
+        };
+        entries.push(KindEntry {
+            kind: U16::new(kind.code()),
+            matched_as: U16::new(matched_as),
+            flags: flags_of(description),
+            reserved: [0; 3],
+            priority: U32::new(description.recognition.priority),
+            name_start: U32::new(count(names.len())?),
+            name_length: U32::new(count(description.format_name.len())?),
+            first_group: U32::new(count(groups.len())?),
+            group_count: U32::new(count(description.groups.len())?),
+            first_retype: U32::new(count(retypes.len())?),
+            retype_count: U32::new(count(description.found_in_full_scan_retypes.len())?),
+        });
+        names.extend_from_slice(description.format_name.as_bytes());
+        groups.extend(description.groups.iter().map(|group| U32::new(group.0)));
+        retypes.extend(
+            description
+                .found_in_full_scan_retypes
+                .iter()
+                .map(|kind| U16::new(kind.code())),
+        );
+    }
+    let retry = typing.and_then(|rules| rules.wide_text_retry);
+    let header = KindsHeader {
+        prefix_length: U32::new(typing.map_or(0, |rules| rules.prefix_length)),
+        has_recognition_group: U32::new(u32::from(
+            typing.is_some_and(|rules| rules.recognition_group.is_some()),
+        )),
+        recognition_group: U32::new(
+            typing
+                .and_then(|rules| rules.recognition_group)
+                .map_or(0, |group| group.0),
+        ),
+        text_bytes: typing.map_or([0; 32], |rules| rules.text_bytes.0),
+        wide_text_found: U16::new(code_or_none(retry.map(|retry| retry.found))),
+        wide_text_becomes: U16::new(code_or_none(retry.map(|retry| retry.becomes))),
+        kind_count: U32::new(count(entries.len())?),
+        group_count: U32::new(count(groups.len())?),
+        retype_count: U32::new(count(retypes.len())?),
+        name_bytes: U32::new(count(names.len())?),
+    };
+    let mut bytes = header.as_bytes().to_vec();
+    bytes.extend_from_slice(entries.as_bytes());
+    bytes.extend_from_slice(groups.as_bytes());
+    bytes.extend_from_slice(retypes.as_bytes());
+    bytes.extend_from_slice(&names);
+    Ok(bytes)
+}
+
+#[derive(Clone, Copy)]
+pub struct ObjectKinds<'m> {
+    typing: TypingRules,
+    entries: &'m [KindEntry],
+    groups: &'m [U32],
+    retypes: &'m [U16],
+    names: &'m [u8],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KindView<'m> {
+    pub format_name: &'m str,
+    pub recognition: RecognitionRank,
+    pub own_bytes: OwnBytes,
+    pub executable: bool,
+    groups: &'m [U32],
+    retypes: &'m [U16],
+}
+
+impl KindView<'_> {
+    pub fn groups(&self) -> impl Iterator<Item = SignatureGroup> + '_ {
+        self.groups.iter().map(|group| SignatureGroup(group.get()))
+    }
+
+    #[must_use]
+    pub fn retypes_when_found_in(&self, kind: ObjectKind) -> bool {
+        self.retypes.iter().any(|code| code.get() == kind.code())
+    }
+}
+
+fn span(start: U32, length: U32) -> Result<std::ops::Range<usize>, KindsMalformed> {
+    let start = usize::try_from(start.get()).map_err(|_| KindsMalformed::Layout)?;
+    let length = usize::try_from(length.get()).map_err(|_| KindsMalformed::Layout)?;
+    Ok(start..start.checked_add(length).ok_or(KindsMalformed::Layout)?)
+}
+
+impl<'m> ObjectKinds<'m> {
+    pub fn read(bytes: &'m [u8]) -> Result<Self, KindsMalformed> {
+        let (header, rest) =
+            KindsHeader::ref_from_prefix(bytes).map_err(|_| KindsMalformed::Layout)?;
+        let length = |value: &U32| usize::try_from(value.get()).map_err(|_| KindsMalformed::Layout);
+        let (entries, rest) =
+            <[KindEntry]>::ref_from_prefix_with_elems(rest, length(&header.kind_count)?)
+                .map_err(|_| KindsMalformed::Layout)?;
+        let (groups, rest) =
+            <[U32]>::ref_from_prefix_with_elems(rest, length(&header.group_count)?)
+                .map_err(|_| KindsMalformed::Layout)?;
+        let (retypes, names) =
+            <[U16]>::ref_from_prefix_with_elems(rest, length(&header.retype_count)?)
+                .map_err(|_| KindsMalformed::Layout)?;
+        if names.len() != length(&header.name_bytes)? {
+            return Err(KindsMalformed::Layout);
+        }
+        let recognition_group = (header.has_recognition_group.get() != 0)
+            .then(|| SignatureGroup(header.recognition_group.get()));
+        let wide_text_retry = match (
+            kind_or_none(header.wide_text_found.get())?,
+            kind_or_none(header.wide_text_becomes.get())?,
+        ) {
+            (Some(found), Some(becomes)) => Some(WideTextRetry { found, becomes }),
+            _ => None,
+        };
+        Ok(Self {
+            typing: TypingRules {
+                prefix_length: header.prefix_length.get(),
+                recognition_group,
+                text_bytes: ByteSet(header.text_bytes),
+                wide_text_retry,
+            },
+            entries,
+            groups,
+            retypes,
+            names,
+        })
+    }
+
+    #[must_use]
+    pub fn typing_rules(&self) -> TypingRules {
+        self.typing
+    }
+
+    pub fn describe(&self, kind: ObjectKind) -> Result<Option<KindView<'m>>, KindsMalformed> {
+        let Ok(index) = self
+            .entries
+            .binary_search_by_key(&kind.code(), |entry| entry.kind.get())
+        else {
+            return Ok(None);
+        };
+        let entry = self.entries.get(index).ok_or(KindsMalformed::Layout)?;
+        let format_name = self
+            .names
+            .get(span(entry.name_start, entry.name_length)?)
+            .and_then(|name| std::str::from_utf8(name).ok())
+            .ok_or(KindsMalformed::Layout)?;
+        let groups = self
+            .groups
+            .get(span(entry.first_group, entry.group_count)?)
+            .ok_or(KindsMalformed::Layout)?;
+        let retypes = self
+            .retypes
+            .get(span(entry.first_retype, entry.retype_count)?)
+            .ok_or(KindsMalformed::Layout)?;
+        let flag = |flag: u8| entry.flags & flag != 0;
+        let own_bytes = if flag(OWN_BYTES_MATCHED) {
+            OwnBytes::Matched {
+                as_kind: kind_or_none(entry.matched_as.get())?,
+                recognising_types: flag(RECOGNISES_TYPES_IN_FULL_SCAN),
+            }
+        } else {
+            OwnBytes::NotMatched
+        };
+        Ok(Some(KindView {
+            format_name,
+            recognition: RecognitionRank {
+                priority: entry.priority.get(),
+                always_replaces: flag(ALWAYS_REPLACES),
+                left_for_the_full_scan: flag(LEFT_FOR_THE_FULL_SCAN),
+                ends_recognition: flag(ENDS_RECOGNITION),
+            },
+            own_bytes,
+            executable: flag(EXECUTABLE),
+            groups,
+            retypes,
+        }))
+    }
+
+    pub fn described(&self) -> impl Iterator<Item = Result<ObjectKind, KindsMalformed>> + 'm {
+        self.entries
+            .iter()
+            .map(|entry| ObjectKind::from_code(entry.kind.get()).ok_or(KindsMalformed::UnknownKind))
+    }
+}

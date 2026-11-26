@@ -1,10 +1,16 @@
 #![no_main]
 
 use debar_image::{
-    ByteSet, Category, ContextTest, Image, ImageBuilder, Indicator, MaskedByte, Pattern,
-    PatternElement, PatternSignature, Placement,
+    ByteSet, Category, ContextTest, ExecutableAnchor, Image, ImageBuilder, Indicator,
+    KindDescription, MaskedByte, ObjectKind, OwnBytes, Pattern, PatternElement, PatternOutcome,
+    PatternSignature, Placement, RecognitionRank, SignatureGroup,
 };
-use debar_matching::{PatternScan, PatternSettings};
+use debar_matching::{
+    ExecutableLayout, ExecutableSection, GroupSelection, PatternRequest, PatternScan,
+    PatternSettings,
+};
+
+const GENERIC: SignatureGroup = SignatureGroup(0);
 use libfuzzer_sys::fuzz_target;
 
 fn exact(text: &[u8]) -> Vec<PatternElement> {
@@ -20,12 +26,21 @@ fn patterns() -> Vec<(Pattern, Placement)> {
         satisfied_at_object_edge: true,
     };
     let mut gapped = exact(b"MZ");
-    gapped.push(PatternElement::Gap { minimum: 2, maximum: Some(40) });
+    gapped.push(PatternElement::Gap {
+        minimum: 2,
+        maximum: Some(40),
+    });
     gapped.extend(exact(b"PE"));
     let mut chained = exact(b"alpha");
-    chained.push(PatternElement::Gap { minimum: 0, maximum: None });
+    chained.push(PatternElement::Gap {
+        minimum: 0,
+        maximum: None,
+    });
     chained.extend(exact(b"beta"));
-    chained.push(PatternElement::Gap { minimum: 3, maximum: None });
+    chained.push(PatternElement::Gap {
+        minimum: 3,
+        maximum: None,
+    });
     chained.extend(exact(b"gamma"));
     let mut mixed = exact(b"ab");
     mixed.push(PatternElement::Choice(vec![
@@ -37,18 +52,33 @@ fn patterns() -> Vec<(Pattern, Placement)> {
         excluded: vec![vec![MaskedByte::exactly(b'x')]],
     });
     mixed.push(PatternElement::OneOf(ByteSet::of(*b"0123456789")));
-    mixed.push(PatternElement::Byte(MaskedByte { value: 0x40, mask: 0xf0 }));
+    mixed.push(PatternElement::Byte(MaskedByte {
+        value: 0x40,
+        mask: 0xf0,
+    }));
     vec![
         (
-            Pattern { before: None, elements: exact(b"EICAR-LIKE"), after: None },
+            Pattern {
+                before: None,
+                elements: exact(b"EICAR-LIKE"),
+                after: None,
+            },
             Placement::Anywhere,
         ),
         (
-            Pattern { before: None, elements: gapped, after: None },
+            Pattern {
+                before: None,
+                elements: gapped,
+                after: None,
+            },
             Placement::Anywhere,
         ),
         (
-            Pattern { before: None, elements: chained, after: None },
+            Pattern {
+                before: None,
+                elements: chained,
+                after: None,
+            },
             Placement::Anywhere,
         ),
         (
@@ -60,47 +90,179 @@ fn patterns() -> Vec<(Pattern, Placement)> {
             Placement::Anywhere,
         ),
         (
-            Pattern { before: None, elements: exact(b"%PDF"), after: None },
-            Placement::FromStart { distance: 0, shift: 8 },
+            Pattern {
+                before: None,
+                elements: exact(b"%PDF"),
+                after: None,
+            },
+            Placement::FromStart {
+                distance: 0,
+                shift: 8,
+            },
         ),
         (
-            Pattern { before: None, elements: exact(b"END"), after: None },
-            Placement::BeforeEnd { distance: 16, shift: 13 },
+            Pattern {
+                before: None,
+                elements: exact(b"END"),
+                after: None,
+            },
+            Placement::BeforeEnd {
+                distance: 16,
+                shift: 13,
+            },
         ),
         (
-            Pattern { before: None, elements: exact(b"q"), after: None },
+            Pattern {
+                before: None,
+                elements: exact(b"q"),
+                after: None,
+            },
             Placement::Anywhere,
+        ),
+        (
+            Pattern {
+                before: None,
+                elements: exact(b"EP"),
+                after: None,
+            },
+            Placement::InExecutable {
+                anchor: ExecutableAnchor::BeforeEntryPoint { distance: 3 },
+                shift: 9,
+            },
+        ),
+        (
+            Pattern {
+                before: None,
+                elements: exact(b"S1"),
+                after: None,
+            },
+            Placement::InExecutable {
+                anchor: ExecutableAnchor::SectionStart {
+                    section: 1,
+                    distance: 2,
+                },
+                shift: 4,
+            },
+        ),
+        (
+            Pattern {
+                before: None,
+                elements: exact(b"SE"),
+                after: None,
+            },
+            Placement::InExecutable {
+                anchor: ExecutableAnchor::WholeSection {
+                    section: 0,
+                    start_only_from_length: Some(40),
+                },
+                shift: 6,
+            },
+        ),
+        (
+            Pattern {
+                before: None,
+                elements: exact(b"VI"),
+                after: None,
+            },
+            Placement::InExecutable {
+                anchor: ExecutableAnchor::VersionInformation,
+                shift: 0,
+            },
+        ),
+        (
+            Pattern {
+                before: None,
+                elements: exact(b"LAST"),
+                after: None,
+            },
+            Placement::InExecutable {
+                anchor: ExecutableAnchor::LastSectionStart { distance: 0 },
+                shift: 0,
+            },
+        ),
+        (
+            Pattern {
+                before: None,
+                elements: exact(b"TAIL"),
+                after: None,
+            },
+            Placement::InExecutable {
+                anchor: ExecutableAnchor::BeforeEnd { distance: 4 },
+                shift: 0,
+            },
         ),
     ]
 }
 
 fn image() -> Vec<u8> {
-    let names: Vec<String> = (0..patterns().len()).map(|index| format!("Fuzz.Pattern-{index}")).collect();
+    let names: Vec<String> = (0..patterns().len())
+        .map(|index| format!("Fuzz.Pattern-{index}"))
+        .collect();
     let patterns = patterns();
     let mut builder = ImageBuilder::new();
     for ((pattern, placement), name) in patterns.iter().zip(&names) {
         builder
             .add_pattern_signature(&PatternSignature {
+                group: GENERIC,
                 category: Category::Malware,
                 placement: *placement,
                 report_rank: 0,
                 pattern,
-                name,
-                indicator: Indicator::Strong,
+                outcome: PatternOutcome::Detection {
+                    name,
+                    indicator: Indicator::Strong,
+                },
             })
             .expect("every fixed pattern compiles");
     }
+    builder.describe_object_kind(
+        ObjectKind::WindowsExecutable,
+        KindDescription {
+            format_name: "executable".to_owned(),
+            groups: vec![GENERIC],
+            recognition: RecognitionRank::default(),
+            own_bytes: OwnBytes::Matched {
+                as_kind: None,
+                recognising_types: false,
+            },
+            found_in_full_scan_retypes: Vec::new(),
+            executable: true,
+        },
+    );
     builder.finish().expect("the fixed image builds")
 }
 
 fn detections(image: &Image<'_>, object: &[u8], chunk: usize) -> Vec<String> {
-    let settings = PatternSettings { potentially_unwanted: false, every_match: true };
-    let mut scan = PatternScan::new(image, settings, object.len() as u64).expect("the scan starts");
+    let settings = PatternSettings {
+        potentially_unwanted: false,
+        every_match: true,
+    };
+    let request = PatternRequest {
+        selection: GroupSelection::ForKind(ObjectKind::WindowsExecutable),
+        settings,
+        object_length: object.len() as u64,
+    };
+    let layout = ExecutableLayout {
+        entry_point: u32::from(object.first().copied().unwrap_or(0)),
+        sections: vec![
+            ExecutableSection {
+                start: 4,
+                length: 20,
+            },
+            ExecutableSection {
+                start: 30,
+                length: 0,
+            },
+        ],
+        version_information: vec![2, 40],
+    };
+    let mut scan = PatternScan::new(image, request, || Some(layout)).expect("the scan starts");
     for piece in object.chunks(chunk.max(1)) {
         scan.feed(piece).expect("a chunk is accepted");
     }
     scan.finish()
         .expect("the scan finishes")
+        .detections
         .into_iter()
         .map(|detection| detection.name)
         .collect()

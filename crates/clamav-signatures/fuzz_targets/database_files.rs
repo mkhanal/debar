@@ -5,9 +5,9 @@ use debar_image::ImageBuilder;
 use libfuzzer_sys::fuzz_target;
 
 const FILE_SEPARATOR: &[u8] = b"\xff\x00\xff";
-const FILE_NAMES: [&str; 16] = [
+const FILE_NAMES: [&str; 19] = [
     "a.hdb", "a.hsb", "a.hdu", "a.hsu", "a.mdb", "a.msb", "a.mdu", "a.msu", "a.fp", "a.sfp",
-    "a.ign", "a.ign2", "b.ign2", "b.hdb", "a.ndb", "a.cbc",
+    "a.ign", "a.ign2", "b.ign2", "b.hdb", "a.ndb", "a.cbc", "a.ftm", "a.ldb", "a.ndu",
 ];
 
 fuzz_target!(|data: &[u8]| {

@@ -14,6 +14,7 @@ path = "src/main.rs"
 debar-image.workspace = true
 debar-matching.workspace = true
 debar-platform.workspace = true
+debar-scan.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 

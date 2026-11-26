@@ -1,6 +1,6 @@
 use std::fmt;
 
-use debar_image::{Category, Indicator, Pattern, Placement};
+use debar_image::{Category, ExecutableAnchor, Indicator, Pattern, Placement};
 
 use crate::FUNCTIONALITY_LEVEL;
 use crate::body_pattern::{MalformedBody, ReadBody, UnsupportedBody, read_body};
@@ -21,7 +21,15 @@ const BEFORE_END: &[u8] = b"EOF-";
 const LONGEST_OFFSET: usize = 64;
 const MACRO_MARK: u8 = b'$';
 const MACRO_GROUPS: u32 = 32;
-const EXECUTABLE_OFFSET_PREFIXES: [&[u8]; 4] = [b"EP+", b"EP-", b"SL+", b"SE"];
+const EXECUTABLE_OFFSET_PREFIXES: [&[u8]; 2] = [b"EP+", b"EP-"];
+const LARGEST_OBJECT_WITH_WHOLE_SECTION_PLACEMENT: u32 = 262_144;
+const PORTABLE_EXECUTABLE_TARGET: u32 = 1;
+const AFTER_ENTRY_POINT: &[u8] = b"EP+";
+const BEFORE_ENTRY_POINT: &[u8] = b"EP-";
+const LAST_SECTION: &[u8] = b"SL+";
+const WHOLE_SECTION: &[u8] = b"SE";
+const SECTION: &[u8] = b"S";
+const SECTION_DISTANCE_MARK: u8 = b'+';
 const VERSION_INFO: &[u8] = b"VI";
 const LONGEST_LINE: usize = 8190;
 
@@ -69,28 +77,36 @@ pub enum ReadExtendedLine<'a> {
     Ignored,
     OutsideFunctionalityLevel,
     TargetNotLoaded,
-    NeverReports,
-    NeedsExecutableFacts,
-    TargetNotYetCompiled,
-    BodyNotYetCompiled(UnsupportedBody),
+    NeverReports(LoadedBody),
+    BodyNotYetCompiled {
+        reason: UnsupportedBody,
+        loaded: LoadedBody,
+    },
     Signature(ExtendedSignature<'a>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadedBody {
+    pub target: u32,
+    pub longest_part: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtendedSignature<'a> {
+    pub target: u32,
     pub name: &'a str,
     pub indicator: Indicator,
     pub category: Category,
     pub placement: Placement,
     pub pattern: Pattern,
     pub plain_bytes: bool,
+    pub longest_part: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Offset {
+pub enum Offset {
     Placed(Placement),
     MacroGroup,
-    InAnExecutable,
 }
 
 pub fn read_line<'a>(
@@ -140,28 +156,62 @@ pub fn read_line<'a>(
         .map_err(|_| MalformedExtendedLine::NameNotText)?;
     let offset = read_offset(offset_field, target)?;
     let body = read_body(body_field).map_err(MalformedExtendedLine::Body)?;
-    let (pattern, plain_bytes) = match body {
+    let (pattern, plain_bytes, longest_part) = match body {
         ReadBody::Pattern {
             pattern,
             plain_bytes,
-        } => (pattern, plain_bytes),
-        ReadBody::Unsupported(reason) => return Ok(ReadExtendedLine::BodyNotYetCompiled(reason)),
+            longest_part,
+        } => (pattern, plain_bytes, longest_part),
+        ReadBody::Unsupported {
+            reason,
+            longest_part,
+        } => {
+            return Ok(ReadExtendedLine::BodyNotYetCompiled {
+                reason,
+                loaded: LoadedBody {
+                    target,
+                    longest_part,
+                },
+            });
+        }
     };
     let placement = match offset {
-        Offset::MacroGroup => return Ok(ReadExtendedLine::NeverReports),
-        Offset::InAnExecutable => return Ok(ReadExtendedLine::NeedsExecutableFacts),
+        Offset::MacroGroup => {
+            return Ok(ReadExtendedLine::NeverReports(LoadedBody {
+                target,
+                longest_part,
+            }));
+        }
+        Offset::Placed(Placement::InExecutable {
+            anchor:
+                ExecutableAnchor::WholeSection {
+                    section,
+                    start_only_from_length: None,
+                },
+            shift: 0,
+        }) if target == PORTABLE_EXECUTABLE_TARGET
+            && plain_bytes
+            && !offset_field.contains(&b',') =>
+        {
+            Placement::InExecutable {
+                anchor: ExecutableAnchor::WholeSection {
+                    section,
+                    start_only_from_length: Some(LARGEST_OBJECT_WITH_WHOLE_SECTION_PLACEMENT),
+                },
+                shift: 0,
+            }
+        }
         Offset::Placed(placement) => placement,
     };
-    if target != GENERIC_TARGET {
-        return Ok(ReadExtendedLine::TargetNotYetCompiled);
-    }
     Ok(ReadExtendedLine::Signature(ExtendedSignature {
+        target,
         name,
         indicator: indicator_named(name),
         category,
         placement,
         pattern,
         plain_bytes,
+        longest_part,
     }))
 }
 
@@ -204,7 +254,7 @@ fn read_target(field: &[u8]) -> Result<u32, MalformedExtendedLine> {
         .ok_or(MalformedExtendedLine::TargetNotANumber)
 }
 
-fn read_offset(field: &[u8], target: u32) -> Result<Offset, MalformedExtendedLine> {
+pub fn read_offset(field: &[u8], target: u32) -> Result<Offset, MalformedExtendedLine> {
     if field.len() > LONGEST_OFFSET {
         return Err(MalformedExtendedLine::OffsetTooLong);
     }
@@ -213,7 +263,7 @@ fn read_offset(field: &[u8], target: u32) -> Result<Offset, MalformedExtendedLin
     }
     if is_executable_offset(field) {
         return if TARGETS_WITH_EXECUTABLE_OFFSETS.contains(&target) {
-            Ok(Offset::InAnExecutable)
+            read_executable_offset(field).map(Offset::Placed)
         } else {
             Err(MalformedExtendedLine::ExecutableOffsetOnTarget { target })
         };
@@ -228,39 +278,95 @@ fn read_offset(field: &[u8], target: u32) -> Result<Offset, MalformedExtendedLin
             _ => Err(MalformedExtendedLine::OffsetMalformed),
         };
     }
-    let (position, shift) = match field.iter().position(|byte| *byte == b',') {
-        Some(comma) => (
-            field.get(..comma).unwrap_or_default(),
-            field.get(comma.saturating_add(1)..).unwrap_or_default(),
-        ),
-        None => (field, &b""[..]),
-    };
-    let number = |digits: &[u8]| {
-        decimal_or_zero(digits)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or(MalformedExtendedLine::OffsetMalformed)
-    };
-    let shift = number(shift)?;
+    let (position, shift) = split_shift(field)?;
     if let Some(distance) = position.strip_prefix(BEFORE_END) {
-        return Ok(Offset::Placed(Placement::BeforeEnd {
-            distance: number(distance)?,
-            shift,
-        }));
+        let distance = offset_number(distance)?;
+        return Ok(Offset::Placed(
+            if TARGETS_WITH_EXECUTABLE_OFFSETS.contains(&target) {
+                Placement::InExecutable {
+                    anchor: ExecutableAnchor::BeforeEnd { distance },
+                    shift,
+                }
+            } else {
+                Placement::BeforeEnd { distance, shift }
+            },
+        ));
     }
     Ok(Offset::Placed(Placement::FromStart {
-        distance: number(position)?,
+        distance: offset_number(position)?,
         shift,
     }))
 }
 
+fn split_shift(field: &[u8]) -> Result<(&[u8], u32), MalformedExtendedLine> {
+    match field.iter().position(|byte| *byte == b',') {
+        Some(comma) => Ok((
+            field.get(..comma).unwrap_or_default(),
+            offset_number(field.get(comma.saturating_add(1)..).unwrap_or_default())?,
+        )),
+        None => Ok((field, 0)),
+    }
+}
+
+fn offset_number(digits: &[u8]) -> Result<u32, MalformedExtendedLine> {
+    decimal_or_zero(digits)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or(MalformedExtendedLine::OffsetMalformed)
+}
+
+fn read_executable_offset(field: &[u8]) -> Result<Placement, MalformedExtendedLine> {
+    let (position, shift) = split_shift(field)?;
+    if position.starts_with(VERSION_INFO) {
+        return Ok(Placement::InExecutable {
+            anchor: ExecutableAnchor::VersionInformation,
+            shift: 0,
+        });
+    }
+    let anchor = if let Some(distance) = position.strip_prefix(AFTER_ENTRY_POINT) {
+        ExecutableAnchor::AfterEntryPoint {
+            distance: offset_number(distance)?,
+        }
+    } else if let Some(distance) = position.strip_prefix(BEFORE_ENTRY_POINT) {
+        ExecutableAnchor::BeforeEntryPoint {
+            distance: offset_number(distance)?,
+        }
+    } else if let Some(section) = position.strip_prefix(WHOLE_SECTION) {
+        ExecutableAnchor::WholeSection {
+            section: offset_number(section)?,
+            start_only_from_length: None,
+        }
+    } else if let Some(distance) = position.strip_prefix(LAST_SECTION) {
+        ExecutableAnchor::LastSectionStart {
+            distance: offset_number(distance)?,
+        }
+    } else if let Some(rest) = position.strip_prefix(SECTION) {
+        let (section, rest) = leading_number(rest)?;
+        let rest = rest
+            .strip_prefix(&[SECTION_DISTANCE_MARK])
+            .ok_or(MalformedExtendedLine::OffsetMalformed)?;
+        let (distance, _ignored_by_the_format) = leading_number(rest)?;
+        ExecutableAnchor::SectionStart { section, distance }
+    } else {
+        return Err(MalformedExtendedLine::OffsetMalformed);
+    };
+    Ok(Placement::InExecutable { anchor, shift })
+}
+
+fn leading_number(text: &[u8]) -> Result<(u32, &[u8]), MalformedExtendedLine> {
+    let digits = text.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    if digits == 0 {
+        return Err(MalformedExtendedLine::OffsetMalformed);
+    }
+    let number = offset_number(text.get(..digits).unwrap_or_default())?;
+    Ok((number, text.get(digits..).unwrap_or_default()))
+}
+
 fn is_executable_offset(field: &[u8]) -> bool {
-    field == VERSION_INFO
+    field.starts_with(VERSION_INFO)
+        || field.starts_with(SECTION)
         || EXECUTABLE_OFFSET_PREFIXES
             .iter()
             .any(|prefix| field.starts_with(prefix))
-        || field
-            .strip_prefix(b"S")
-            .is_some_and(|rest| rest.first().is_some_and(u8::is_ascii_digit))
 }
 
 fn without_trailer(name: &[u8]) -> &[u8] {

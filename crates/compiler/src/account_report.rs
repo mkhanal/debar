@@ -1,16 +1,36 @@
 use debar_clamav_signatures::{Account, FileAccount, LineOutcome};
-use debar_image::{Image, ImageError, Provenance, SectionKind};
+use debar_image::{Image, ImageError, Provenance, SectionKind, SignatureGroup};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 pub fn account_report(account: &Account, image: &[u8]) -> Result<Value, ImageError> {
     let opened = Image::open(image)?;
+    let recognition_group = opened
+        .object_kinds()?
+        .and_then(|kinds| kinds.typing_rules().recognition_group);
     let sections: Vec<Value> = opened
         .sections()
         .iter()
         .map(|section| {
+            let recognises_types = section.kind == SectionKind::PatternGroup
+                && recognition_group.is_some_and(|group| group.0 == section.qualifier);
+            let window_overlap = if section.kind == SectionKind::PatternGroup {
+                opened
+                    .pattern_group(SignatureGroup(section.qualifier))
+                    .ok()
+                    .flatten()
+                    .and_then(|group| group.report_windows())
+                    .map(|windows| windows.overlap)
+            } else {
+                None
+            };
             json!({
-                "kind": section_kind_name(section.kind),
+                "window_overlap": window_overlap,
+                "kind": if recognises_types {
+                    "type recognition signatures"
+                } else {
+                    section_kind_name(section.kind)
+                },
                 "qualifier": format!("{:#08x}", section.qualifier),
                 "bytes": section.range.len(),
                 "items": section.item_count,
@@ -95,7 +115,7 @@ fn outcome_name(outcome: LineOutcome) -> &'static str {
         LineOutcome::NotASignature => "not_a_signature",
         LineOutcome::TargetNotLoaded => "target_not_loaded",
         LineOutcome::NeverReports => "never_reports",
-        LineOutcome::NeedsExecutableFacts => "needs_executable_facts",
+        LineOutcome::ShadowedByDuplicate => "shadowed_by_duplicate",
         LineOutcome::NotYetCompiled => "not_yet_compiled",
     }
 }
@@ -108,6 +128,8 @@ fn section_kind_name(kind: SectionKind) -> &'static str {
         SectionKind::HashEntries => "hash entries",
         SectionKind::PatternGroup => "pattern signatures",
         SectionKind::Names => "names",
+        SectionKind::ObjectKinds => "object kinds",
+        SectionKind::TypeMagic => "type magic",
     }
 }
 

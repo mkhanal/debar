@@ -38,6 +38,19 @@ impl PositionSet {
     }
 
     #[must_use]
+    pub fn of_ranges(ranges: impl IntoIterator<Item = (u64, u64)>) -> Self {
+        let mut set = Self::default();
+        for (first, last) in ranges {
+            if first <= last
+                && let Some(end) = last.checked_add(1)
+            {
+                set.ranges.push(first..end);
+            }
+        }
+        set.normalised()
+    }
+
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.ranges.is_empty()
     }

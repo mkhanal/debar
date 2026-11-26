@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use debar_image::Image;
-use debar_matching::{PatternScan, PatternSettings};
+use debar_image::{Image, ObjectKind};
+use debar_matching::{GroupSelection, PatternRequest, PatternScan, PatternSettings};
 use debar_platform::command_line::arguments;
 use debar_platform::input::read_scanned_file;
 use debar_platform::mapped_file::MappedFile;
@@ -46,11 +46,16 @@ fn measure(image_path: &Path, files: &[PathBuf]) -> Result<String, Box<dyn std::
         let object = read_scanned_file(path)?;
         let length = u64::try_from(object.len())?;
         let stopwatch = Stopwatch::start();
-        let mut scan = PatternScan::new(&image, settings, length)?;
+        let request = PatternRequest {
+            selection: GroupSelection::ForKind(ObjectKind::BinaryData),
+            settings,
+            object_length: length,
+        };
+        let mut scan = PatternScan::new(&image, request, || None)?;
         for chunk in object.chunks(CHUNK_LENGTH) {
             scan.feed(chunk)?;
         }
-        detections = detections.saturating_add(scan.finish()?.len());
+        detections = detections.saturating_add(scan.finish()?.detections.len());
         scanning = scanning.saturating_add(stopwatch.elapsed());
         scanned_bytes = scanned_bytes.saturating_add(length);
     }

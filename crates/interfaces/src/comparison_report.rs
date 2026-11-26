@@ -2,13 +2,16 @@ use std::fmt;
 use std::path::Path;
 
 use debar_image::{Image, ImageError, Indicator, SectionKind};
+use debar_image::{ObjectKind, OwnBytes};
 use debar_matching::{
-    HashSettings, ObjectDigests, PatternScan, PatternScanError, PatternSettings, Trust,
-    whole_object_detections, whole_object_digest_need, whole_object_trust,
+    GroupSelection, HashSettings, ObjectDigests, PatternRequest, PatternScan, PatternScanError,
+    PatternSettings, Trust, TypeFound, whole_object_detections, whole_object_digest_need,
+    whole_object_trust,
 };
 use debar_platform::filesystem::{FilesystemError, write_file_atomically};
 use debar_platform::input::{UnreadableObject, read_scanned_file};
 use debar_platform::mapped_file::{ExpectedAccess, MappedFile, MappingError};
+use debar_scan::{TypingError, kind_after_full_scan, kind_from_first_bytes};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
@@ -22,6 +25,8 @@ pub enum ComparisonReportError {
     Mapping(MappingError),
     Image(ImageError),
     Patterns(PatternScanError),
+    Typing(TypingError),
+    KindNotDescribed(ObjectKind),
     Input(UnreadableObject),
     InputTooLarge,
     Report(FilesystemError),
@@ -33,6 +38,10 @@ impl fmt::Display for ComparisonReportError {
             Self::Mapping(error) => write!(formatter, "cannot map the image: {error}"),
             Self::Image(error) => write!(formatter, "cannot use the image: {error}"),
             Self::Patterns(error) => write!(formatter, "cannot match the patterns: {error}"),
+            Self::Typing(error) => write!(formatter, "cannot type the object: {error}"),
+            Self::KindNotDescribed(kind) => {
+                write!(formatter, "the image does not describe the kind {kind:?}")
+            }
             Self::Input(error) => write!(formatter, "{error}"),
             Self::InputTooLarge => write!(formatter, "the input is larger than 2^64 bytes"),
             Self::Report(error) => write!(formatter, "cannot write the report: {error}"),
@@ -79,17 +88,19 @@ fn ready_image(mapped: &MappedFile) -> Result<Image<'_>, ComparisonReportError> 
 
 fn top_level_record(image: &Image<'_>, object: &[u8]) -> Result<Value, ComparisonReportError> {
     let size = u64::try_from(object.len()).map_err(|_| ComparisonReportError::InputTooLarge)?;
-    let (detections, verdict) = if size <= LARGEST_OBJECT_LEFT_UNSCANNED {
-        (Vec::new(), Verdict::NothingFound)
+    let (kind, detections, verdict) = if size <= LARGEST_OBJECT_LEFT_UNSCANNED {
+        (None, Vec::new(), Verdict::NothingFound)
     } else {
-        scan_outcome(image, object, size)?
+        let scanned = scan_outcome(image, object, size)?;
+        (Some(scanned.kind), scanned.detections, scanned.verdict)
     };
+    let type_name = kind.map(|kind| format_name(image, kind)).transpose()?;
     Ok(json!({
         "schema": REPORT_SCHEMA_VERSION,
         "id": 0,
         "parent": null,
         "depth": 0,
-        "type": null,
+        "type": type_name,
         "size": size,
         "sha256": lowercase_hex(&Sha256::digest(object)),
         "detections": detections,
@@ -103,47 +114,100 @@ fn top_level_record(image: &Image<'_>, object: &[u8]) -> Result<Value, Compariso
     }))
 }
 
+fn format_name(image: &Image<'_>, kind: ObjectKind) -> Result<String, ComparisonReportError> {
+    image
+        .object_kinds()
+        .map_err(ComparisonReportError::Image)?
+        .and_then(|kinds| kinds.describe(kind).ok().flatten())
+        .map(|description| description.format_name.to_owned())
+        .ok_or(ComparisonReportError::KindNotDescribed(kind))
+}
+
 struct Found {
     name: String,
     indicator: Indicator,
+}
+
+struct ScanOutcome {
+    kind: ObjectKind,
+    detections: Vec<String>,
+    verdict: Verdict,
 }
 
 fn scan_outcome(
     image: &Image<'_>,
     object: &[u8],
     size: u64,
-) -> Result<(Vec<String>, Verdict), ComparisonReportError> {
-    let mut found = pattern_detections(image, object, size)?;
+) -> Result<ScanOutcome, ComparisonReportError> {
+    let kind = kind_from_first_bytes(image, object).map_err(ComparisonReportError::Typing)?;
+    let own_bytes = image
+        .object_kinds()
+        .map_err(ComparisonReportError::Image)?
+        .and_then(|kinds| kinds.describe(kind).ok().flatten())
+        .ok_or(ComparisonReportError::KindNotDescribed(kind))?
+        .own_bytes;
+    let OwnBytes::Matched {
+        as_kind,
+        recognising_types,
+    } = own_bytes
+    else {
+        return Ok(ScanOutcome {
+            kind,
+            detections: Vec::new(),
+            verdict: Verdict::NothingFound,
+        });
+    };
+    let matched_as = as_kind.unwrap_or(kind);
+    let selection = if recognising_types {
+        GroupSelection::ForKindRecognisingTypes(matched_as)
+    } else {
+        GroupSelection::ForKind(matched_as)
+    };
+    let (mut found, types_found) = pattern_detections(image, object, size, selection)?;
+    let kind =
+        kind_after_full_scan(image, kind, &types_found).map_err(ComparisonReportError::Typing)?;
     let need = whole_object_digest_need(image, size, HashSettings::default())
         .map_err(ComparisonReportError::Image)?;
     let digests = ObjectDigests::of(object, need);
     found.extend(hash_detections(image, size, &digests).map_err(ComparisonReportError::Image)?);
-    verdict_of(image, size, &digests, &found).map_err(ComparisonReportError::Image)
+    let (detections, verdict) =
+        verdict_of(image, size, &digests, &found).map_err(ComparisonReportError::Image)?;
+    Ok(ScanOutcome {
+        kind,
+        detections,
+        verdict,
+    })
 }
 
 fn pattern_detections(
     image: &Image<'_>,
     object: &[u8],
     size: u64,
-) -> Result<Vec<Found>, ComparisonReportError> {
-    let settings = PatternSettings {
-        potentially_unwanted: false,
-        every_match: true,
+    selection: GroupSelection,
+) -> Result<(Vec<Found>, Vec<TypeFound>), ComparisonReportError> {
+    let request = PatternRequest {
+        selection,
+        settings: PatternSettings {
+            potentially_unwanted: false,
+            every_match: true,
+        },
+        object_length: size,
     };
     let mut scan =
-        PatternScan::new(image, settings, size).map_err(ComparisonReportError::Patterns)?;
+        PatternScan::new(image, request, || None).map_err(ComparisonReportError::Patterns)?;
     for chunk in object.chunks(CHUNK_LENGTH) {
         scan.feed(chunk).map_err(ComparisonReportError::Patterns)?;
     }
-    Ok(scan
-        .finish()
-        .map_err(ComparisonReportError::Patterns)?
+    let outcomes = scan.finish().map_err(ComparisonReportError::Patterns)?;
+    let found = outcomes
+        .detections
         .into_iter()
         .map(|detection| Found {
             name: detection.name,
             indicator: detection.indicator,
         })
-        .collect())
+        .collect();
+    Ok((found, outcomes.types_found))
 }
 
 fn hash_detections(
