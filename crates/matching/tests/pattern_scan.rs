@@ -338,12 +338,14 @@ fn engine_detections(
         potentially_unwanted: false,
         unwanted_categories: UnwantedCategories::Every,
         every_match,
+        largest_object_for_regular_expressions: None,
     };
     let request = PatternRequest {
         selection: GroupSelection::ForKind(ObjectKind::BinaryData),
         settings,
         object_length: object.len() as u64,
         context: ObjectContext::TOP_LEVEL,
+        image_fuzzy_hash: None,
     };
     let mut scan = PatternScan::new(image, request, || None).unwrap();
     let mut rest = object;

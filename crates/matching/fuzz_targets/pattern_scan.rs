@@ -237,12 +237,14 @@ fn detections(image: &Image<'_>, object: &[u8], chunk: usize) -> Vec<String> {
         potentially_unwanted: false,
         unwanted_categories: UnwantedCategories::Every,
         every_match: true,
+        largest_object_for_regular_expressions: None,
     };
     let request = PatternRequest {
         selection: GroupSelection::ForKind(ObjectKind::WindowsExecutable),
         settings,
         object_length: object.len() as u64,
         context: ObjectContext::TOP_LEVEL,
+        image_fuzzy_hash: None,
     };
     let layout = ExecutableLayout {
         entry_point: u32::from(object.first().copied().unwrap_or(0)),

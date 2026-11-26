@@ -183,9 +183,11 @@ fn recognition_winner(
             potentially_unwanted: false,
             unwanted_categories: UnwantedCategories::Every,
             every_match: true,
+            largest_object_for_regular_expressions: None,
         },
         object_length: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
         context: ObjectContext::TOP_LEVEL,
+        image_fuzzy_hash: None,
     };
     let mut scan = PatternScan::new(image, request, || None)?;
     scan.feed(bytes)?;

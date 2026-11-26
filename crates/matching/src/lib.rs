@@ -1,14 +1,18 @@
+mod byte_values;
+mod container_entries;
 mod digests;
 mod executable_layout;
 mod hash_lookup;
 mod logical_state;
 mod part_ends;
 mod pattern_scan;
+mod plug_in_matching;
 mod second_pass_search;
 
 pub use second_pass_search::largest_armed_search_bytes;
 mod verification;
 
+pub use container_entries::{ContainerEntry, ContainerEntryError, container_entry_detections};
 pub use digests::{DigestNeed, ObjectDigests};
 pub use executable_layout::{ExecutableLayout, ExecutableSection};
 pub use hash_lookup::{

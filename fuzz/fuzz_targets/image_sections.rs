@@ -212,12 +212,14 @@ fuzz_target!(|data: &[u8]| {
         potentially_unwanted: true,
         unwanted_categories: UnwantedCategories::Every,
         every_match: true,
+        largest_object_for_regular_expressions: None,
     };
     let request = PatternRequest {
         selection: GroupSelection::ForKindRecognisingTypes(ObjectKind::WindowsExecutable),
         settings,
         object_length: OBJECT.len() as u64,
         context: ObjectContext::TOP_LEVEL,
+        image_fuzzy_hash: None,
     };
     let layout = || {
         Some(ExecutableLayout {

@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use acceptance::{
-    compile, lowercase_hex, members_of_pinned_databases, official_image, pinned_databases,
-    release_binaries, scratch_directory, target_directory, write_file,
+    ContainerMember, compile, lowercase_hex, members_of_pinned_databases, official_image,
+    pinned_databases, release_binaries, scratch_directory, target_directory, write_file,
 };
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -307,23 +307,70 @@ fn a_malformed_extended_signature_line_fails_the_compile() {
     }
 }
 
-const LOGICAL_LINE_OUTCOMES: [&str; 7] = [
+const LOGICAL_LINE_OUTCOMES: [&str; 8] = [
     "compiled",
     "outside_functionality_level",
     "ignored",
     "comment",
     "target_not_loaded",
     "not_loaded",
+    "needs_backtracking_engine",
     "not_yet_compiled",
 ];
 
+const BACKTRACKING_CONSTRUCTS: [&str; 6] = ["(?P=", "(?=", "(?!", "(?<=", "(?<!", "(?>"];
+
 fn holds_a_subsignature_not_yet_compiled(line: &str) -> bool {
-    line.split(';').skip(3).any(|field| {
-        field.starts_with('$')
-            || field.contains('/')
-            || field.starts_with("fuzzy_img#")
-            || (field.contains('(') && field.matches('#').count() >= 2)
-    })
+    line.split(';').skip(3).any(|field| field.starts_with('$'))
+}
+
+fn holds_a_construct_needing_backtracking(line: &str) -> bool {
+    let Some(start) = line.find('/') else {
+        return false;
+    };
+    let expressions = line.get(start..).unwrap_or_default();
+    BACKTRACKING_CONSTRUCTS
+        .iter()
+        .any(|construct| expressions.contains(construct))
+        || expressions
+            .replace("\\\\", "")
+            .as_bytes()
+            .windows(2)
+            .any(|pair| pair[0] == b'\\' && (b'1'..=b'9').contains(&pair[1]))
+}
+
+fn assert_needing_backtracking_only_for_its_constructs(file: &Value, member: &ContainerMember) {
+    const REQUIREMENT: &str =
+        "Every Logical Signature Line In The Pinned Databases Is Accounted For In The Image";
+    let outcomes = &file["outcomes"];
+    let needing_backtracking: Vec<u64> = file["lines_not_compiled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|line| line["outcome"] == "needs_backtracking_engine")
+        .map(|line| line["line"].as_u64().unwrap())
+        .collect();
+    for line in &needing_backtracking {
+        let text = String::from_utf8_lossy(
+            member
+                .contents
+                .split(|byte| *byte == b'\n')
+                .nth(usize::try_from(*line).unwrap().checked_sub(1).unwrap())
+                .unwrap(),
+        )
+        .into_owned();
+        assert!(
+            holds_a_construct_needing_backtracking(&text),
+            "{REQUIREMENT}: line {line} of {} needs a backtracking engine only for a backreference, lookaround or atomic group",
+            member.member
+        );
+    }
+    assert_eq!(
+        count(outcomes, "needs_backtracking_engine"),
+        u64::try_from(needing_backtracking.len()).unwrap(),
+        "{REQUIREMENT}: {}",
+        member.member
+    );
 }
 
 #[test]
@@ -363,6 +410,7 @@ fn every_logical_signature_line_in_the_pinned_databases_is_accounted_for_in_the_
             .iter()
             .map(|line| usize::try_from(line["line"].as_u64().unwrap()).unwrap())
             .collect();
+        assert_needing_backtracking_only_for_its_constructs(file, member);
         let loaded: Vec<String> = String::from_utf8_lossy(&member.contents)
             .split('\n')
             .zip(1usize..)
@@ -376,7 +424,7 @@ fn every_logical_signature_line_in_the_pinned_databases_is_accounted_for_in_the_
         assert_eq!(
             count(outcomes, "not_yet_compiled"),
             u64::try_from(not_yet).unwrap(),
-            "{REQUIREMENT}: only lines with a subsignature of a later slice in {} wait",
+            "{REQUIREMENT}: only lines with a macro subsignature in {} wait",
             member.member
         );
         assert_eq!(
@@ -447,6 +495,114 @@ fn a_malformed_logical_signature_line_fails_the_compile() {
         assert!(!output.status.success(), "{REQUIREMENT}: {case}");
         assert!(
             message.contains("local.ldb line 2"),
+            "{REQUIREMENT}: {case}: {message}"
+        );
+        assert!(!image.exists(), "{REQUIREMENT}: {case}");
+    }
+}
+
+const CONTAINER_LINE_OUTCOMES: [&str; 4] = [
+    "compiled",
+    "outside_functionality_level",
+    "ignored",
+    "comment",
+];
+
+#[test]
+fn every_container_signature_line_in_the_pinned_databases_is_accounted_for_in_the_image() {
+    const REQUIREMENT: &str =
+        "Every Container Signature Line In The Pinned Databases Is Accounted For In The Image";
+    let compiled = official_image().unwrap();
+    let files = compiled.account["files"].as_array().unwrap();
+    let members = members_of_pinned_databases(&pinned_databases().unwrap()).unwrap();
+    let mut compiled_lines = 0u64;
+    let mut container_files = 0;
+    for file in files
+        .iter()
+        .filter(|file| file["kind"] == "container signatures")
+    {
+        container_files += 1;
+        let member = members
+            .iter()
+            .find(|member| member.member == file["member"].as_str().unwrap())
+            .unwrap();
+        let outcomes = &file["outcomes"];
+        let accounted: u64 = CONTAINER_LINE_OUTCOMES
+            .iter()
+            .map(|outcome| count(outcomes, outcome))
+            .sum();
+        assert_eq!(
+            accounted,
+            u64::try_from(member.lines).unwrap(),
+            "{REQUIREMENT}: every line of {} has one outcome",
+            member.member
+        );
+        let comments = String::from_utf8_lossy(&member.contents)
+            .split('\n')
+            .filter(|line| line.starts_with('#'))
+            .count();
+        let left_out = file["lines_not_compiled"].as_array().unwrap().len();
+        assert_eq!(
+            count(outcomes, "compiled"),
+            u64::try_from(member.lines - comments - left_out).unwrap(),
+            "{REQUIREMENT}: every loaded line of {} is compiled",
+            member.member
+        );
+        compiled_lines += count(outcomes, "compiled");
+    }
+    assert_eq!(container_files, 2, "{REQUIREMENT}: main.cdb and daily.cdb");
+    assert!(
+        compiled_lines > 100,
+        "{REQUIREMENT}: the pinned databases were read"
+    );
+    let image_signatures: u64 = compiled.account["image"]["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|section| section["kind"] == "container signatures")
+        .map(|section| section["items"].as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        image_signatures, compiled_lines,
+        "{REQUIREMENT}: one image entry per compiled line"
+    );
+}
+
+#[test]
+fn a_malformed_container_signature_line_fails_the_compile() {
+    const REQUIREMENT: &str = "A Malformed Container Signature Line Fails The Compile";
+    let directory = scratch_directory("malformed-container").unwrap();
+    for (case, line) in [
+        ("few", "C.Few:CL_TYPE_ZIP:*:*:*:*:*:*:*\n"),
+        ("many", "C.Many:CL_TYPE_ZIP:*:*:*:*:*:*:*:*:0:255:1\n"),
+        ("type", "C.Type:ZIP:*:*:*:*:*:*:*:*\n"),
+        ("size", "C.Size:CL_TYPE_ZIP:*:*:10-:*:*:*:*:*\n"),
+        ("position", "C.Position:CL_TYPE_ZIP:*:*:*:*:*:2x:*:*\n"),
+        ("encrypted", "C.Encrypted:CL_TYPE_ZIP:*:*:*:*:2:*:*:*\n"),
+        ("level", "C.Level:CL_TYPE_ZIP:*:*:*:*:*:*:*:*:x\n"),
+        ("name", "C.Name:CL_TYPE_ZIP:*:a(b:*:*:*:*:*:*\n"),
+    ] {
+        let databases = directory.join(case);
+        std::fs::create_dir(&databases).unwrap();
+        write_file(
+            &databases.join("local.cdb"),
+            format!("C.Good:CL_TYPE_ZIP:*:*:*:*:*:*:*:*\n{line}").as_bytes(),
+        )
+        .unwrap();
+        let image = directory.join(format!("{case}.image"));
+        let output = std::process::Command::new(&release_binaries().unwrap().compiler)
+            .arg("--databases")
+            .arg(&databases)
+            .arg("--image")
+            .arg(&image)
+            .arg("--account")
+            .arg(directory.join(format!("{case}.json")))
+            .output()
+            .unwrap();
+        let message = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{REQUIREMENT}: {case}");
+        assert!(
+            message.contains("local.cdb line 2"),
             "{REQUIREMENT}: {case}: {message}"
         );
         assert!(!image.exists(), "{REQUIREMENT}: {case}");

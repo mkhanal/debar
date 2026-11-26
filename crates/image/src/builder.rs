@@ -6,6 +6,7 @@ use zerocopy::IntoBytes;
 use zerocopy::little_endian::{U32, U64};
 
 use crate::byte_rarity::rarity_of;
+use crate::container_signatures::{self, ContainerSignaturesNotBuilt, PendingContainerSignature};
 use crate::hash_partition::{self, PartitionKey, PartitionNotBuilt, PendingEntry};
 use crate::layout::{
     BYTE_ORDER_MARK, CHECKSUM_LENGTH, DATABASE_NAME_LENGTH, DatabaseEntry, DirectoryEntry, Header,
@@ -19,9 +20,10 @@ use crate::logical_group::{
     PendingSubsignature,
 };
 use crate::model::{
-    Category, DatabaseRecord, Digest, HashSignature, HashedSize, Indicator, LogicalConditions,
-    LogicalSignature, PartMemory, PatternOutcome, PatternSignature, Placement, Provenance,
-    ReportWindows, SignatureGroup, TypeFinding, UnwantedCategory,
+    Category, ContainerSignature, DatabaseRecord, Digest, Expression, HashSignature, HashedSize,
+    Indicator, LogicalConditions, LogicalSignature, PartMemory, PatternOutcome, PatternSignature,
+    Placement, Provenance, ReportWindows, SignatureGroup, Subsignature, TypeFinding,
+    UnwantedCategory,
 };
 use crate::names::{self, NameId};
 use crate::object_kind::ObjectKind;
@@ -30,6 +32,9 @@ use crate::pattern_group::{
     self, GroupNotBuilt, PatternSignatureId, PendingPatternSignature, RecordedOutcome,
 };
 use crate::pattern_program::{Anchor, PatternNotCompiled, Segment, segments_of};
+use crate::plug_in_subsignatures::{
+    self, PendingComparison, PendingExpression, PendingImageHash, PendingPlugIns, PlugInsNotBuilt,
+};
 use crate::selection_filters::{self, GroupAnchors};
 use crate::type_magic::{self, MagicTable, PendingMagic};
 use crate::unwanted_categories;
@@ -63,6 +68,11 @@ pub enum BuildError {
         group: SignatureGroup,
         reason: LogicalGroupNotBuilt,
     },
+    PlugIns {
+        group: SignatureGroup,
+        reason: PlugInsNotBuilt,
+    },
+    ContainerSignatures(ContainerSignaturesNotBuilt),
     ObjectKinds(KindsNotBuilt),
     TypeMagicTooLarge,
     UnwantedCategories,
@@ -109,6 +119,17 @@ impl fmt::Display for BuildError {
                 "cannot build the logical signatures of group {}: {reason:?}",
                 group.0
             ),
+            Self::PlugIns { group, reason } => write!(
+                formatter,
+                "cannot build the regular expressions, byte comparisons and image hashes of group {}: {reason:?}",
+                group.0
+            ),
+            Self::ContainerSignatures(reason) => {
+                write!(
+                    formatter,
+                    "cannot build the container signatures: {reason:?}"
+                )
+            }
             Self::ObjectKinds(reason) => {
                 write!(formatter, "cannot build the object kinds: {reason:?}")
             }
@@ -163,11 +184,18 @@ pub struct ImageBuilder {
     typing: Option<TypingRules>,
     magic: Vec<PendingMagic>,
     unwanted_categories: BTreeMap<String, Option<String>>,
+    containers: Vec<PendingContainer>,
+}
+
+struct PendingContainer {
+    name: u32,
+    signature: PendingContainerSignature,
 }
 
 struct PendingGroup {
     patterns: Vec<PendingPattern>,
     logical: Vec<PendingLogical>,
+    plug_ins: PendingPlugIns,
     report_windows: Option<ReportWindows>,
     part_memory: PartMemory,
 }
@@ -177,6 +205,7 @@ impl Default for PendingGroup {
         Self {
             patterns: Vec::new(),
             logical: Vec::new(),
+            plug_ins: PendingPlugIns::default(),
             report_windows: None,
             part_memory: PartMemory::EarliestEnd,
         }
@@ -211,6 +240,7 @@ struct PendingLogical {
 }
 
 const HITS_SCALE_BITS: u32 = 48;
+const RECORDED_STARTS_OF_A_COMPARED_SUBSIGNATURE: u32 = 1024;
 const SIXTEENTHS_PER_BIT: u32 = 16;
 
 fn expected_hits_of_anchor(anchor: &Anchor) -> u64 {
@@ -318,36 +348,18 @@ impl ImageBuilder {
                 reason,
             }
         })?;
-        let mut segmented: Vec<Vec<Vec<Segment>>> = Vec::with_capacity(subsignature_count);
-        for subsignature in signature.subsignatures {
-            let mut patterns = Vec::with_capacity(subsignature.patterns.len());
-            for pattern in &subsignature.patterns {
-                patterns.push(segments_of(pattern).map_err(|reason| BuildError::Pattern {
-                    name: described(),
-                    reason,
-                })?);
-            }
-            segmented.push(patterns);
-        }
-        let hits: Vec<u64> = signature
-            .subsignatures
-            .iter()
-            .zip(&segmented)
-            .map(|(subsignature, patterns)| {
-                patterns.iter().fold(0u64, |hits, segments| {
-                    hits.saturating_add(expected_hits(subsignature.placement, segments))
-                })
-            })
-            .collect();
+        let segmented = segmented_contents(signature)?;
+        let has_plug_ins = segmented.iter().any(Option::is_none);
+        let hits = expected_hits_of_subsignatures(signature.subsignatures, &segmented);
         let holds_without_matches = holds_with_no_matches(&steps);
-        let gate = if holds_without_matches {
+        let gate = if holds_without_matches || has_plug_ins {
             None
         } else {
             gate_of(signature.expression, &|index| {
                 hits.get(usize::from(index)).copied().unwrap_or(u64::MAX)
             })
         };
-        let ceilings = count_ceilings(signature.expression, subsignature_count);
+        let ceilings = plug_in_aware_ceilings(signature.expression, signature.subsignatures);
         let name = self.add_name(signature.name, signature.indicator)?;
         let group = self.groups.entry(signature.group).or_default();
         let logical = LogicalSignatureId(
@@ -358,8 +370,25 @@ impl ImageBuilder {
             signature.subsignatures.iter().zip(segmented).enumerate()
         {
             let index = u16::try_from(index).map_err(|_| BuildError::TooManySignatures)?;
+            let ceiling = ceilings.get(usize::from(index)).copied().unwrap_or(1);
+            let (Subsignature::Content(content), Some(patterns)) = (subsignature, patterns) else {
+                add_plug_in(
+                    &mut group.plug_ins,
+                    logical,
+                    index,
+                    subsignature,
+                    subsignature_count,
+                );
+                subsignatures.push(PendingSubsignature {
+                    pattern: None,
+                    pattern_count: 0,
+                    ceiling,
+                    pass: MatchingPass::Main,
+                });
+                continue;
+            };
             let in_gate = gate.as_ref().is_none_or(|gate| gate.contains(&index));
-            let pass = if in_gate || subsignature.placement != Placement::Anywhere {
+            let pass = if in_gate || content.placement != Placement::Anywhere {
                 MatchingPass::Main
             } else {
                 MatchingPass::Second
@@ -373,7 +402,7 @@ impl ImageBuilder {
                 group.patterns.push(PendingPattern {
                     outcome: PendingOutcome::Subsignature { logical, index },
                     category: signature.category,
-                    placement: subsignature.placement,
+                    placement: content.placement,
                     report_rank: 0,
                     pass,
                     segments,
@@ -382,7 +411,7 @@ impl ImageBuilder {
             subsignatures.push(PendingSubsignature {
                 pattern: Some(pattern),
                 pattern_count,
-                ceiling: ceilings.get(usize::from(index)).copied().unwrap_or(1),
+                ceiling,
                 pass,
             });
         }
@@ -393,6 +422,27 @@ impl ImageBuilder {
             subsignatures,
             conditions: signature.conditions.clone(),
             holds_with_no_matches: holds_without_matches,
+        });
+        Ok(())
+    }
+
+    pub fn add_container_signature(
+        &mut self,
+        signature: &ContainerSignature<'_>,
+    ) -> Result<(), BuildError> {
+        let name = self.add_name(signature.name, signature.indicator)?;
+        self.containers.push(PendingContainer {
+            name,
+            signature: PendingContainerSignature {
+                name: NameId(0),
+                container: signature.container,
+                container_size: signature.container_size,
+                entry_name: signature.entry_name.clone(),
+                compressed_size: signature.compressed_size,
+                real_size: signature.real_size,
+                encrypted: signature.encrypted,
+                position: signature.position,
+            },
         });
         Ok(())
     }
@@ -563,12 +613,14 @@ impl ImageBuilder {
             typing,
             magic,
             unwanted_categories,
+            containers,
         } = self;
         let (sorted_names, name_ids) = distinct_sorted_names(&name_text, &name_spans)?;
         let categories_section = categories_section(&unwanted_categories, &sorted_names)?;
         let hash_sections = hash_sections(partitions, &withdrawn_hashes, &name_ids)?;
         let (pattern_sections, logical_sections, anchors) = pattern_sections(groups, &name_ids)?;
         let selections_section = selections_section(&kinds, typing, &anchors)?;
+        let containers_section = containers_section(containers, &name_ids)?;
         let mut sections = vec![databases_section(&databases)?];
         if !kinds.is_empty() || typing.is_some() {
             sections.push(Section {
@@ -590,6 +642,7 @@ impl ImageBuilder {
         sections.extend(selections_section);
         sections.extend(pattern_sections);
         sections.extend(logical_sections);
+        sections.extend(containers_section);
         sections.extend(categories_section);
         sections.extend(hash_sections);
         sections.push(Section {
@@ -600,6 +653,123 @@ impl ImageBuilder {
         });
         assemble(&sections)
     }
+}
+
+type SegmentedContents = Vec<Option<Vec<Vec<Segment>>>>;
+
+fn segmented_contents(signature: &LogicalSignature<'_>) -> Result<SegmentedContents, BuildError> {
+    let mut segmented = Vec::with_capacity(signature.subsignatures.len());
+    for subsignature in signature.subsignatures {
+        let Subsignature::Content(content) = subsignature else {
+            segmented.push(None);
+            continue;
+        };
+        let mut patterns = Vec::with_capacity(content.patterns.len());
+        for pattern in &content.patterns {
+            patterns.push(segments_of(pattern).map_err(|reason| BuildError::Pattern {
+                name: signature.name.to_owned(),
+                reason,
+            })?);
+        }
+        segmented.push(Some(patterns));
+    }
+    Ok(segmented)
+}
+
+fn expected_hits_of_subsignatures(
+    subsignatures: &[Subsignature],
+    segmented: &SegmentedContents,
+) -> Vec<u64> {
+    subsignatures
+        .iter()
+        .zip(segmented)
+        .map(|(subsignature, patterns)| match (subsignature, patterns) {
+            (Subsignature::Content(content), Some(patterns)) => {
+                patterns.iter().fold(0u64, |hits, segments| {
+                    hits.saturating_add(expected_hits(content.placement, segments))
+                })
+            }
+            _ => u64::MAX,
+        })
+        .collect()
+}
+
+fn plug_in_aware_ceilings(expression: &Expression, subsignatures: &[Subsignature]) -> Vec<u32> {
+    let mut ceilings = count_ceilings(expression, subsignatures.len());
+    for subsignature in subsignatures {
+        match subsignature {
+            Subsignature::RegularExpression(regular) => {
+                if let Some(trigger) = &regular.trigger {
+                    for (ceiling, wanted) in ceilings
+                        .iter_mut()
+                        .zip(count_ceilings(trigger, subsignatures.len()))
+                    {
+                        *ceiling = (*ceiling).max(wanted);
+                    }
+                }
+            }
+            Subsignature::ByteComparison(comparison) => {
+                if let Some(ceiling) = ceilings.get_mut(usize::from(comparison.subsignature)) {
+                    *ceiling = (*ceiling).max(RECORDED_STARTS_OF_A_COMPARED_SUBSIGNATURE);
+                }
+            }
+            Subsignature::Content(_) | Subsignature::ImageFuzzyHash(_) => {}
+        }
+    }
+    ceilings
+}
+
+fn add_plug_in(
+    plug_ins: &mut PendingPlugIns,
+    signature: LogicalSignatureId,
+    subsignature: u16,
+    model: &Subsignature,
+    subsignature_count: usize,
+) {
+    match model {
+        Subsignature::RegularExpression(expression) => {
+            plug_ins.expressions.push(PendingExpression {
+                signature,
+                subsignature,
+                expression: expression.clone(),
+                subsignature_count,
+            });
+        }
+        Subsignature::ByteComparison(comparison) => plug_ins.comparisons.push(PendingComparison {
+            signature,
+            subsignature,
+            comparison: comparison.clone(),
+        }),
+        Subsignature::ImageFuzzyHash(hash) => plug_ins.image_hashes.push(PendingImageHash {
+            signature,
+            subsignature,
+            hash: *hash,
+        }),
+        Subsignature::Content(_) => {}
+    }
+}
+
+fn containers_section(
+    containers: Vec<PendingContainer>,
+    name_ids: &[NameId],
+) -> Result<Option<Section>, BuildError> {
+    if containers.is_empty() {
+        return Ok(None);
+    }
+    let count = containers.len();
+    let mut in_test_order = Vec::with_capacity(count);
+    for pending in containers.into_iter().rev() {
+        let mut signature = pending.signature;
+        signature.name = name_id(name_ids, pending.name)?;
+        in_test_order.push(signature);
+    }
+    Ok(Some(Section {
+        kind: SectionKind::ContainerSignatures,
+        qualifier: 0,
+        item_count: u64::try_from(count).map_err(|_| BuildError::TooManySections)?,
+        bytes: container_signatures::build(&in_test_order)
+            .map_err(BuildError::ContainerSignatures)?,
+    }))
 }
 
 fn categories_section(
@@ -694,7 +864,24 @@ fn pattern_sections(
         if !pending_group.logical.is_empty() {
             logical_sections.push(logical_section(group, pending_group.logical, name_ids)?);
         }
-        if pending_group.patterns.is_empty() {
+        if !pending_group.plug_ins.is_empty() {
+            logical_sections.push(Section {
+                kind: SectionKind::PlugInSubsignatures,
+                qualifier: group.0,
+                item_count: u64::try_from(
+                    pending_group
+                        .plug_ins
+                        .expressions
+                        .len()
+                        .saturating_add(pending_group.plug_ins.comparisons.len())
+                        .saturating_add(pending_group.plug_ins.image_hashes.len()),
+                )
+                .map_err(|_| BuildError::TooManySignatures)?,
+                bytes: plug_in_subsignatures::build(&pending_group.plug_ins)
+                    .map_err(|reason| BuildError::PlugIns { group, reason })?,
+            });
+        }
+        if pending_group.patterns.is_empty() && pending_group.plug_ins.is_empty() {
             continue;
         }
         let pending = pending_group

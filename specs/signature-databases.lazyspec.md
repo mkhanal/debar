@@ -38,12 +38,24 @@ What becomes of the databases a user loads: every line accounted for, and the im
 
 ## Every Logical Signature Line In The Pinned Databases Is Accounted For In The Image
 
-- Every logical signature line has one outcome: compiled, outside the functionality level, ignored, a comment, its target not loaded, not loaded for an unknown attribute or type, or not yet compiled.
-- A line is not yet compiled only when it holds a regular-expression, byte-comparison, image fuzzy hash or macro subsignature.
-- Every other loaded line is compiled.
+- Every logical signature line has one outcome: compiled, outside the functionality level, ignored, a comment, its target not loaded, not loaded for an unknown attribute or type, needing a backtracking regular-expression engine, or not yet compiled.
+- A line needs a backtracking engine only when one of its regular expressions holds a backreference, a lookaround or an atomic group.
+- A line is not yet compiled only when it holds a macro subsignature.
+- Every other loaded line is compiled, its regular-expression, byte-comparison and image fuzzy hash subsignatures included.
 - The image holds one logical signature for each compiled line.
 
 ## A Malformed Logical Signature Line Fails The Compile
 
 - A line with too few fields, a malformed expression, a subsignature count that disagrees with the expression, a malformed attribute, no target or a malformed subsignature fails the compile, naming the file and line.
+- No image is written.
+
+## Every Container Signature Line In The Pinned Databases Is Accounted For In The Image
+
+- Every container signature line has one outcome: compiled, outside the functionality level, ignored, or a comment.
+- Every loaded line is compiled. None is unsupported.
+- The image holds one container signature for each compiled line.
+
+## A Malformed Container Signature Line Fails The Compile
+
+- A line with fewer than 10 or more than 12 fields, an unknown container type, a malformed size, position, encrypted flag, functionality level or entry name expression fails the compile, naming the file and line.
 - No image is written.

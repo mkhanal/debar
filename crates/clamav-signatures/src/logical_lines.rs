@@ -3,16 +3,22 @@ use std::fmt;
 use debar_image::{
     ByteSet, ContentSubsignature, ContextTest, Expression, InclusiveRange, Indicator,
     KindCondition, LogicalConditions, MaskedByte, ObjectKind, Pattern, PatternElement, Placement,
+    Subsignature,
 };
 
 use crate::FUNCTIONALITY_LEVEL;
 use crate::body_pattern::{
     ByteWidth, MalformedBody, ReadBody, longest_part_of_body, read_subsignature_body,
 };
+use crate::byte_comparison_subsignatures::{MalformedByteComparison, read_byte_comparison};
 use crate::extended_lines::{MalformedExtendedLine, Offset, read_offset, without_trailer};
 use crate::hash_lines::indicator_named;
 use crate::ignore_list::IgnoreList;
 use crate::logical_expression::{MalformedExpression, parse_expression};
+use crate::regular_expression_subsignatures::{
+    MalformedRegularExpressionSubsignature, ReadRegularExpression, read_regular_expression,
+};
+use crate::regular_expression_syntax::BacktrackingConstruct;
 use crate::type_names::{NamedType, type_named};
 
 const FIELD_SEPARATOR: u8 = b';';
@@ -37,6 +43,8 @@ const ESCAPE: u8 = b'\\';
 const MACRO_MARK: u8 = b'$';
 const BYTE_COMPARISON_MARKS: (u8, u8) = (b'(', b'#');
 const IMAGE_FUZZY_HASH_PREFIX: &[u8] = b"fuzzy_img#";
+const IMAGE_FUZZY_HASH_SEPARATOR: u8 = b'#';
+const IMAGE_FUZZY_HASH_DIGITS: usize = 16;
 const SUBSIGNATURE_FIELD_SEPARATOR: u8 = b':';
 const MOST_SUBSIGNATURE_FIELDS: usize = 5;
 const WORD_BOUNDARY: &[u8] = b"(W)";
@@ -77,6 +85,9 @@ pub enum MalformedSubsignature {
     Offset(MalformedExtendedLine),
     Body(MalformedBody),
     UnknownModifier(u8),
+    RegularExpression(MalformedRegularExpressionSubsignature),
+    ByteComparison(MalformedByteComparison),
+    ImageFuzzyHash,
 }
 
 impl fmt::Display for MalformedLogicalLine {
@@ -135,6 +146,13 @@ impl fmt::Display for MalformedLogicalLine {
                         "the modifier {:?} is not one of i, f, w, a",
                         char::from(*letter)
                     ),
+                    MalformedSubsignature::RegularExpression(reason) => {
+                        write!(formatter, "{reason}")
+                    }
+                    MalformedSubsignature::ByteComparison(reason) => write!(formatter, "{reason}"),
+                    MalformedSubsignature::ImageFuzzyHash => formatter.write_str(
+                        "an image fuzzy hash is not 16 hexadecimal digits with distance 0",
+                    ),
                 }
             }
         }
@@ -143,9 +161,6 @@ impl fmt::Display for MalformedLogicalLine {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubsignatureNotYetCompiled {
-    RegularExpression,
-    ByteComparison,
-    ImageFuzzyHash,
     Macro,
     ClassAtAnInnerPartEdge,
 }
@@ -162,7 +177,7 @@ pub struct LogicalLine<'a> {
     pub name: &'a str,
     pub indicator: Indicator,
     pub expression: Expression,
-    pub subsignatures: Vec<ContentSubsignature>,
+    pub subsignatures: Vec<Subsignature>,
     pub conditions: LogicalConditions,
     pub longest_part: u32,
 }
@@ -176,6 +191,10 @@ pub enum ReadLogicalLine<'a> {
     NotLoaded,
     NotYetCompiled {
         reason: SubsignatureNotYetCompiled,
+        loaded: LoadedContent,
+    },
+    NeedsBacktrackingEngine {
+        construct: BacktrackingConstruct,
         loaded: LoadedContent,
     },
     Signature(LogicalLine<'a>),
@@ -246,17 +265,18 @@ pub fn read_line<'a>(
         return Err(MalformedLogicalLine::EmptyName);
     }
     let name = std::str::from_utf8(name).map_err(|_| MalformedLogicalLine::NameNotText)?;
-    let (subsignatures, not_yet_compiled, longest_part) =
-        read_subsignatures(subsignature_fields, target)?;
-    if let Some(reason) = not_yet_compiled {
-        return Ok(ReadLogicalLine::NotYetCompiled {
-            reason,
-            loaded: LoadedContent {
-                target,
-                longest_part,
-            },
-        });
+    let read = read_subsignatures(subsignature_fields, target)?;
+    let loaded = LoadedContent {
+        target,
+        longest_part: read.longest_part,
+    };
+    if let Some(reason) = read.not_yet_compiled {
+        return Ok(ReadLogicalLine::NotYetCompiled { reason, loaded });
     }
+    if let Some(construct) = read.needs_backtracking {
+        return Ok(ReadLogicalLine::NeedsBacktrackingEngine { construct, loaded });
+    }
+    let (subsignatures, longest_part) = (read.subsignatures, read.longest_part);
     Ok(ReadLogicalLine::Signature(LogicalLine {
         target,
         name,
@@ -268,40 +288,43 @@ pub fn read_line<'a>(
     }))
 }
 
-type ReadSubsignatures = (
-    Vec<ContentSubsignature>,
-    Option<SubsignatureNotYetCompiled>,
-    u32,
-);
+#[derive(Default)]
+struct ReadSubsignatures {
+    subsignatures: Vec<Subsignature>,
+    not_yet_compiled: Option<SubsignatureNotYetCompiled>,
+    needs_backtracking: Option<BacktrackingConstruct>,
+    longest_part: u32,
+}
 
 fn read_subsignatures(
     fields: &[&[u8]],
     target: u32,
 ) -> Result<ReadSubsignatures, MalformedLogicalLine> {
-    let mut subsignatures = Vec::with_capacity(fields.len());
-    let mut not_yet_compiled = None;
-    let mut longest_part: u32 = 0;
+    let mut read = ReadSubsignatures::default();
     for (index, field) in fields.iter().enumerate() {
-        match read_subsignature(field, target)
+        match read_subsignature(field, index, target)
             .map_err(|reason| MalformedLogicalLine::Subsignature { index, reason })?
         {
-            ReadSubsignature::Content {
+            ReadSubsignature::Compiled {
                 subsignature,
-                longest_part: longest,
+                longest_part,
             } => {
-                longest_part = longest_part.max(longest);
-                subsignatures.push(subsignature);
+                read.longest_part = read.longest_part.max(longest_part);
+                read.subsignatures.push(subsignature);
             }
             ReadSubsignature::NotYetCompiled {
                 reason,
-                longest_part: longest,
+                longest_part,
             } => {
-                longest_part = longest_part.max(longest);
-                not_yet_compiled = not_yet_compiled.or(Some(reason));
+                read.longest_part = read.longest_part.max(longest_part);
+                read.not_yet_compiled = read.not_yet_compiled.or(Some(reason));
+            }
+            ReadSubsignature::NeedsBacktracking(construct) => {
+                read.needs_backtracking = read.needs_backtracking.or(Some(construct));
             }
         }
     }
-    Ok((subsignatures, not_yet_compiled, longest_part))
+    Ok(read)
 }
 
 fn fields_of(line: &[u8]) -> Vec<&[u8]> {
@@ -479,14 +502,15 @@ fn read_range(value: &[u8]) -> Result<InclusiveRange, MalformedLogicalLine> {
 }
 
 enum ReadSubsignature {
-    Content {
-        subsignature: ContentSubsignature,
+    Compiled {
+        subsignature: Subsignature,
         longest_part: u32,
     },
     NotYetCompiled {
         reason: SubsignatureNotYetCompiled,
         longest_part: u32,
     },
+    NeedsBacktracking(BacktrackingConstruct),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -504,32 +528,108 @@ struct Modifiers {
     widths: Widths,
 }
 
-fn special_kind(field: &[u8]) -> Option<SubsignatureNotYetCompiled> {
+enum SubsignatureKind {
+    Macro,
+    RegularExpression,
+    ByteComparison,
+    ImageFuzzyHash,
+    Content,
+}
+
+fn kind_of_subsignature(field: &[u8]) -> SubsignatureKind {
     if field.first() == Some(&MACRO_MARK) {
-        return Some(SubsignatureNotYetCompiled::Macro);
+        return SubsignatureKind::Macro;
     }
     if field.contains(&REGULAR_EXPRESSION_MARK) {
-        return Some(SubsignatureNotYetCompiled::RegularExpression);
+        return SubsignatureKind::RegularExpression;
     }
     let (opening, hash) = BYTE_COMPARISON_MARKS;
     let first_hash = field.iter().position(|byte| *byte == hash);
     let last_hash = field.iter().rposition(|byte| *byte == hash);
     if field.contains(&opening) && first_hash.is_some() && first_hash != last_hash {
-        return Some(SubsignatureNotYetCompiled::ByteComparison);
+        return SubsignatureKind::ByteComparison;
     }
     if field.starts_with(IMAGE_FUZZY_HASH_PREFIX) {
-        return Some(SubsignatureNotYetCompiled::ImageFuzzyHash);
+        return SubsignatureKind::ImageFuzzyHash;
     }
-    None
+    SubsignatureKind::Content
 }
 
-fn read_subsignature(field: &[u8], target: u32) -> Result<ReadSubsignature, MalformedSubsignature> {
-    if let Some(reason) = special_kind(field) {
-        return Ok(ReadSubsignature::NotYetCompiled {
-            reason,
-            longest_part: 0,
-        });
+fn compiled(subsignature: Subsignature) -> ReadSubsignature {
+    ReadSubsignature::Compiled {
+        subsignature,
+        longest_part: 0,
     }
+}
+
+fn read_subsignature(
+    field: &[u8],
+    index: usize,
+    target: u32,
+) -> Result<ReadSubsignature, MalformedSubsignature> {
+    match kind_of_subsignature(field) {
+        SubsignatureKind::Macro => {
+            return Ok(ReadSubsignature::NotYetCompiled {
+                reason: SubsignatureNotYetCompiled::Macro,
+                longest_part: 0,
+            });
+        }
+        SubsignatureKind::RegularExpression => {
+            return match read_regular_expression(field, index, target)
+                .map_err(MalformedSubsignature::RegularExpression)?
+            {
+                ReadRegularExpression::Compiled(expression) => {
+                    Ok(compiled(Subsignature::RegularExpression(expression)))
+                }
+                ReadRegularExpression::NeedsBacktracking(construct) => {
+                    Ok(ReadSubsignature::NeedsBacktracking(construct))
+                }
+            };
+        }
+        SubsignatureKind::ByteComparison => {
+            return read_byte_comparison(field)
+                .map(|comparison| compiled(Subsignature::ByteComparison(comparison)))
+                .map_err(MalformedSubsignature::ByteComparison);
+        }
+        SubsignatureKind::ImageFuzzyHash => {
+            return read_image_fuzzy_hash(field)
+                .map(|hash| compiled(Subsignature::ImageFuzzyHash(hash)));
+        }
+        SubsignatureKind::Content => {}
+    }
+    read_content_subsignature(field, target)
+}
+
+fn read_image_fuzzy_hash(field: &[u8]) -> Result<u64, MalformedSubsignature> {
+    let mut fields = field
+        .split(|byte| *byte == IMAGE_FUZZY_HASH_SEPARATOR)
+        .skip(1);
+    let digits = fields
+        .next()
+        .filter(|digits| digits.len() == IMAGE_FUZZY_HASH_DIGITS)
+        .ok_or(MalformedSubsignature::ImageFuzzyHash)?;
+    let hash = digits
+        .iter()
+        .try_fold(0u64, |hash, digit| {
+            Some(hash.checked_shl(4)? | u64::from(char::from(*digit).to_digit(16)?))
+        })
+        .ok_or(MalformedSubsignature::ImageFuzzyHash)?;
+    if let Some(distance) = fields.next() {
+        let distance = std::str::from_utf8(distance)
+            .ok()
+            .and_then(|text| text.parse::<u32>().ok())
+            .ok_or(MalformedSubsignature::ImageFuzzyHash)?;
+        if distance != 0 {
+            return Err(MalformedSubsignature::ImageFuzzyHash);
+        }
+    }
+    Ok(hash)
+}
+
+fn read_content_subsignature(
+    field: &[u8],
+    target: u32,
+) -> Result<ReadSubsignature, MalformedSubsignature> {
     let mut parts: Vec<&[u8]> = Vec::new();
     let mut rest = field;
     while parts.len().saturating_add(1) < MOST_SUBSIGNATURE_FIELDS {
@@ -616,11 +716,11 @@ fn read_subsignature(field: &[u8], target: u32) -> Result<ReadSubsignature, Malf
             longest_part,
         });
     }
-    Ok(ReadSubsignature::Content {
-        subsignature: ContentSubsignature {
+    Ok(ReadSubsignature::Compiled {
+        subsignature: Subsignature::Content(ContentSubsignature {
             placement,
             patterns,
-        },
+        }),
         longest_part,
     })
 }

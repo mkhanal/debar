@@ -5,6 +5,7 @@ use sha2::{Digest as _, Sha256};
 use zerocopy::FromBytes;
 
 use crate::builder::provenance_code;
+use crate::container_signatures::ContainerSignatures;
 use crate::hash_partition::{HashPartition, PartitionKey, PartitionMalformed};
 use crate::layout::{
     BYTE_ORDER_MARK, CHECKSUM_LENGTH, DatabaseEntry, DirectoryEntry, Header, LAYOUT_VERSION, MAGIC,
@@ -16,6 +17,7 @@ use crate::model::{DatabaseRecord, Provenance, SignatureGroup, SignatureName};
 use crate::names::{NameId, NamesMalformed, NamesView};
 use crate::object_kinds::{KindsMalformed, ObjectKinds};
 use crate::pattern_group::{GroupMalformed, PatternGroup};
+use crate::plug_in_subsignatures::{PlugInSubsignatures, PlugInsMalformed};
 use crate::selection_filters::{self, FiltersMalformed, SelectionFilter};
 use crate::type_magic::{MagicMalformed, TypeMagic};
 use crate::unwanted_categories::{CategoriesMalformed, UnwantedCategories};
@@ -69,11 +71,24 @@ pub enum ImageError {
     TypeMagicMalformed(MagicMalformed),
     UnwantedCategoriesMalformed(CategoriesMalformed),
     SelectionFiltersMalformed(FiltersMalformed),
+    PlugInsMalformed {
+        group: SignatureGroup,
+        reason: PlugInsMalformed,
+    },
+    ContainerSignaturesMalformed,
 }
 
 impl fmt::Display for ImageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::PlugInsMalformed { group, reason } => write!(
+                formatter,
+                "the regular expressions, byte comparisons or image hashes of group {} are malformed: {reason:?}",
+                group.0
+            ),
+            Self::ContainerSignaturesMalformed => {
+                write!(formatter, "the container signatures are malformed")
+            }
             Self::TooShort => write!(formatter, "the file is shorter than an image header"),
             Self::NotAnImage => write!(formatter, "the file is not a Debar image"),
             Self::UnsupportedLayout { found } => write!(
@@ -272,6 +287,23 @@ impl<'m> Image<'m> {
             .map(LogicalGroup::read)
             .transpose()
             .map_err(|reason| ImageError::LogicalGroupMalformed { group, reason })
+    }
+
+    pub fn plug_in_subsignatures(
+        &self,
+        group: SignatureGroup,
+    ) -> Result<Option<PlugInSubsignatures<'m>>, ImageError> {
+        self.optional_section_bytes(SectionKind::PlugInSubsignatures, group.0)
+            .map(PlugInSubsignatures::read)
+            .transpose()
+            .map_err(|reason| ImageError::PlugInsMalformed { group, reason })
+    }
+
+    pub fn container_signatures(&self) -> Result<Option<ContainerSignatures<'m>>, ImageError> {
+        self.optional_section_bytes(SectionKind::ContainerSignatures, 0)
+            .map(ContainerSignatures::read)
+            .transpose()
+            .map_err(|_| ImageError::ContainerSignaturesMalformed)
     }
 
     pub fn object_kinds(&self) -> Result<Option<ObjectKinds<'m>>, ImageError> {

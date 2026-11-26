@@ -1,5 +1,7 @@
 mod builder;
 mod byte_rarity;
+mod container_signatures;
+mod expression_automata;
 mod fuse_filter;
 mod hash_partition;
 mod image;
@@ -12,11 +14,20 @@ mod object_kind;
 mod object_kinds;
 mod pattern_group;
 mod pattern_program;
+mod plug_in_subsignatures;
 mod selection_filters;
 mod type_magic;
 mod unwanted_categories;
 
 pub use builder::{BuildError, HashBucket, HashEntryId, ImageBuilder};
+pub use container_signatures::{
+    ContainerSignatureRecord, ContainerSignatures, ContainerSignaturesMalformed,
+    EntryNameExpression,
+};
+pub use expression_automata::{
+    AutomatonMalformed, InPlaceAutomaton, LARGEST_AUTOMATON_IN_IMAGE, automaton_in_place,
+    compile_text,
+};
 pub use hash_partition::{HashPartition, PartitionKey, PartitionMalformed};
 pub use image::{Image, ImageError, SectionExtent};
 pub use layout::SectionKind;
@@ -26,12 +37,14 @@ pub use logical_group::{
     LogicalSignatureRecord, MatchingPass, SubsignatureRecord,
 };
 pub use model::{
-    ByteSet, Category, ContentSubsignature, ContextTest, CountComparison, CountTest,
-    DatabaseRecord, Digest, DigestAlgorithm, ExecutableAnchor, Expression, HashPurpose,
-    HashSignature, HashedSize, InclusiveRange, Indicator, KindCondition, LogicalConditions,
-    LogicalSignature, MaskedByte, PartMemory, Pattern, PatternElement, PatternOutcome,
-    PatternSignature, Placement, Provenance, ReportWindows, SignatureGroup, SignatureName,
-    TypeFinding, UnwantedCategory,
+    ByteComparison, ByteEncoding, ByteOrder, ByteSet, Category, ContainerSignature,
+    ContentSubsignature, ContextTest, CountComparison, CountTest, DatabaseRecord, Digest,
+    DigestAlgorithm, ExecutableAnchor, Expression, ExpressionAnchoring, ExpressionMatches,
+    HashPurpose, HashSignature, HashedSize, InclusiveRange, Indicator, KindCondition,
+    LogicalConditions, LogicalSignature, MaskedByte, PartMemory, Pattern, PatternElement,
+    PatternOutcome, PatternSignature, Placement, Provenance, RegularExpressionSubsignature,
+    ReportWindows, SignatureGroup, SignatureName, SizeCondition, Subsignature, TypeFinding,
+    UnwantedCategory, ValueComparison,
 };
 pub use names::NameId;
 pub use object_kind::ObjectKind;
@@ -47,6 +60,9 @@ pub use pattern_program::{
     AnchorBytes, AnchorCase, ArmedAnchor, ContextView, Displacement, LONG_ANCHOR_LENGTH, MaskedRun,
     PatternNotCompiled, ProgramAnchor, ProgramHeader, ProgramMalformed, ProgramView, Runs,
     SHORT_ANCHOR_LENGTH, StepView, ascii_lowercase, set_in_sequence_contains,
+};
+pub use plug_in_subsignatures::{
+    ComparisonRecord, ExpressionRecord, PlugInSubsignatures, PlugInsMalformed, PlugInsNotBuilt,
 };
 pub use selection_filters::{FiltersMalformed, SelectionFilter};
 pub use type_magic::{MagicMalformed, MagicTable, TypeMagic};

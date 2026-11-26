@@ -34,3 +34,23 @@ What a scan reports for a file whose content a logical signature describes.
 - Without the setting, a file matching a signature from a potentially unwanted database is not detected under it.
 - With the setting, it is detected, and the verdict is potentially unwanted.
 - With a category filter, only signatures whose category the filter admits are reported.
+
+## A Logical Signature With A Regular Expression Is Detected When Its Trigger Holds And The Expression Matches
+
+- The expression is matched only when its trigger, an expression over the earlier subsignatures, holds.
+- With an offset of `n` or `EOF-n` and no `r` flag, the match must start there; with `,m`, it may start up to `m` bytes later.
+- With the `e` flag and a `,m` shift, the whole match lies within those `m` bytes.
+- With the `g` flag, every match that does not overlap the one before counts; without it, at most one does.
+- `$` also matches before a final newline, `\s` matches a vertical tab, `.` matches anything but a newline, and the `i` flag folds ASCII letters only.
+
+## Regular Expressions Are Not Matched In A File Larger Than The Regular-Expression Limit
+
+- By default the limit is 104,857,600 bytes; `--largest-regular-expression-object BYTES` sets it, and 0 lifts it.
+- In a larger file, every other subsignature is still matched and every logical signature still evaluated.
+
+## A Byte Comparison Holds When The Bytes After Its Subsignature's Last Match Compare As It States
+
+- The bytes are read at the start of the referenced subsignature's last match, moved by the comparison's offset.
+- Binary bytes are read in the order the comparison names; text is read as hexadecimal or decimal.
+- Every comparison given must hold.
+- A read that starts at the first byte of the file, or runs past its end, does not hold.

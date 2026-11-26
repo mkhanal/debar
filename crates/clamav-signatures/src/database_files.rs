@@ -3,13 +3,15 @@ use std::fmt;
 use std::collections::BTreeMap;
 
 use debar_image::{
-    BuildError, Category, DatabaseRecord, HashEntryId, HashPurpose, HashSignature, ImageBuilder,
-    LogicalSignature, MagicTable, PartMemory, Pattern, PatternOutcome, PatternSignature, Placement,
-    Provenance, ReportWindows, SignatureGroup, TypeFinding, UnwantedCategory,
+    BuildError, Category, ContainerSignature, DatabaseRecord, HashEntryId, HashPurpose,
+    HashSignature, ImageBuilder, LogicalSignature, MagicTable, PartMemory, Pattern, PatternOutcome,
+    PatternSignature, Placement, Provenance, ReportWindows, SignatureGroup, TypeFinding,
+    UnwantedCategory,
 };
 
 use crate::account::{Account, FileAccount, LineOutcome};
 use crate::container::{self, ContainerError, Member};
+use crate::container_lines::{self, MalformedContainerLine, ReadContainerLine};
 use crate::extended_lines::{self, MalformedExtendedLine, ReadExtendedLine};
 use crate::file_type_lines::{self, MagicTarget, MalformedFileTypeLine, ReadFileTypeLine};
 use crate::hash_duplicates::entries_not_reported;
@@ -61,6 +63,12 @@ pub enum DatabaseError {
         line: usize,
         reason: MalformedLogicalLine,
     },
+    MalformedContainerLine {
+        file: String,
+        member: Option<String>,
+        line: usize,
+        reason: MalformedContainerLine,
+    },
     EmptyHashFile {
         file: String,
         member: Option<String>,
@@ -104,6 +112,12 @@ impl fmt::Display for DatabaseError {
                 line,
                 reason,
             } => write!(formatter, "{} line {line}: {reason}", place(file, member)),
+            Self::MalformedContainerLine {
+                file,
+                member,
+                line,
+                reason,
+            } => write!(formatter, "{} line {line}: {reason}", place(file, member)),
             Self::EmptyHashFile { file, member } | Self::EmptyDatabaseFile { file, member } => {
                 write!(formatter, "{} is empty", place(file, member))
             }
@@ -122,6 +136,7 @@ enum FileKind {
     Extended(Category),
     FileTypes,
     Logical(Category),
+    ContainerSignatures,
     NotYetCompiled,
 }
 
@@ -176,7 +191,7 @@ const FILE_KINDS: [(&str, FileKind); 37] = [
     ("sfp", TRUST),
     ("cat", FileKind::NotYetCompiled),
     ("cbc", FileKind::NotYetCompiled),
-    ("cdb", FileKind::NotYetCompiled),
+    ("cdb", FileKind::ContainerSignatures),
     ("cfg", FileKind::NotYetCompiled),
     ("crb", FileKind::NotYetCompiled),
     ("cud", FileKind::NotYetCompiled),
@@ -240,6 +255,7 @@ fn kind_description(kind: FileKind) -> &'static str {
         FileKind::Logical(Category::PotentiallyUnwanted) => {
             "logical signatures, potentially unwanted"
         }
+        FileKind::ContainerSignatures => "container signatures",
         FileKind::NotYetCompiled => "not yet compiled",
     }
 }
@@ -460,6 +476,7 @@ impl Loader<'_> {
             FileKind::Extended(category) => self.load_extended(source, category, kind, contents),
             FileKind::FileTypes => self.load_file_types(source, kind, contents),
             FileKind::Logical(category) => self.load_logical(source, category, kind, contents),
+            FileKind::ContainerSignatures => self.load_container_signatures(source, kind, contents),
             FileKind::IgnoreList => {
                 self.ignored.add_entries_from(contents);
                 self.account_every_line(
@@ -649,6 +666,10 @@ impl Loader<'_> {
                     self.lengthen(SignatureGroup(loaded.target), loaded.longest_part);
                     LineOutcome::NotYetCompiled
                 }
+                ReadLogicalLine::NeedsBacktrackingEngine { loaded, .. } => {
+                    self.lengthen(SignatureGroup(loaded.target), loaded.longest_part);
+                    LineOutcome::NeedsBacktrackingEngine
+                }
                 ReadLogicalLine::Signature(signature) => {
                     let name = if source.official {
                         signature.name
@@ -672,6 +693,58 @@ impl Loader<'_> {
                             expression: &signature.expression,
                             subsignatures: &signature.subsignatures,
                             conditions: &signature.conditions,
+                        })
+                        .map_err(DatabaseError::Image)?;
+                    LineOutcome::Compiled
+                }
+            });
+        }
+        self.record(source, kind_description(kind), outcomes);
+        Ok(())
+    }
+
+    fn load_container_signatures(
+        &mut self,
+        source: &Source<'_>,
+        kind: FileKind,
+        contents: &[u8],
+    ) -> Result<(), DatabaseError> {
+        let mut outcomes = Vec::new();
+        let mut unofficial_name = String::new();
+        for (index, line) in lines(contents).enumerate() {
+            let read = container_lines::read_line(without_line_ending(line), &self.ignored)
+                .map_err(|reason| DatabaseError::MalformedContainerLine {
+                    file: source.file.to_owned(),
+                    member: source.member.map(str::to_owned),
+                    line: index.saturating_add(1),
+                    reason,
+                })?;
+            outcomes.push(match read {
+                ReadContainerLine::Comment => LineOutcome::Comment,
+                ReadContainerLine::OutsideFunctionalityLevel => {
+                    LineOutcome::OutsideFunctionalityLevel
+                }
+                ReadContainerLine::Ignored => LineOutcome::Ignored,
+                ReadContainerLine::Signature(signature) => {
+                    let name = if source.official {
+                        signature.name
+                    } else {
+                        unofficial_name.clear();
+                        unofficial_name.push_str(signature.name);
+                        unofficial_name.push_str(UNOFFICIAL_SUFFIX);
+                        &unofficial_name
+                    };
+                    self.image
+                        .add_container_signature(&ContainerSignature {
+                            name,
+                            indicator: signature.indicator,
+                            container: signature.container,
+                            container_size: signature.container_size,
+                            entry_name: signature.entry_name,
+                            compressed_size: signature.compressed_size,
+                            real_size: signature.real_size,
+                            encrypted: signature.encrypted,
+                            position: signature.position,
                         })
                         .map_err(DatabaseError::Image)?;
                     LineOutcome::Compiled

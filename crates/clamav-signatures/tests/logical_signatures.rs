@@ -60,6 +60,8 @@ Test.Target15;Target:15;0;41424344
 Test.Unknown;Target:0,Colour:red;0;41424344
 Test.UnknownType;Engine:51-255,Target:0,Container:CL_TYPE_NONSENSE;0;41424344
 Test.Regex;Target:0;0&1;41424344;0/abc/
+Test.Backreference;Target:0;0&1;41424344;0/(a)\\1/
+Test.Macro;Target:0;0&1;41424344;${1-2}0$
 Test.Compiled;Engine:51-255,Target:0;0&1;41424344;45464748::i
 ";
     assert_eq!(
@@ -70,6 +72,8 @@ Test.Compiled;Engine:51-255,Target:0;0&1;41424344;45464748::i
             LineOutcome::TargetNotLoaded,
             LineOutcome::NotLoaded,
             LineOutcome::NotLoaded,
+            LineOutcome::Compiled,
+            LineOutcome::NeedsBacktrackingEngine,
             LineOutcome::NotYetCompiled,
             LineOutcome::Compiled,
         ]

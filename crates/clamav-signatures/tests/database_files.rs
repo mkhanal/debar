@@ -371,10 +371,7 @@ fn files_that_are_not_databases_are_listed_and_other_kinds_are_not_yet_compiled(
     let compiled = compile_files(&[
         (".bashrc", b"export A=1\n"),
         ("daily-1.cvd.sign", b"signature"),
-        (
-            "local.cdb",
-            b"Container.One:CL_TYPE_ZIP:*:x:*:*:*:*:*:*\nContainer.Two:CL_TYPE_RAR:*:y:*:*:*:*:*:*\n",
-        ),
+        ("local.crb", b"Trusted.One:1:2:3\nTrusted.Two:4:5:6\n"),
     ])
     .unwrap();
 

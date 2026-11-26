@@ -227,3 +227,136 @@ fn a_potentially_unwanted_signature_is_reported_only_when_potentially_unwanted_d
         "{REQUIREMENT}"
     );
 }
+
+fn scanned(directory: &Path, image: &Path, options: &[&str], contents: &[u8]) -> Vec<String> {
+    let input = directory.join("input");
+    write_file(&input, contents).unwrap();
+    detections(&comparison_report_with(image, options, &input, directory).unwrap())
+}
+
+const REGULAR_EXPRESSIONS: &str = "\
+Test.Trigger;Target:0;1;4d41524b;0/x[0-9]+y/
+Test.Anchored;Target:0;1;4d41524b;16:0/abc/
+Test.Shifted;Target:0;1;4d41524b;16,2:0/def/
+Test.Encompassed;Target:0;1;4d41524b;16,4:0/gh.*k/e
+Test.Global;Target:0;1=3;4d41524b;0/qq/g
+Test.Single;Target:0;1>1;4d41524b;0/qq/
+Test.Dollar;Target:0;1;4d41524b;0/zz$/
+Test.Space;Target:0;1;4d41524b;0/v\\sv/
+Test.Dot;Target:0;1;4d41524b;0/n.n/
+Test.Fold;Target:0;1;4d41524b;0/case\\xe9/i
+";
+
+#[test]
+fn a_logical_signature_with_a_regular_expression_is_detected_when_its_trigger_holds_and_the_expression_matches()
+ {
+    const REQUIREMENT: &str = "A Logical Signature With A Regular Expression Is Detected When Its Trigger Holds And The Expression Matches";
+    let (directory, compiled) =
+        loose_databases("regular-expressions", &[("local.ldb", REGULAR_EXPRESSIONS)]);
+    let scan = |contents: &[u8]| scanned(&directory, &compiled.image, &[], contents);
+    let found =
+        |contents: &[u8], name: &str| scan(contents).contains(&format!("{name}.UNOFFICIAL"));
+
+    assert!(found(b"MARK....x123y", "Test.Trigger"), "{REQUIREMENT}");
+    assert!(!found(b"........x123y", "Test.Trigger"), "{REQUIREMENT}");
+    assert!(
+        found(b"MARK............abc", "Test.Anchored"),
+        "{REQUIREMENT}"
+    );
+    assert!(
+        !found(b"MARK.............abc", "Test.Anchored"),
+        "{REQUIREMENT}"
+    );
+    assert!(
+        found(b"MARK..............def", "Test.Shifted"),
+        "{REQUIREMENT}"
+    );
+    assert!(
+        !found(b"MARK...............def", "Test.Shifted"),
+        "{REQUIREMENT}"
+    );
+    assert!(
+        found(b"MARK............ghxk....", "Test.Encompassed"),
+        "{REQUIREMENT}"
+    );
+    assert!(
+        !found(b"MARK............ghxxxk..", "Test.Encompassed"),
+        "{REQUIREMENT}"
+    );
+    assert!(found(b"MARK qq qq qq", "Test.Global"), "{REQUIREMENT}");
+    assert!(!found(b"MARK qq qq qq", "Test.Single"), "{REQUIREMENT}");
+    assert!(found(b"MARK.....zz\n", "Test.Dollar"), "{REQUIREMENT}");
+    assert!(!found(b"MARK.....zz\n\n", "Test.Dollar"), "{REQUIREMENT}");
+    assert!(found(b"MARK v\x0bv", "Test.Space"), "{REQUIREMENT}");
+    assert!(found(b"MARK n\rn", "Test.Dot"), "{REQUIREMENT}");
+    assert!(!found(b"MARK n\nn", "Test.Dot"), "{REQUIREMENT}");
+    assert!(found(b"MARK CASE\xe9", "Test.Fold"), "{REQUIREMENT}");
+    assert!(!found(b"MARK case\xc9", "Test.Fold"), "{REQUIREMENT}");
+}
+
+#[test]
+fn regular_expressions_are_not_matched_in_a_file_larger_than_the_regular_expression_limit() {
+    const REQUIREMENT: &str =
+        "Regular Expressions Are Not Matched In A File Larger Than The Regular-Expression Limit";
+    let (directory, compiled) = loose_databases(
+        "regular-expression-limit",
+        &[(
+            "local.ldb",
+            "Test.Limited;Target:0;1;4d41524b;0/abc/\nTest.Content;Target:0;0;4d41524b\n",
+        )],
+    );
+    let contents = b"MARK.......abc";
+    let size = contents.len().to_string();
+    let smaller = (contents.len() - 1).to_string();
+    let scan = |options: &[&str]| scanned(&directory, &compiled.image, options, contents);
+    let both = ["Test.Limited.UNOFFICIAL", "Test.Content.UNOFFICIAL"];
+    assert_eq!(scan(&[]), both, "{REQUIREMENT}");
+    assert_eq!(
+        scan(&["--largest-regular-expression-object", &size]),
+        both,
+        "{REQUIREMENT}"
+    );
+    assert_eq!(
+        scan(&["--largest-regular-expression-object", &smaller]),
+        ["Test.Content.UNOFFICIAL"],
+        "{REQUIREMENT}"
+    );
+    assert_eq!(
+        scan(&["--largest-regular-expression-object", "0"]),
+        both,
+        "{REQUIREMENT}"
+    );
+}
+
+const BYTE_COMPARISONS: &str = "\
+Test.Binary;Target:0;1;4d41524b;0(>>4#ib2#>512)
+Test.Little;Target:0;1;4d41524b;0(>>4#il2#=258)
+Test.Hex;Target:0;1;4d41524b;0(>>4#hb2#=0x1F)
+Test.Decimal;Target:0;1;4d41524b;0(>>4#d3#>99,<200)
+Test.Back;Target:0;1;4d41524b;0(<<1#ib1#=65)
+";
+
+#[test]
+fn a_byte_comparison_holds_when_the_bytes_after_its_subsignatures_last_match_compare_as_it_states()
+{
+    const REQUIREMENT: &str = "A Byte Comparison Holds When The Bytes After Its Subsignature's Last Match Compare As It States";
+    let (directory, compiled) =
+        loose_databases("byte-comparisons", &[("local.ldb", BYTE_COMPARISONS)]);
+    let scan = |contents: &[u8]| scanned(&directory, &compiled.image, &[], contents);
+    let found =
+        |contents: &[u8], name: &str| scan(contents).contains(&format!("{name}.UNOFFICIAL"));
+
+    assert!(found(b"..MARK\x02\x01..", "Test.Binary"), "{REQUIREMENT}");
+    assert!(!found(b"..MARK\x02\x00..", "Test.Binary"), "{REQUIREMENT}");
+    assert!(
+        !found(b"..MARK\x02\x01MARK\x00\x00", "Test.Binary"),
+        "{REQUIREMENT}"
+    );
+    assert!(found(b"..MARK\x02\x01..", "Test.Little"), "{REQUIREMENT}");
+    assert!(found(b"..MARK1F..", "Test.Hex"), "{REQUIREMENT}");
+    assert!(found(b"..MARK150..", "Test.Decimal"), "{REQUIREMENT}");
+    assert!(!found(b"..MARK250..", "Test.Decimal"), "{REQUIREMENT}");
+    assert!(found(b".AMARK.....", "Test.Back"), "{REQUIREMENT}");
+    assert!(!found(b"AMARK.....", "Test.Back"), "{REQUIREMENT}");
+    assert!(!found(b"......MARK\x02", "Test.Binary"), "{REQUIREMENT}");
+}

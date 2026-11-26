@@ -10,11 +10,14 @@ publish.workspace = true
 aho-corasick.workspace = true
 debar-image.workspace = true
 md-5.workspace = true
+regex-automata.workspace = true
 sha1.workspace = true
 sha2.workspace = true
+zerocopy.workspace = true
 
 [dev-dependencies]
 debar-platform.workspace = true
+regex-syntax.workspace = true
 
 [lints]
 workspace = true

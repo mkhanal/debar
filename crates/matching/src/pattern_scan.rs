@@ -5,9 +5,9 @@ use debar_image::{
     AnchorCase, AnchorTables, AnchoredProgram, ArmedAnchor, Category, Displacement, GroupMalformed,
     Image, ImageError, Indicator, KindsMalformed, LONG_ANCHOR_LENGTH, LogicalGroup,
     LogicalSignatureId, LongAnchorFilter, LongAnchorTable, MatchingPass, ObjectKind, PatternGroup,
-    PatternSignatureId, PatternSignatureRecord, ProgramHeader, ProgramId, ProgramMalformed,
-    ProgramView, RecordedOutcome, ReportWindows, SHORT_ANCHOR_LENGTH, SelectionFilter,
-    ShortAnchorFilter, SignatureGroup, ascii_lowercase,
+    PatternSignatureId, PatternSignatureRecord, PlugInSubsignatures, ProgramHeader, ProgramId,
+    ProgramMalformed, ProgramView, RecordedOutcome, ReportWindows, SHORT_ANCHOR_LENGTH,
+    SelectionFilter, ShortAnchorFilter, SignatureGroup, ascii_lowercase,
 };
 
 use crate::executable_layout::{ExecutableLayout, LayoutState, placed_starts};
@@ -15,6 +15,7 @@ use crate::logical_state::{
     CountedMatches, LogicalFindings, LogicalState, ObjectContext, UnwantedCategories,
 };
 use crate::part_ends::RememberedEnds;
+use crate::plug_in_matching::{PlugInRequest, match_plug_ins};
 use crate::second_pass_search::{ArmedGroup, SecondPassSearch};
 use crate::verification::{PositionSet, RetainedBytes, match_ends};
 
@@ -27,6 +28,7 @@ pub struct PatternSettings<'s> {
     pub potentially_unwanted: bool,
     pub unwanted_categories: UnwantedCategories<'s>,
     pub every_match: bool,
+    pub largest_object_for_regular_expressions: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +54,7 @@ pub struct PatternRequest<'r> {
     pub settings: PatternSettings<'r>,
     pub object_length: u64,
     pub context: ObjectContext<'r>,
+    pub image_fuzzy_hash: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +87,7 @@ pub enum PatternScanError {
     FewerBytesThanDeclared { declared: u64, fed: u64 },
     RetainedBytesLost { position: u64 },
     SecondPassNotRun,
+    WholeObjectNotGiven,
     ArmedSearchNotBuilt,
 }
 
@@ -120,6 +124,10 @@ impl fmt::Display for PatternScanError {
                 formatter,
                 "the search for the armed logical signatures could not be built"
             ),
+            Self::WholeObjectNotGiven => write!(
+                formatter,
+                "the whole object must be given before its regular expressions and byte comparisons are matched"
+            ),
             Self::SecondPassNotRun => write!(
                 formatter,
                 "the object must be matched a second time before its outcomes are known"
@@ -151,6 +159,7 @@ pub enum ScanProgress {
 pub enum ScanEnd<'i, 'm, 'r> {
     Complete(PatternOutcomes),
     SecondPassNeeded(Box<PatternScan<'i, 'm, 'r>>),
+    WholeObjectNeeded(Box<PatternScan<'i, 'm, 'r>>),
 }
 
 impl ScanEnd<'_, '_, '_> {
@@ -158,6 +167,7 @@ impl ScanEnd<'_, '_, '_> {
         match self {
             Self::Complete(outcomes) => Ok(outcomes),
             Self::SecondPassNeeded(_) => Err(PatternScanError::SecondPassNotRun),
+            Self::WholeObjectNeeded(_) => Err(PatternScanError::WholeObjectNotGiven),
         }
     }
 }
@@ -187,6 +197,9 @@ pub fn scan_object(
         match scan.finish()? {
             ScanEnd::Complete(outcomes) => return Ok(outcomes),
             ScanEnd::SecondPassNeeded(second) => scan = *second,
+            ScanEnd::WholeObjectNeeded(waiting) => {
+                return waiting.match_whole_object(object)?.into_outcomes();
+            }
         }
     }
 }
@@ -466,6 +479,8 @@ impl SignatureBits {
 }
 
 struct SelectedGroup<'m> {
+    id: SignatureGroup,
+    plug_ins: Option<PlugInSubsignatures<'m>>,
     view: PatternGroup<'m>,
     tables: AnchorTables<'m>,
     logical: Option<LogicalState<'m>>,
@@ -499,6 +514,7 @@ pub struct PatternScan<'i, 'm, 'r> {
     types_found: Vec<TypeFound>,
     stop_once_past: Option<u64>,
     stopped: bool,
+    image_fuzzy_hash: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -521,13 +537,18 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         executable_layout: impl FnOnce() -> Option<ExecutableLayout>,
     ) -> Result<Self, PatternScanError> {
         let selected = selected_groups(image, request.selection)?;
-        let selected_ids: Vec<SignatureGroup> =
-            selected.groups.iter().map(|(group, _, _)| *group).collect();
+        let selected_ids: Vec<SignatureGroup> = selected
+            .groups
+            .iter()
+            .map(|(group, _, _, _)| *group)
+            .collect();
         let selection_filter = image.selection_filter(&selected_ids)?;
         let groups = selected
             .groups
             .into_iter()
-            .map(|(group, view, logical)| SelectedGroup {
+            .map(|(group, view, logical, plug_ins)| SelectedGroup {
+                id: group,
+                plug_ins,
                 view,
                 tables: view.anchor_tables(MatchingPass::Main),
                 logical: logical.map(|logical| LogicalState::new(logical, group)),
@@ -571,6 +592,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             types_found: Vec::new(),
             stop_once_past: None,
             stopped: false,
+            image_fuzzy_hash: request.image_fuzzy_hash,
         };
         scan.place_positional()?;
         Ok(scan)
@@ -650,7 +672,54 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             self.start_second_pass()?;
             return Ok(ScanEnd::SecondPassNeeded(Box::new(self)));
         }
+        if !self.stopped && self.groups.iter().any(|group| group.plug_ins.is_some()) {
+            return Ok(ScanEnd::WholeObjectNeeded(Box::new(self)));
+        }
         Ok(ScanEnd::Complete(self.outcomes()?))
+    }
+
+    pub fn match_whole_object(
+        mut self,
+        object: &[u8],
+    ) -> Result<ScanEnd<'i, 'm, 'r>, PatternScanError> {
+        let length = u64::try_from(object.len()).unwrap_or(u64::MAX);
+        if length != self.object_length {
+            return Err(PatternScanError::FewerBytesThanDeclared {
+                declared: self.object_length,
+                fed: length,
+            });
+        }
+        let request = PlugInRequest {
+            object,
+            windows: self.report_windows,
+            image_fuzzy_hash: self.image_fuzzy_hash,
+            largest_object_for_regular_expressions: self
+                .settings
+                .largest_object_for_regular_expressions,
+            layout: match self.layout_need {
+                LayoutNeed::Executable => match &self.executable_layout {
+                    Some(layout) => LayoutState::Known(layout),
+                    None => LayoutState::Missing,
+                },
+                LayoutNeed::NotExecutable | LayoutNeed::NeverResolved => LayoutState::NotExecutable,
+            },
+        };
+        for group in &mut self.groups {
+            if let (Some(plug_ins), Some(state)) = (&group.plug_ins, group.logical.as_mut()) {
+                match_plug_ins(group.id, plug_ins, state, &request)?;
+            }
+        }
+        Ok(ScanEnd::Complete(self.outcomes()?))
+    }
+
+    fn layout_state(&self) -> LayoutState<'_> {
+        match self.layout_need {
+            LayoutNeed::Executable => match &self.executable_layout {
+                Some(layout) => LayoutState::Known(layout),
+                None => LayoutState::Missing,
+            },
+            LayoutNeed::NotExecutable | LayoutNeed::NeverResolved => LayoutState::NotExecutable,
+        }
     }
 
     fn needs_second_pass(&self) -> bool {
@@ -723,13 +792,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
 
     fn logical_findings(&self) -> Result<LogicalFindings, PatternScanError> {
         let mut findings = LogicalFindings::default();
-        let layout = match self.layout_need {
-            LayoutNeed::Executable => match &self.executable_layout {
-                Some(layout) => LayoutState::Known(layout),
-                None => LayoutState::Missing,
-            },
-            LayoutNeed::NotExecutable | LayoutNeed::NeverResolved => LayoutState::NotExecutable,
-        };
+        let layout = self.layout_state();
         for group in &self.groups {
             let Some(logical) = &group.logical else {
                 continue;
@@ -1349,7 +1412,12 @@ enum LayoutNeed {
     Executable,
 }
 
-type SelectedViews<'m> = Vec<(SignatureGroup, PatternGroup<'m>, Option<LogicalGroup<'m>>)>;
+type SelectedViews<'m> = Vec<(
+    SignatureGroup,
+    PatternGroup<'m>,
+    Option<LogicalGroup<'m>>,
+    Option<PlugInSubsignatures<'m>>,
+)>;
 
 struct Selected<'m> {
     groups: SelectedViews<'m>,
@@ -1393,7 +1461,12 @@ fn selected_groups<'m>(
     let mut groups = Vec::with_capacity(wanted.len());
     for group in wanted {
         if let Some(view) = image.pattern_group(group)? {
-            groups.push((group, view, image.logical_group(group)?));
+            groups.push((
+                group,
+                view,
+                image.logical_group(group)?,
+                image.plug_in_subsignatures(group)?,
+            ));
         }
     }
     Ok(Selected { groups, layout })

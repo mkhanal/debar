@@ -515,15 +515,15 @@ fn reach_before(segment: &Segment, displacement: Displacement) -> u32 {
         .saturating_add(segment.context_reach_before())
 }
 
-struct PlacementFields {
-    code: u8,
-    distance: u32,
-    shift: u32,
-    section: u32,
-    in_executable: bool,
+pub(crate) struct PlacementFields {
+    pub code: u8,
+    pub distance: u32,
+    pub shift: u32,
+    pub section: u32,
+    pub in_executable: bool,
 }
 
-fn placement_fields(placement: Placement) -> PlacementFields {
+pub(crate) fn placement_fields(placement: Placement) -> PlacementFields {
     let plain = |code, distance, shift| PlacementFields {
         code,
         distance,
@@ -577,7 +577,7 @@ fn placement_fields(placement: Placement) -> PlacementFields {
     }
 }
 
-fn placement_of(code: u8, distance: u32, shift: u32, section: u32) -> Option<Placement> {
+pub(crate) fn placement_of(code: u8, distance: u32, shift: u32, section: u32) -> Option<Placement> {
     let in_executable = |anchor| Some(Placement::InExecutable { anchor, shift });
     match code {
         PLACEMENT_ANYWHERE => Some(Placement::Anywhere),

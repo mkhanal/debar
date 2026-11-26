@@ -88,3 +88,31 @@ path = "../crates/matching/fuzz_targets/logical_evaluation.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "regular_expression_subsignatures"
+path = "../crates/clamav-signatures/fuzz_targets/regular_expression_subsignatures.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "byte_comparisons"
+path = "../crates/clamav-signatures/fuzz_targets/byte_comparisons.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "container_signatures"
+path = "../crates/clamav-signatures/fuzz_targets/container_signatures.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "plug_in_matching"
+path = "../crates/matching/fuzz_targets/plug_in_matching.rs"
+test = false
+doc = false
+bench = false

@@ -12,7 +12,7 @@ use debar_image::{
     Category, ContentSubsignature, CountComparison, CountTest, Expression, Image, ImageBuilder,
     InclusiveRange, Indicator, KindCondition, KindDescription, LogicalConditions, LogicalSignature,
     MaskedByte, ObjectKind, OwnBytes, PartMemory, Pattern, PatternElement, Placement,
-    RecognitionRank, SignatureGroup, UnwantedCategory,
+    RecognitionRank, SignatureGroup, Subsignature as ModelSubsignature, UnwantedCategory,
 };
 use debar_matching::{
     GroupSelection, ObjectContext, PatternRequest, PatternScan, PatternSettings, ScanEnd,
@@ -266,12 +266,14 @@ fn binary_data() -> KindDescription {
 fn image_of(signatures: &[Signature], category: Category) -> Vec<u8> {
     let mut builder = ImageBuilder::new();
     for signature in signatures {
-        let subsignatures: Vec<ContentSubsignature> = signature
+        let subsignatures: Vec<ModelSubsignature> = signature
             .subsignatures
             .iter()
-            .map(|subsignature| ContentSubsignature {
-                placement: Placement::Anywhere,
-                patterns: vec![subsignature.pattern()],
+            .map(|subsignature| {
+                ModelSubsignature::Content(ContentSubsignature {
+                    placement: Placement::Anywhere,
+                    patterns: vec![subsignature.pattern()],
+                })
             })
             .collect();
         if category == Category::PotentiallyUnwanted {
@@ -298,6 +300,7 @@ fn settings(potentially_unwanted: bool, categories: UnwantedCategories<'_>) -> P
         potentially_unwanted,
         unwanted_categories: categories,
         every_match: true,
+        largest_object_for_regular_expressions: None,
     }
 }
 
@@ -312,6 +315,7 @@ fn detected_with(
         settings,
         object_length: object.len() as u64,
         context,
+        image_fuzzy_hash: None,
     };
     scan_object(image, request, || None, object)
         .unwrap()
@@ -395,6 +399,7 @@ fn every_split_of_an_object_into_chunks_gives_the_same_logical_detections() {
                 settings: settings(false, UnwantedCategories::Every),
                 object_length: object.len() as u64,
                 context: ObjectContext::TOP_LEVEL,
+                image_fuzzy_hash: None,
             };
             let mut scan = PatternScan::new(&image, request, || None).unwrap();
             let outcomes = loop {
@@ -404,6 +409,13 @@ fn every_split_of_an_object_into_chunks_gives_the_same_logical_detections() {
                 match scan.finish().unwrap() {
                     ScanEnd::Complete(outcomes) => break outcomes,
                     ScanEnd::SecondPassNeeded(second) => scan = *second,
+                    ScanEnd::WholeObjectNeeded(waiting) => {
+                        break waiting
+                            .match_whole_object(&object)
+                            .unwrap()
+                            .into_outcomes()
+                            .unwrap();
+                    }
                 }
             };
             let names: Vec<String> = outcomes
@@ -540,6 +552,7 @@ fn a_handler_type_asks_for_a_rescan_instead_of_a_detection_unless_already_retype
                 ancestors: &[],
                 retyped,
             },
+            image_fuzzy_hash: None,
         };
         scan_object(&image, request, || None, b"..ABCD..")
             .unwrap()
@@ -598,10 +611,10 @@ fn a_subsignature_in_parts_counts_every_completed_occurrence() {
         elements,
         after: None,
     };
-    let subsignatures = [ContentSubsignature {
+    let subsignatures = [ModelSubsignature::Content(ContentSubsignature {
         placement: Placement::Anywhere,
         patterns: vec![pattern],
-    }];
+    })];
     let expression = Expression::Subsignature {
         index: 0,
         count: Some(CountTest {

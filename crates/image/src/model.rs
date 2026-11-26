@@ -1,3 +1,5 @@
+use regex_syntax::hir::Hir;
+
 use crate::object_kind::ObjectKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -347,6 +349,69 @@ pub struct ContentSubsignature {
     pub patterns: Vec<Pattern>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExpressionAnchoring {
+    AtAnUnshiftedPlacement,
+    NeverAtThePlacement,
+    AtTheSubjectStart,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExpressionMatches {
+    First,
+    EveryOneNotOverlapping,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegularExpressionSubsignature {
+    pub trigger: Option<Expression>,
+    pub placement: Placement,
+    pub expression: Hir,
+    pub anchoring: ExpressionAnchoring,
+    pub matches: ExpressionMatches,
+    pub bounded_by_shift: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ByteOrder {
+    Little,
+    Big,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ByteEncoding {
+    Binary(ByteOrder),
+    HexadecimalText(ByteOrder),
+    DecimalText,
+    HexadecimalOrDecimalText(ByteOrder),
+    NeverMatches,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ValueComparison {
+    Equal(i64),
+    Greater(i64),
+    Less(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ByteComparison {
+    pub subsignature: u16,
+    pub displacement: i64,
+    pub encoding: ByteEncoding,
+    pub length: u32,
+    pub exact: bool,
+    pub comparisons: Vec<ValueComparison>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Subsignature {
+    Content(ContentSubsignature),
+    RegularExpression(RegularExpressionSubsignature),
+    ByteComparison(ByteComparison),
+    ImageFuzzyHash(u64),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogicalSignature<'a> {
     pub group: SignatureGroup,
@@ -354,8 +419,45 @@ pub struct LogicalSignature<'a> {
     pub name: &'a str,
     pub indicator: Indicator,
     pub expression: &'a Expression,
-    pub subsignatures: &'a [ContentSubsignature],
+    pub subsignatures: &'a [Subsignature],
     pub conditions: &'a LogicalConditions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SizeCondition {
+    Any,
+    Exactly(u32),
+    Between {
+        lowest: Option<u32>,
+        highest: Option<u32>,
+    },
+}
+
+impl SizeCondition {
+    #[must_use]
+    pub fn holds(self, value: u64) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Exactly(expected) => value == u64::from(expected),
+            Self::Between { lowest, highest } => {
+                lowest.is_none_or(|lowest| value >= u64::from(lowest))
+                    && highest.is_none_or(|highest| value <= u64::from(highest))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerSignature<'a> {
+    pub name: &'a str,
+    pub indicator: Indicator,
+    pub container: KindCondition,
+    pub container_size: SizeCondition,
+    pub entry_name: Option<Hir>,
+    pub compressed_size: SizeCondition,
+    pub real_size: SizeCondition,
+    pub encrypted: Option<bool>,
+    pub position: SizeCondition,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

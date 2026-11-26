@@ -260,6 +260,59 @@ impl<'m> LogicalState<'m> {
         Ok(Counted { saturated })
     }
 
+    pub(crate) fn current_matches(
+        &self,
+        id: LogicalSignatureId,
+        index: u16,
+    ) -> Result<u64, PatternScanError> {
+        let record = self
+            .view
+            .signature(id)
+            .map_err(|reason| self.malformed(reason))?;
+        Ok(self.matches_of(&record, index))
+    }
+
+    pub(crate) fn recorded_starts(
+        &self,
+        id: LogicalSignatureId,
+        index: u16,
+    ) -> Result<&[u64], PatternScanError> {
+        let record = self
+            .view
+            .signature(id)
+            .map_err(|reason| self.malformed(reason))?;
+        if u32::from(index) >= record.subsignature_count {
+            return Ok(&[]);
+        }
+        let Some(global) = record.first_subsignature.checked_add(u32::from(index)) else {
+            return Ok(&[]);
+        };
+        Ok(self
+            .counts
+            .get(&global)
+            .map_or(&[][..], |count| count.starts.as_slice()))
+    }
+
+    pub(crate) fn has_pattern(
+        &self,
+        id: LogicalSignatureId,
+        index: u16,
+    ) -> Result<bool, PatternScanError> {
+        let record = self
+            .view
+            .signature(id)
+            .map_err(|reason| self.malformed(reason))?;
+        if u32::from(index) >= record.subsignature_count {
+            return Ok(false);
+        }
+        Ok(self
+            .view
+            .subsignature(&record, index)
+            .map_err(|reason| self.malformed(reason))?
+            .pattern
+            .is_some())
+    }
+
     fn matches_of(&self, record: &LogicalSignatureRecord<'_>, index: u16) -> u64 {
         let Some(global) = record.first_subsignature.checked_add(u32::from(index)) else {
             return 0;

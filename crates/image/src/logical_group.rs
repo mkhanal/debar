@@ -102,7 +102,7 @@ struct SubsignatureEntry {
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Clone, Copy)]
 #[repr(C)]
-struct StepEntry {
+pub(crate) struct StepEntry {
     kind: u8,
     comparison: u8,
     subsignature: U16,
@@ -376,7 +376,7 @@ fn kind_of_code(code: u16) -> Option<KindCondition> {
     ObjectKind::from_code(code).map(KindCondition::Kind)
 }
 
-fn step_entry(step: &ExpressionStep) -> StepEntry {
+pub(crate) fn step_entry(step: &ExpressionStep) -> StepEntry {
     let (kind, subsignature, count) = match *step {
         ExpressionStep::Subsignature { index, count } => (STEP_SUBSIGNATURE, index, count),
         ExpressionStep::All => (STEP_ALL, 0, None),
@@ -398,7 +398,7 @@ fn step_entry(step: &ExpressionStep) -> StepEntry {
     }
 }
 
-fn step_of(entry: &StepEntry) -> Result<ExpressionStep, ExpressionMalformed> {
+pub(crate) fn step_of(entry: &StepEntry) -> Result<ExpressionStep, ExpressionMalformed> {
     let threshold = entry.threshold.get();
     let comparison = match entry.comparison {
         COMPARISON_NONE => None,

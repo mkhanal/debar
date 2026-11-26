@@ -120,9 +120,11 @@ fn detected(
             potentially_unwanted: false,
             unwanted_categories: UnwantedCategories::Every,
             every_match: true,
+            largest_object_for_regular_expressions: None,
         },
         object_length: object.len() as u64,
         context: ObjectContext::TOP_LEVEL,
+        image_fuzzy_hash: None,
     };
     let mut scan = PatternScan::new(&image, request, || layout).unwrap();
     scan.feed(object).unwrap();
@@ -325,9 +327,11 @@ fn without_an_executable_layout_only_absolute_and_unplaced_signatures_match() {
                 potentially_unwanted: false,
                 unwanted_categories: UnwantedCategories::Every,
                 every_match: true,
+                largest_object_for_regular_expressions: None,
             },
             object_length: object.len() as u64,
             context: ObjectContext::TOP_LEVEL,
+            image_fuzzy_hash: None,
         };
         let mut scan = PatternScan::new(&image, request, || layout).unwrap();
         scan.feed(&object).unwrap();
@@ -367,6 +371,7 @@ fn the_executable_layout_is_asked_for_only_for_an_executable_kind() {
             settings: PatternSettings::default(),
             object_length: 16,
             context: ObjectContext::TOP_LEVEL,
+            image_fuzzy_hash: None,
         };
         let scan = PatternScan::new(&image, request, || {
             asked.set(asked.get() + 1);

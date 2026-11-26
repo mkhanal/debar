@@ -40,7 +40,11 @@ pub fn account_report(account: &Account, image: &[u8]) -> Result<Value, ImageErr
             } else {
                 None
             };
+            let plug_ins = (section.kind == SectionKind::PlugInSubsignatures)
+                .then(|| plug_in_report(&opened, SignatureGroup(section.qualifier)))
+                .flatten();
             json!({
+                "plug_in_subsignatures": plug_ins,
                 "window_overlap": window_overlap,
                 "logical": logical,
                 "kind": if recognises_types {
@@ -91,6 +95,25 @@ pub fn account_report(account: &Account, image: &[u8]) -> Result<Value, ImageErr
     }))
 }
 
+fn plug_in_report(image: &Image<'_>, group: SignatureGroup) -> Option<Value> {
+    let plug_ins = image.plug_in_subsignatures(group).ok().flatten()?;
+    let in_image = plug_ins
+        .expressions()
+        .filter(|record| {
+            record
+                .as_ref()
+                .is_ok_and(|record| record.automata.is_some())
+        })
+        .count();
+    Some(json!({
+        "regular_expressions": plug_ins.expression_count(),
+        "regular_expressions_with_automata_in_image": in_image,
+        "automata_bytes": plug_ins.automata_bytes(),
+        "byte_comparisons": plug_ins.comparison_count(),
+        "image_hashes": plug_ins.image_hash_count(),
+    }))
+}
+
 fn file_report(file: &FileAccount) -> Value {
     let counts: serde_json::Map<String, Value> = LineOutcome::ALL
         .iter()
@@ -108,7 +131,9 @@ fn file_report(file: &FileAccount) -> Value {
         .filter(|(outcome, _)| {
             matches!(
                 outcome,
-                LineOutcome::OutsideFunctionalityLevel | LineOutcome::Ignored
+                LineOutcome::OutsideFunctionalityLevel
+                    | LineOutcome::Ignored
+                    | LineOutcome::NeedsBacktrackingEngine
             )
         })
         .map(|(outcome, line)| json!({ "line": line, "outcome": outcome_name(*outcome) }))
@@ -134,6 +159,7 @@ fn outcome_name(outcome: LineOutcome) -> &'static str {
         LineOutcome::NotLoaded => "not_loaded",
         LineOutcome::NeverReports => "never_reports",
         LineOutcome::ShadowedByDuplicate => "shadowed_by_duplicate",
+        LineOutcome::NeedsBacktrackingEngine => "needs_backtracking_engine",
         LineOutcome::NotYetCompiled => "not_yet_compiled",
     }
 }
@@ -151,6 +177,10 @@ fn section_kind_name(kind: SectionKind) -> &'static str {
         SectionKind::LogicalGroup => "logical signatures",
         SectionKind::UnwantedCategories => "categories of potentially unwanted signatures",
         SectionKind::SelectionFilters => "filters of the signature groups each kind selects",
+        SectionKind::PlugInSubsignatures => {
+            "regular expressions, byte comparisons and image hashes"
+        }
+        SectionKind::ContainerSignatures => "container signatures",
     }
 }
 

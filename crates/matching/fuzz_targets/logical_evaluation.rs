@@ -1,7 +1,7 @@
 #![no_main]
 
 use debar_image::{
-    Category, ContentSubsignature, CountComparison, CountTest, Expression, Image, ImageBuilder,
+    Category, ContentSubsignature, Subsignature, CountComparison, CountTest, Expression, Image, ImageBuilder,
     Indicator, KindDescription, LogicalConditions, LogicalSignature, MaskedByte, ObjectKind,
     OwnBytes, Pattern, PatternElement, Placement, RecognitionRank, SignatureGroup,
 };
@@ -93,9 +93,9 @@ fn subsignature(bytes: &[u8], folded: bool) -> ContentSubsignature {
 fn image(choices: &mut Choices<'_>) -> Option<Vec<u8>> {
     let mut builder = ImageBuilder::new();
     let names: Vec<String> = (0..4).map(|index| format!("Fuzz.Logical-{index}")).collect();
-    let subsignatures: Vec<ContentSubsignature> = SUBSIGNATURES
+    let subsignatures: Vec<Subsignature> = SUBSIGNATURES
         .iter()
-        .map(|bytes| subsignature(bytes, choices.next() % 2 == 0))
+        .map(|bytes| Subsignature::Content(subsignature(bytes, choices.next() % 2 == 0)))
         .collect();
     let conditions = LogicalConditions::default();
     for name in &names {
@@ -136,9 +136,11 @@ fn detections(image: &Image<'_>, object: &[u8], chunk: usize) -> Vec<String> {
             potentially_unwanted: false,
             unwanted_categories: UnwantedCategories::Every,
             every_match: true,
+            largest_object_for_regular_expressions: None,
         },
         object_length: object.len() as u64,
         context: ObjectContext::TOP_LEVEL,
+        image_fuzzy_hash: None,
     };
     let mut scan = PatternScan::new(image, request, || None).expect("the scan starts");
     let outcomes = loop {
@@ -148,6 +150,13 @@ fn detections(image: &Image<'_>, object: &[u8], chunk: usize) -> Vec<String> {
         match scan.finish().expect("the scan finishes") {
             ScanEnd::Complete(outcomes) => break outcomes,
             ScanEnd::SecondPassNeeded(second) => scan = *second,
+            ScanEnd::WholeObjectNeeded(waiting) => {
+                break waiting
+                    .match_whole_object(object)
+                    .expect("the whole object is matched")
+                    .into_outcomes()
+                    .expect("the scan completes");
+            }
         }
     };
     outcomes

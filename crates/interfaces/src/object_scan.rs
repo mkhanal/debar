@@ -9,6 +9,7 @@ use debar_matching::{
 use debar_scan::{TypingError, kind_after_full_scan, kind_from_first_bytes};
 
 pub const LARGEST_OBJECT_LEFT_UNSCANNED: u64 = 5;
+pub const DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS: u64 = 100 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum ObjectScanError {
@@ -45,6 +46,7 @@ pub enum Verdict {
 pub struct ScanSettings<'s> {
     pub potentially_unwanted: bool,
     pub unwanted_categories: UnwantedCategories<'s>,
+    pub largest_object_for_regular_expressions: Option<u64>,
 }
 
 impl<'s> ScanSettings<'s> {
@@ -148,9 +150,11 @@ fn pattern_outcomes(
             potentially_unwanted: settings.potentially_unwanted,
             unwanted_categories: settings.unwanted_categories,
             every_match: true,
+            largest_object_for_regular_expressions: settings.largest_object_for_regular_expressions,
         },
         object_length: size,
         context: ObjectContext::TOP_LEVEL,
+        image_fuzzy_hash: None,
     };
     scan_object(image, request, || None, object).map_err(ObjectScanError::Patterns)
 }

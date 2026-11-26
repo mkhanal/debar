@@ -1,6 +1,8 @@
 mod account;
 mod body_pattern;
+mod byte_comparison_subsignatures;
 mod container;
+mod container_lines;
 mod database_files;
 mod extended_lines;
 mod file_type_lines;
@@ -11,16 +13,25 @@ mod line_text;
 mod logical_expression;
 mod logical_lines;
 mod numbers;
+mod posix_expression_syntax;
+mod regular_expression_classes;
+mod regular_expression_subsignatures;
+mod regular_expression_syntax;
 mod type_names;
 
 pub use account::{Account, FileAccount, LineOutcome};
 pub use body_pattern::MalformedBody;
+pub use byte_comparison_subsignatures::MalformedByteComparison;
 pub use container::ContainerError;
+pub use container_lines::MalformedContainerLine;
 pub use database_files::{DatabaseError, DatabaseFile, compile};
 pub use extended_lines::MalformedExtendedLine;
 pub use file_type_lines::MalformedFileTypeLine;
 pub use hash_lines::MalformedLine;
 pub use logical_expression::MalformedExpression;
 pub use logical_lines::{MalformedLogicalLine, MalformedSubsignature};
+pub use posix_expression_syntax::MalformedPosixExpression;
+pub use regular_expression_subsignatures::MalformedRegularExpressionSubsignature;
+pub use regular_expression_syntax::{BacktrackingConstruct, MalformedRegularExpression};
 
 pub const FUNCTIONALITY_LEVEL: i64 = 234;
