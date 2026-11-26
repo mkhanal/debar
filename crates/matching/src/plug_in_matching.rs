@@ -1,10 +1,13 @@
 use debar_image::{
-    AutomatonMalformed, ComparisonRecord, ExpressionAnchoring, ExpressionMatches, ExpressionRecord,
-    ImageError, InPlaceAutomaton, MatchingPass, Placement, PlugInSubsignatures, PlugInsMalformed,
-    ReportWindows, SignatureGroup, automaton_in_place, compile_text,
+    AutomatonMalformed, BacktrackingProgram, ComparisonRecord, ExpressionAnchoring,
+    ExpressionMatches, ExpressionRecord, ImageError, InPlaceAutomaton, MatchingPass, Placement,
+    PlugInSubsignatures, PlugInsMalformed, RecordedForm, ReportWindows, SignatureGroup,
+    automaton_in_place, compile_text,
 };
 use regex_automata::dfa::regex::Regex;
 use regex_automata::{Anchored, Input, Match};
+
+use crate::backtracking_search::{BacktrackingBounds, BacktrackingSearch, backtracking_search};
 use zerocopy::IntoBytes;
 
 use crate::byte_values::comparisons_hold;
@@ -255,30 +258,69 @@ fn expression_starts(
         .object
         .get(subject.start..subject.end)
         .unwrap_or_default();
-    let relative_starts = if let Some((forward_bytes, reverse_bytes)) = record.automata {
-        let forward_copy;
-        let reverse_copy;
-        let forward: InPlaceAutomaton<'_> = if let Ok(automaton) = automaton_in_place(forward_bytes)
-        {
-            automaton
-        } else {
-            forward_copy = aligned_copy(forward_bytes);
-            automaton_in_place(forward_copy.as_bytes())?
-        };
-        let reverse: InPlaceAutomaton<'_> = if let Ok(automaton) = automaton_in_place(reverse_bytes)
-        {
-            automaton
-        } else {
-            reverse_copy = aligned_copy(reverse_bytes);
-            automaton_in_place(reverse_copy.as_bytes())?
-        };
-        let regex = Regex::builder().build_from_dfas(forward, reverse);
-        matched_starts(record, &subject, haystack, |input| {
-            regex.try_search(input).map_err(|_| AutomatonMalformed)
-        })?
+    let anchored = if subject.anchored {
+        Anchored::Yes
     } else {
-        let regex = compile_text(record.text().map_err(|_| AutomatonMalformed)?)?;
-        matched_starts(record, &subject, haystack, |input| Ok(regex.search(input)))?
+        Anchored::No
+    };
+    let automaton_search = |found: Option<Match>| found.map(|found| (found.start(), found.end()));
+    let relative_starts = match record.form {
+        RecordedForm::Automata {
+            forward: forward_bytes,
+            reverse: reverse_bytes,
+        } => {
+            let forward_copy;
+            let reverse_copy;
+            let forward: InPlaceAutomaton<'_> =
+                if let Ok(automaton) = automaton_in_place(forward_bytes) {
+                    automaton
+                } else {
+                    forward_copy = aligned_copy(forward_bytes);
+                    automaton_in_place(forward_copy.as_bytes())?
+                };
+            let reverse: InPlaceAutomaton<'_> =
+                if let Ok(automaton) = automaton_in_place(reverse_bytes) {
+                    automaton
+                } else {
+                    reverse_copy = aligned_copy(reverse_bytes);
+                    automaton_in_place(reverse_copy.as_bytes())?
+                };
+            let regex = Regex::builder().build_from_dfas(forward, reverse);
+            matched_starts(record, &subject, haystack, |from| {
+                let input = Input::new(haystack).range(from..).anchored(anchored);
+                regex
+                    .try_search(&input)
+                    .map(automaton_search)
+                    .map_err(|_| AutomatonMalformed)
+            })?
+        }
+        RecordedForm::Text => {
+            let regex = compile_text(record.text().map_err(|_| AutomatonMalformed)?)?;
+            matched_starts(record, &subject, haystack, |from| {
+                let input = Input::new(haystack).range(from..).anchored(anchored);
+                Ok(automaton_search(regex.search(&input)))
+            })?
+        }
+        RecordedForm::Backtracking(bytes) => {
+            let program = BacktrackingProgram::read(bytes).map_err(|_| AutomatonMalformed)?;
+            matched_starts(
+                record,
+                &subject,
+                haystack,
+                |from| match backtracking_search(
+                    &program,
+                    haystack,
+                    from,
+                    subject.anchored,
+                    BacktrackingBounds::FOR_SIGNATURES,
+                )
+                .map_err(|_| AutomatonMalformed)?
+                {
+                    BacktrackingSearch::Found { start, end } => Ok(Some((start, end))),
+                    BacktrackingSearch::NotFound | BacktrackingSearch::GaveUp => Ok(None),
+                },
+            )?
+        }
     };
     let base = u64::try_from(subject.start).unwrap_or(u64::MAX);
     Ok(relative_starts
@@ -291,31 +333,21 @@ fn matched_starts(
     record: &ExpressionRecord<'_>,
     subject: &Subject,
     haystack: &[u8],
-    mut search: impl FnMut(&Input<'_>) -> Result<Option<Match>, AutomatonMalformed>,
+    mut search: impl FnMut(usize) -> Result<Option<(usize, usize)>, AutomatonMalformed>,
 ) -> Result<Vec<usize>, AutomatonMalformed> {
     let mut starts = Vec::new();
     let mut from = 0usize;
-    loop {
-        let input = Input::new(haystack)
-            .range(from..)
-            .anchored(if subject.anchored {
-                Anchored::Yes
-            } else {
-                Anchored::No
-            });
-        let Some(found) = search(&input)? else {
-            break;
-        };
-        if !record.bounded_by_shift && subject.shift > 0 && found.start() > subject.shift {
+    while let Some((start, end)) = search(from)? {
+        if !record.bounded_by_shift && subject.shift > 0 && start > subject.shift {
             break;
         }
-        if starts.last() != Some(&found.start()) {
-            starts.push(found.start());
+        if starts.last() != Some(&start) {
+            starts.push(start);
         }
-        if record.matches == ExpressionMatches::First || found.end() == from && found.is_empty() {
+        if record.matches == ExpressionMatches::First || end == from && start == end {
             break;
         }
-        from = found.end();
+        from = end;
         if from >= haystack.len() {
             break;
         }

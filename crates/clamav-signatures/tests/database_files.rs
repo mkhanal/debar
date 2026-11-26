@@ -1,4 +1,5 @@
 #![allow(
+    clippy::panic,
     clippy::unwrap_used,
     clippy::indexing_slicing,
     clippy::string_slice,
@@ -9,7 +10,9 @@
 
 use std::io::Write;
 
-use debar_clamav_signatures::{Account, DatabaseError, DatabaseFile, LineOutcome, compile};
+use debar_clamav_signatures::{
+    Account, ContainerError, DatabaseError, DatabaseFile, LineOutcome, compile,
+};
 use debar_image::{
     Category, DigestAlgorithm, HashPurpose, Image, ImageBuilder, Indicator, PartitionKey,
     Provenance,
@@ -371,7 +374,10 @@ fn files_that_are_not_databases_are_listed_and_other_kinds_are_not_yet_compiled(
     let compiled = compile_files(&[
         (".bashrc", b"export A=1\n"),
         ("daily-1.cvd.sign", b"signature"),
-        ("local.crb", b"Trusted.One:1:2:3\nTrusted.Two:4:5:6\n"),
+        (
+            "local.yara",
+            b"rule One { condition: true }\nrule Two { condition: true }\n",
+        ),
     ])
     .unwrap();
 
@@ -397,8 +403,24 @@ fn tar_member(name: &str, contents: &[u8]) -> Vec<u8> {
 }
 
 fn container(stem: &str, members: &[(&str, Vec<u8>)], compress: bool) -> Vec<u8> {
+    container_signed_with(stem, members, compress, "", "sig")
+}
+
+fn unsigned_container(stem: &str, members: &[(&str, Vec<u8>)], compress: bool) -> Vec<u8> {
+    container_signed_with(stem, members, compress, "unsigned", "sig")
+}
+
+fn container_signed_with(
+    stem: &str,
+    members: &[(&str, Vec<u8>)],
+    compress: bool,
+    index_signature: &str,
+    header_signature: &str,
+) -> Vec<u8> {
     let fields = |md5: &str| {
-        format!("ClamAV-VDB:01 Jan 2026 00-00 +0000:42:2:90:{md5}:sig:builder:1700000000")
+        format!(
+            "ClamAV-VDB:01 Jan 2026 00-00 +0000:42:2:90:{md5}:{header_signature}:builder:1700000000"
+        )
     };
     let mut info = format!("{}\n", fields("X"));
     for (name, contents) in members {
@@ -408,7 +430,9 @@ fn container(stem: &str, members: &[(&str, Vec<u8>)], compress: bool) -> Vec<u8>
             sha256_hex(contents)
         ));
     }
-    info.push_str("DSIG:unverified\n");
+    if index_signature.is_empty() {
+        info.push_str("DSIG:unverified\n");
+    }
     let mut tar = tar_member("COPYING", b"licence text\nsecond line\n");
     tar.extend(tar_member(&format!("{stem}.info"), info.as_bytes()));
     for (name, contents) in members {
@@ -428,11 +452,11 @@ fn container(stem: &str, members: &[(&str, Vec<u8>)], compress: bool) -> Vec<u8>
 }
 
 #[test]
-fn a_container_compiles_its_members_under_their_official_names() {
+fn an_unsigned_container_compiles_its_members_under_their_unofficial_names() {
     let line = format!("{}:19:Official.Sample\n", md5_hex(SAMPLE)).into_bytes();
     for compress in [true, false] {
-        let cvd = container("daily", &[("daily.hdb", line.clone())], compress);
-        let compiled = compile_files(&[("daily.cvd", &cvd)]).unwrap();
+        let cud = unsigned_container("daily", &[("daily.hdb", line.clone())], compress);
+        let compiled = compile_files(&[("daily.cud", &cud)]).unwrap();
         let image = Image::open(&compiled.image).unwrap();
 
         assert_eq!(
@@ -442,15 +466,12 @@ fn a_container_compiles_its_members_under_their_official_names() {
                 19,
                 &md5_hex(SAMPLE)
             ),
-            Some("Official.Sample".to_owned())
+            Some("Official.Sample.UNOFFICIAL".to_owned())
         );
         let databases = image.databases().unwrap();
         assert_eq!(databases[0].name, "daily");
         assert_eq!(databases[0].version, 42);
-        assert_eq!(
-            databases[0].provenance,
-            Provenance::SignedContainerNotYetVerified
-        );
+        assert_eq!(databases[0].provenance, Provenance::UnsignedContainer);
         let members: Vec<(Option<&str>, &[LineOutcome])> = compiled
             .account
             .files
@@ -461,7 +482,7 @@ fn a_container_compiles_its_members_under_their_official_names() {
             members,
             [
                 (Some("COPYING"), &[LineOutcome::NotASignature; 2][..]),
-                (Some("daily.info"), &[LineOutcome::NotASignature; 3][..]),
+                (Some("daily.info"), &[LineOutcome::NotASignature; 2][..]),
                 (Some("daily.hdb"), &[LineOutcome::Compiled][..]),
             ]
         );
@@ -479,7 +500,7 @@ fn a_container_whose_payload_or_member_was_changed_is_refused() {
         Err(DatabaseError::Container { .. })
     ));
 
-    let mut changed_member = container("daily", &[("daily.hdb", line)], false);
+    let mut changed_member = unsigned_container("daily", &[("daily.hdb", line)], false);
     let position = changed_member
         .windows(15)
         .position(|window| window == b"Official.Sample")
@@ -490,9 +511,64 @@ fn a_container_whose_payload_or_member_was_changed_is_refused() {
     let old_md5 = header.split(':').nth(5).unwrap().to_owned();
     changed_member[..512].copy_from_slice(header.replace(&old_md5, &payload_md5).as_bytes());
     assert!(matches!(
-        compile_files(&[("daily.cvd", &changed_member)]),
-        Err(DatabaseError::Container { .. })
+        compile_files(&[("daily.cud", &changed_member)]),
+        Err(DatabaseError::Container {
+            reason: ContainerError::MemberDisagreesWithIndex { .. },
+            ..
+        })
     ));
+}
+
+#[test]
+fn a_signed_container_whose_signatures_do_not_verify_is_refused() {
+    let line = format!("{}:19:Official.Sample\n", md5_hex(SAMPLE)).into_bytes();
+    let members = [("daily.hdb", line)];
+    let refused = |name: &str, contents: &[u8]| match compile_files(&[(name, contents)]) {
+        Err(DatabaseError::Container { reason, .. }) => reason,
+        other => panic!(
+            "expected the container to be refused, got {:?}",
+            other.map(|_| ())
+        ),
+    };
+    assert_eq!(
+        refused("daily.cvd", &container("daily", &members, true)),
+        ContainerError::HeaderSignatureDoesNotVerify
+    );
+    assert_eq!(
+        refused(
+            "daily.cvd",
+            &container_signed_with("daily", &members, true, "", "")
+        ),
+        ContainerError::HeaderSignatureMissing
+    );
+    assert_eq!(
+        refused("daily.cld", &container("daily", &members, true)),
+        ContainerError::IndexSignatureDoesNotVerify
+    );
+    assert_eq!(
+        refused(
+            "daily.cld",
+            &container_signed_with("daily", &members, true, "unsigned", "sig")
+        ),
+        ContainerError::IndexUnsigned
+    );
+    let mut with_detached = container("daily", &members, true);
+    with_detached.truncate(with_detached.len());
+    let detached = b"#clamsign-1.0\n230::pkcs7-pem:MAA=\n";
+    assert_eq!(
+        refused_with_signature(&with_detached, detached),
+        ContainerError::HeaderSignatureDoesNotVerify
+    );
+}
+
+fn refused_with_signature(cvd: &[u8], detached: &[u8]) -> ContainerError {
+    match compile_files(&[("daily.cvd", cvd), ("daily-42.cvd.sign", detached)]) {
+        Err(DatabaseError::Container { reason, .. }) => reason,
+        other => panic!(
+            "expected the container to be refused, got {:?}",
+            other.map(|_| ())
+        ),
+    }
 }
 
 #[test]
@@ -503,10 +579,10 @@ fn an_ignore_list_inside_a_container_applies_to_containers_loaded_after_it() {
         md5_hex(b"seven")
     )
     .into_bytes();
-    let main = container("main", &[("main.hdb", main_line)], true);
-    let daily = container("daily", &[("daily.ign2", b"Main.Ignored\n".to_vec())], true);
+    let main = unsigned_container("main", &[("main.hdb", main_line)], true);
+    let daily = unsigned_container("daily", &[("daily.ign2", b"Main.Ignored\n".to_vec())], true);
 
-    let compiled = compile_files(&[("main.cvd", &main), ("daily.cvd", &daily)]).unwrap();
+    let compiled = compile_files(&[("daily.cud", &daily), ("main.cud", &main)]).unwrap();
 
     let hashes = compiled
         .account

@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use debar_image::{
     Category, ConditionsRecord, Image, ImageError, Indicator, KindCondition, LogicalGroup,
-    LogicalGroupMalformed, LogicalSignatureId, LogicalSignatureRecord, MatchingPass, NameId,
-    ObjectKind, SignatureGroup, UnwantedCategory,
+    LogicalGroupMalformed, LogicalOutcome, LogicalSignatureId, LogicalSignatureRecord,
+    MatchingPass, NameId, ObjectKind, SignatureGroup, UnwantedCategory,
 };
 
 use crate::executable_layout::LayoutState;
@@ -51,6 +51,7 @@ impl UnwantedCategories<'_> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LogicalFindings {
     pub detections: Vec<PatternDetection>,
+    pub program_triggers: Vec<LogicalOutcome>,
     pub rescans: Vec<ObjectKind>,
     pub do_not_cache: bool,
 }
@@ -382,6 +383,10 @@ impl<'m> LogicalState<'m> {
                 .as_ref()
                 .is_some_and(|conditions| !conditions.icon_groups.is_empty())
             {
+                continue;
+            }
+            if record.outcome != LogicalOutcome::Detection {
+                findings.program_triggers.push(record.outcome);
                 continue;
             }
             let name = image.signature_name(record.name)?;

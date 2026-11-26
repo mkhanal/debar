@@ -40,7 +40,7 @@ fn image_of(signatures: &[HashSignature<'_>]) -> Vec<u8> {
             version: 7,
             declared_signature_count: 3,
             functionality_level: 90,
-            provenance: Provenance::SignedContainerNotYetVerified,
+            provenance: Provenance::DetachedSignatureVerified,
         })
         .unwrap();
     for signature in signatures {
@@ -169,7 +169,7 @@ fn the_databases_are_recorded_in_the_image() {
     assert_eq!(databases[0].version, 7);
     assert_eq!(
         databases[0].provenance,
-        Provenance::SignedContainerNotYetVerified
+        Provenance::DetachedSignatureVerified
     );
 }
 

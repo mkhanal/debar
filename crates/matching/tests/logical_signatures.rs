@@ -10,9 +10,10 @@ use std::collections::BTreeSet;
 
 use debar_image::{
     Category, ContentSubsignature, CountComparison, CountTest, Expression, Image, ImageBuilder,
-    InclusiveRange, Indicator, KindCondition, KindDescription, LogicalConditions, LogicalSignature,
-    MaskedByte, ObjectKind, OwnBytes, PartMemory, Pattern, PatternElement, Placement,
-    RecognitionRank, SignatureGroup, Subsignature as ModelSubsignature, UnwantedCategory,
+    InclusiveRange, Indicator, KindCondition, KindDescription, LogicalConditions, LogicalOutcome,
+    LogicalSignature, MaskedByte, ObjectKind, OwnBytes, PartMemory, Pattern, PatternElement,
+    Placement, RecognitionRank, SignatureGroup, Subsignature as ModelSubsignature,
+    UnwantedCategory,
 };
 use debar_matching::{
     GroupSelection, ObjectContext, PatternRequest, PatternScan, PatternSettings, ScanEnd,
@@ -281,6 +282,7 @@ fn image_of(signatures: &[Signature], category: Category) -> Vec<u8> {
         }
         builder
             .add_logical_signature(&LogicalSignature {
+                outcome: LogicalOutcome::Detection,
                 group: GENERIC,
                 category,
                 name: &signature.name,
@@ -625,6 +627,7 @@ fn a_subsignature_in_parts_counts_every_completed_occurrence() {
     let mut builder = ImageBuilder::new();
     builder
         .add_logical_signature(&LogicalSignature {
+            outcome: LogicalOutcome::Detection,
             group: GENERIC,
             category: Category::Malware,
             name: "Test.Parts",

@@ -7,7 +7,7 @@ use debar_image::{
 use crate::extended_lines::{MalformedExtendedLine, Offset, read_offset};
 use crate::logical_expression::{MalformedExpression, parse_expression};
 use crate::regular_expression_syntax::{
-    BacktrackingConstruct, ExpressionFlags, MalformedRegularExpression, Translation, translate,
+    ExpressionFlags, MalformedRegularExpression, Translation, UnsupportedConstruct, translate,
 };
 
 const DELIMITER: u8 = b'/';
@@ -62,7 +62,7 @@ impl fmt::Display for MalformedRegularExpressionSubsignature {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadRegularExpression {
     Compiled(RegularExpressionSubsignature),
-    NeedsBacktracking(BacktrackingConstruct),
+    Unsupported(UnsupportedConstruct),
 }
 
 #[expect(clippy::struct_excessive_bools)]
@@ -132,9 +132,9 @@ pub fn read_regular_expression(
     let expression = match translate(pattern, flags.expression)
         .map_err(MalformedRegularExpressionSubsignature::Expression)?
     {
-        Translation::Linear(expression) => expression,
-        Translation::NeedsBacktracking(construct) => {
-            return Ok(ReadRegularExpression::NeedsBacktracking(construct));
+        Translation::Compiled(expression) => expression,
+        Translation::Unsupported(construct) => {
+            return Ok(ReadRegularExpression::Unsupported(construct));
         }
     };
     Ok(ReadRegularExpression::Compiled(

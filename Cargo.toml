@@ -21,6 +21,10 @@ publish = false
 
 [workspace.dependencies]
 aho-corasick = { version = "=1.1.5", default-features = false, features = ["std", "perf-literal"] }
+base64ct = { version = "=1.8.3", default-features = false, features = ["alloc"] }
+cms = { version = "=0.2.3", default-features = false, features = ["alloc"] }
+const-oid = { version = "=0.9.6", default-features = false, features = ["db"] }
+der = { version = "=0.7.10", default-features = false, features = ["alloc", "oid"] }
 debar-clamav-signatures = { path = "crates/clamav-signatures" }
 debar-image = { path = "crates/image" }
 debar-matching = { path = "crates/matching" }
@@ -29,11 +33,14 @@ debar-scan = { path = "crates/scan" }
 flate2 = { version = "=1.1.11", default-features = false, features = ["rust_backend"] }
 md-5 = { version = "=0.10.6", default-features = false }
 memmap2 = "=0.9.12"
+num-bigint = { version = "=0.4.8", default-features = false }
+num-traits = { version = "=0.2.19", default-features = false }
 regex-automata = { version = "=0.4.18", default-features = false, features = ["std", "syntax", "dfa-build", "dfa-search", "nfa-thompson", "nfa-pikevm", "nfa-backtrack", "hybrid", "meta", "perf-inline", "perf-literal"] }
 regex-syntax = { version = "=0.8.11", default-features = false, features = ["std"] }
 serde_json = "=1.0.154"
 sha1 = { version = "=0.10.7", default-features = false }
 sha2 = { version = "=0.10.9", default-features = false }
+x509-cert = { version = "=0.2.5", default-features = false }
 zerocopy = { version = "=0.8.63", features = ["derive"] }
 toml = { version = "=1.2.1", default-features = false, features = ["parse", "serde", "std"] }
 

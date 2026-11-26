@@ -1,6 +1,7 @@
 use zerocopy::little_endian::{U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
+use crate::backtracking_program::{BacktrackingNotCompiled, compile_backtracking};
 use crate::expression_automata::{AUTOMATON_ALIGNMENT, CompiledExpression, ExpressionNotCompiled};
 use crate::logical_expression::{
     ExpressionMalformed, ExpressionNotCompiled as TriggerNotCompiled, ExpressionStep,
@@ -8,8 +9,8 @@ use crate::logical_expression::{
 };
 use crate::logical_group::{LogicalSignatureId, StepEntry, step_entry, step_of};
 use crate::model::{
-    ByteComparison, ByteEncoding, ByteOrder, ExpressionAnchoring, ExpressionMatches, Placement,
-    RegularExpressionSubsignature, ValueComparison,
+    ByteComparison, ByteEncoding, ByteOrder, ExpressionAnchoring, ExpressionForm,
+    ExpressionMatches, Placement, RegularExpressionSubsignature, ValueComparison,
 };
 use crate::pattern_group::{placement_fields, placement_of};
 
@@ -21,6 +22,7 @@ const BOUNDED_BY_SHIFT: u8 = 8;
 const UNCONDITIONAL: u8 = 16;
 const TRIGGER_HOLDS_WITHOUT_MATCHES: u8 = 32;
 const AUTOMATA_IN_IMAGE: u8 = 64;
+const BACKTRACKING: u8 = 128;
 const ENCODING_BINARY: u8 = 1;
 const ENCODING_HEXADECIMAL_TEXT: u8 = 2;
 const ENCODING_DECIMAL_TEXT: u8 = 3;
@@ -161,6 +163,7 @@ pub enum PlugInsNotBuilt {
     BeyondThirtyTwoBits,
     Trigger(TriggerNotCompiled),
     Expression(ExpressionNotCompiled),
+    Backtracking(BacktrackingNotCompiled),
 }
 
 fn too_large<T>(_: T) -> PlugInsNotBuilt {
@@ -290,16 +293,29 @@ impl Parts {
         if expression.bounded_by_shift {
             flags |= BOUNDED_BY_SHIFT;
         }
-        let built = crate::expression_automata::build(&expression.expression)
-            .map_err(PlugInsNotBuilt::Expression)?;
-        let text = self.add_text(&built.text)?;
         let empty = extent(0, 0)?;
-        let (forward, reverse) = match built.compiled {
-            CompiledExpression::InImage { forward, reverse } => {
-                flags |= AUTOMATA_IN_IMAGE;
-                (self.add_automaton(&forward)?, self.add_automaton(&reverse)?)
+        let (text, forward, reverse) = match &expression.expression {
+            ExpressionForm::Linear(hir) => {
+                let built =
+                    crate::expression_automata::build(hir).map_err(PlugInsNotBuilt::Expression)?;
+                let text = self.add_text(&built.text)?;
+                match built.compiled {
+                    CompiledExpression::InImage { forward, reverse } => {
+                        flags |= AUTOMATA_IN_IMAGE;
+                        (
+                            text,
+                            self.add_automaton(&forward)?,
+                            self.add_automaton(&reverse)?,
+                        )
+                    }
+                    CompiledExpression::FromText => (text, empty, empty),
+                }
             }
-            CompiledExpression::FromText => (empty, empty),
+            ExpressionForm::Backtracking(tree) => {
+                flags |= BACKTRACKING;
+                let program = compile_backtracking(tree).map_err(PlugInsNotBuilt::Backtracking)?;
+                (empty, self.add_automaton(&program)?, empty)
+            }
         };
         let placement = placement_fields(expression.placement);
         self.expressions.push(ExpressionEntry {
@@ -370,6 +386,16 @@ pub enum PlugInsMalformed {
     Comparison,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordedForm<'m> {
+    Automata {
+        forward: &'m [u8],
+        reverse: &'m [u8],
+    },
+    Text,
+    Backtracking(&'m [u8]),
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ExpressionRecord<'m> {
     pub signature: LogicalSignatureId,
@@ -380,7 +406,7 @@ pub struct ExpressionRecord<'m> {
     pub bounded_by_shift: bool,
     pub unconditional: bool,
     pub trigger_holds_without_matches: bool,
-    pub automata: Option<(&'m [u8], &'m [u8])>,
+    pub form: RecordedForm<'m>,
     text: &'m [u8],
     first_step: u32,
     step_count: u32,
@@ -535,13 +561,17 @@ fn expression_record<'m>(
     let flags = entry.flags;
     let has = |flag: u8| flags & flag != 0;
     let text = slice_of(text, entry.text).ok_or(PlugInsMalformed::Expression)?;
-    let automata = if has(AUTOMATA_IN_IMAGE) {
-        Some((
+    let form = if has(BACKTRACKING) {
+        RecordedForm::Backtracking(
             slice_of(automata, entry.forward).ok_or(PlugInsMalformed::Expression)?,
-            slice_of(automata, entry.reverse).ok_or(PlugInsMalformed::Expression)?,
-        ))
+        )
+    } else if has(AUTOMATA_IN_IMAGE) {
+        RecordedForm::Automata {
+            forward: slice_of(automata, entry.forward).ok_or(PlugInsMalformed::Expression)?,
+            reverse: slice_of(automata, entry.reverse).ok_or(PlugInsMalformed::Expression)?,
+        }
     } else {
-        None
+        RecordedForm::Text
     };
     Ok(ExpressionRecord {
         signature: LogicalSignatureId(entry.signature.get()),
@@ -569,7 +599,7 @@ fn expression_record<'m>(
         unconditional: has(UNCONDITIONAL),
         trigger_holds_without_matches: has(TRIGGER_HOLDS_WITHOUT_MATCHES),
         text,
-        automata,
+        form,
         first_step: entry.first_step.get(),
         step_count: entry.step_count.get(),
     })

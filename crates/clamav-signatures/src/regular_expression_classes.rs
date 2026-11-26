@@ -3,7 +3,6 @@ use regex_syntax::hir::{Class, ClassBytes, ClassBytesRange, Hir};
 use crate::regular_expression_syntax::MalformedRegularExpression;
 
 const CASE_BIT: u8 = 0x20;
-const NEWLINE: u8 = b'\n';
 const OCTAL_DIGITS: usize = 3;
 const HEX_DIGITS: usize = 2;
 const LARGEST_BYTE: u32 = 0xff;
@@ -71,32 +70,6 @@ impl ByteClass {
             }
         }
         folded
-    }
-
-    #[must_use]
-    pub fn of_hir_class(class: &Class) -> Self {
-        match class {
-            Class::Bytes(bytes) => {
-                let mut set = Self::default();
-                for range in bytes.iter() {
-                    set.insert_range(range.start(), range.end());
-                }
-                set
-            }
-            Class::Unicode(unicode) => {
-                let mut set = Self::default();
-                for range in unicode.iter() {
-                    let low = u32::from(range.start());
-                    let high = u32::from(range.end()).min(LARGEST_BYTE);
-                    for value in low..=high {
-                        if let Ok(byte) = u8::try_from(value) {
-                            set.insert(byte);
-                        }
-                    }
-                }
-                set
-            }
-        }
     }
 }
 
@@ -170,11 +143,6 @@ pub fn class_hir(class: &ByteClass) -> Hir {
 #[must_use]
 pub fn any_byte() -> Hir {
     class_hir(&ByteClass::default().complement())
-}
-
-#[must_use]
-pub fn not_newline() -> Hir {
-    class_hir(&ByteClass::of([NEWLINE]).complement())
 }
 
 #[must_use]

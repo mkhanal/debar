@@ -1,5 +1,6 @@
 use regex_syntax::hir::Hir;
 
+use crate::expression_tree::ExpressionTree;
 use crate::object_kind::ObjectKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -93,8 +94,24 @@ pub struct SignatureName {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Provenance {
-    SignedContainerNotYetVerified,
-    UnsignedFile,
+    DetachedSignatureVerified,
+    HeaderSignatureVerified,
+    IndexSignatureVerified,
+    UnsignedContainer,
+}
+
+impl Provenance {
+    pub const ALL: [Self; 4] = [
+        Self::DetachedSignatureVerified,
+        Self::HeaderSignatureVerified,
+        Self::IndexSignatureVerified,
+        Self::UnsignedContainer,
+    ];
+
+    #[must_use]
+    pub const fn is_signed(self) -> bool {
+        !matches!(self, Self::UnsignedContainer)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,10 +380,16 @@ pub enum ExpressionMatches {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpressionForm {
+    Linear(Hir),
+    Backtracking(ExpressionTree),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegularExpressionSubsignature {
     pub trigger: Option<Expression>,
     pub placement: Placement,
-    pub expression: Hir,
+    pub expression: ExpressionForm,
     pub anchoring: ExpressionAnchoring,
     pub matches: ExpressionMatches,
     pub bounded_by_shift: bool,
@@ -418,9 +441,20 @@ pub struct LogicalSignature<'a> {
     pub category: Category,
     pub name: &'a str,
     pub indicator: Indicator,
+    pub outcome: LogicalOutcome,
     pub expression: &'a Expression,
     pub subsignatures: &'a [Subsignature],
     pub conditions: &'a LogicalConditions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SignatureProgramId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LogicalOutcome {
+    Detection,
+    RunProgram(SignatureProgramId),
+    HookTriggered(SignatureProgramId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

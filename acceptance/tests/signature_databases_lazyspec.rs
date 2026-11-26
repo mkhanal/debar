@@ -3,8 +3,9 @@
 use std::collections::BTreeMap;
 
 use acceptance::{
-    ContainerMember, compile, lowercase_hex, members_of_pinned_databases, official_image,
-    pinned_databases, release_binaries, scratch_directory, target_directory, write_file,
+    comparison_report, compile, detections, lowercase_hex, members_of_pinned_databases,
+    official_image, pinned_databases, release_binaries, scratch_directory, target_directory,
+    write_file,
 };
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -26,9 +27,9 @@ fn count(outcomes: &Value, outcome: &str) -> u64 {
 }
 
 #[test]
-fn every_hash_signature_line_in_the_pinned_databases_is_accounted_for_in_the_image() {
+fn every_line_of_every_pinned_database_file_is_accounted_for_and_none_is_left_uncompiled() {
     const REQUIREMENT: &str =
-        "Every Hash Signature Line In The Pinned Databases Is Accounted For In The Image";
+        "Every Line Of Every Pinned Database File Is Accounted For And None Is Left Uncompiled";
     let compiled = official_image().unwrap();
     let files = compiled.account["files"].as_array().unwrap();
     let accounted: BTreeMap<(String, String), &Value> = files
@@ -43,15 +44,12 @@ fn every_hash_signature_line_in_the_pinned_databases_is_accounted_for_in_the_ima
             )
         })
         .collect();
-
     let members = members_of_pinned_databases(&pinned_databases().unwrap()).unwrap();
     assert_eq!(
         accounted.len(),
         members.len(),
         "{REQUIREMENT}: one account per file"
     );
-    let mut compiled_hash_lines = 0u64;
-    let mut hash_lines = 0u64;
     for member in &members {
         let file = accounted
             .get(&(member.container.clone(), member.member.clone()))
@@ -80,19 +78,45 @@ fn every_hash_signature_line_in_the_pinned_databases_is_accounted_for_in_the_ima
             "{REQUIREMENT}: every line of {} has one outcome",
             member.member
         );
-        if is_hash_file(file["kind"].as_str().unwrap()) {
-            let hash_outcomes: u64 = HASH_LINE_OUTCOMES
-                .iter()
-                .map(|outcome| count(outcomes, outcome))
-                .sum();
-            assert_eq!(
-                hash_outcomes, lines,
-                "{REQUIREMENT}: no hash line of {} is unsupported",
-                member.member
-            );
-            hash_lines += lines;
-            compiled_hash_lines += count(outcomes, "compiled");
-        }
+        assert_eq!(
+            count(outcomes, "not_yet_compiled"),
+            0,
+            "{REQUIREMENT}: no line of {} is left uncompiled",
+            member.member
+        );
+    }
+    assert_eq!(
+        compiled.account["line_totals"]["not_yet_compiled"].as_u64(),
+        Some(0),
+        "{REQUIREMENT}"
+    );
+}
+
+#[test]
+fn every_hash_signature_line_in_the_pinned_databases_is_accounted_for_in_the_image() {
+    const REQUIREMENT: &str =
+        "Every Hash Signature Line In The Pinned Databases Is Accounted For In The Image";
+    let compiled = official_image().unwrap();
+    let files = compiled.account["files"].as_array().unwrap();
+    let mut compiled_hash_lines = 0u64;
+    let mut hash_lines = 0u64;
+    for file in files
+        .iter()
+        .filter(|file| is_hash_file(file["kind"].as_str().unwrap()))
+    {
+        let lines = file["lines"].as_u64().unwrap();
+        let outcomes = &file["outcomes"];
+        let hash_outcomes: u64 = HASH_LINE_OUTCOMES
+            .iter()
+            .map(|outcome| count(outcomes, outcome))
+            .sum();
+        assert_eq!(
+            hash_outcomes, lines,
+            "{REQUIREMENT}: no hash line of {} is unsupported",
+            file["member"]
+        );
+        hash_lines += lines;
+        compiled_hash_lines += count(outcomes, "compiled");
     }
     let image_entries: u64 = compiled.account["image"]["sections"]
         .as_array()
@@ -307,71 +331,14 @@ fn a_malformed_extended_signature_line_fails_the_compile() {
     }
 }
 
-const LOGICAL_LINE_OUTCOMES: [&str; 8] = [
+const LOGICAL_LINE_OUTCOMES: [&str; 6] = [
     "compiled",
     "outside_functionality_level",
     "ignored",
     "comment",
     "target_not_loaded",
     "not_loaded",
-    "needs_backtracking_engine",
-    "not_yet_compiled",
 ];
-
-const BACKTRACKING_CONSTRUCTS: [&str; 6] = ["(?P=", "(?=", "(?!", "(?<=", "(?<!", "(?>"];
-
-fn holds_a_subsignature_not_yet_compiled(line: &str) -> bool {
-    line.split(';').skip(3).any(|field| field.starts_with('$'))
-}
-
-fn holds_a_construct_needing_backtracking(line: &str) -> bool {
-    let Some(start) = line.find('/') else {
-        return false;
-    };
-    let expressions = line.get(start..).unwrap_or_default();
-    BACKTRACKING_CONSTRUCTS
-        .iter()
-        .any(|construct| expressions.contains(construct))
-        || expressions
-            .replace("\\\\", "")
-            .as_bytes()
-            .windows(2)
-            .any(|pair| pair[0] == b'\\' && (b'1'..=b'9').contains(&pair[1]))
-}
-
-fn assert_needing_backtracking_only_for_its_constructs(file: &Value, member: &ContainerMember) {
-    const REQUIREMENT: &str =
-        "Every Logical Signature Line In The Pinned Databases Is Accounted For In The Image";
-    let outcomes = &file["outcomes"];
-    let needing_backtracking: Vec<u64> = file["lines_not_compiled"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|line| line["outcome"] == "needs_backtracking_engine")
-        .map(|line| line["line"].as_u64().unwrap())
-        .collect();
-    for line in &needing_backtracking {
-        let text = String::from_utf8_lossy(
-            member
-                .contents
-                .split(|byte| *byte == b'\n')
-                .nth(usize::try_from(*line).unwrap().checked_sub(1).unwrap())
-                .unwrap(),
-        )
-        .into_owned();
-        assert!(
-            holds_a_construct_needing_backtracking(&text),
-            "{REQUIREMENT}: line {line} of {} needs a backtracking engine only for a backreference, lookaround or atomic group",
-            member.member
-        );
-    }
-    assert_eq!(
-        count(outcomes, "needs_backtracking_engine"),
-        u64::try_from(needing_backtracking.len()).unwrap(),
-        "{REQUIREMENT}: {}",
-        member.member
-    );
-}
 
 #[test]
 fn every_logical_signature_line_in_the_pinned_databases_is_accounted_for_in_the_image() {
@@ -410,26 +377,15 @@ fn every_logical_signature_line_in_the_pinned_databases_is_accounted_for_in_the_
             .iter()
             .map(|line| usize::try_from(line["line"].as_u64().unwrap()).unwrap())
             .collect();
-        assert_needing_backtracking_only_for_its_constructs(file, member);
         let loaded: Vec<String> = String::from_utf8_lossy(&member.contents)
             .split('\n')
             .zip(1usize..)
             .filter(|(line, number)| !line.is_empty() && !left_out.contains(number))
             .map(|(line, _)| line.to_owned())
             .collect();
-        let not_yet = loaded
-            .iter()
-            .filter(|line| holds_a_subsignature_not_yet_compiled(line))
-            .count();
-        assert_eq!(
-            count(outcomes, "not_yet_compiled"),
-            u64::try_from(not_yet).unwrap(),
-            "{REQUIREMENT}: only lines with a macro subsignature in {} wait",
-            member.member
-        );
         assert_eq!(
             count(outcomes, "compiled"),
-            u64::try_from(loaded.len() - not_yet).unwrap(),
+            u64::try_from(loaded.len()).unwrap(),
             "{REQUIREMENT}: every other loaded line of {} is compiled",
             member.member
         );
@@ -450,9 +406,16 @@ fn every_logical_signature_line_in_the_pinned_databases_is_accounted_for_in_the_
         .filter(|section| section["kind"] == "logical signatures")
         .map(|section| section["items"].as_u64().unwrap())
         .sum();
+    let triggers: u64 = compiled.account["image"]["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|section| section["triggered_programs"].as_u64())
+        .sum();
     assert_eq!(
-        image_signatures, compiled_lines,
-        "{REQUIREMENT}: one image entry per compiled line"
+        image_signatures,
+        compiled_lines + triggers,
+        "{REQUIREMENT}: one image entry per compiled line, beside the programs' triggers"
     );
 }
 
@@ -606,5 +569,306 @@ fn a_malformed_container_signature_line_fails_the_compile() {
             "{REQUIREMENT}: {case}: {message}"
         );
         assert!(!image.exists(), "{REQUIREMENT}: {case}");
+    }
+}
+
+fn files_of_kind<'a>(account: &'a Value, kind: &str) -> Vec<&'a Value> {
+    account["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|file| file["kind"] == kind)
+        .collect()
+}
+
+fn compiled_lines_of_kind(account: &Value, kind: &str) -> u64 {
+    files_of_kind(account, kind)
+        .iter()
+        .map(|file| count(&file["outcomes"], "compiled"))
+        .sum()
+}
+
+fn section_items(account: &Value, kind: &str) -> u64 {
+    account["image"]["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|section| section["kind"] == kind)
+        .map(|section| section["items"].as_u64().unwrap())
+        .sum()
+}
+
+#[test]
+fn every_certificate_rule_icon_signature_and_url_rule_in_the_pinned_databases_is_compiled_into_the_image()
+ {
+    const REQUIREMENT: &str = "Every Certificate Rule, Icon Signature And URL Rule In The Pinned Databases Is Compiled Into The Image";
+    let compiled = official_image().unwrap();
+    let account = &compiled.account;
+    let members = members_of_pinned_databases(&pinned_databases().unwrap()).unwrap();
+    let field_counts = |member: &str, separator: char, field: usize| -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        let found = members
+            .iter()
+            .find(|candidate| candidate.member == member)
+            .unwrap();
+        for line in String::from_utf8_lossy(&found.contents).lines() {
+            if !line.starts_with('#') && !line.is_empty() {
+                *counts
+                    .entry(
+                        line.split(separator)
+                            .nth(field)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    )
+                    .or_insert(0) += 1;
+            }
+        }
+        counts
+    };
+    assert_eq!(
+        compiled_lines_of_kind(account, "certificate rules"),
+        30,
+        "{REQUIREMENT}"
+    );
+    let trust = field_counts("daily.crb", ';', 1);
+    assert_eq!((trust["1"], trust["0"]), (8, 22), "{REQUIREMENT}");
+    assert_eq!(
+        section_items(account, "certificate rules"),
+        30,
+        "{REQUIREMENT}"
+    );
+    assert_eq!(
+        compiled_lines_of_kind(account, "icon signatures"),
+        222,
+        "{REQUIREMENT}"
+    );
+    assert_eq!(field_counts("daily.idb", ':', 1).len(), 22, "{REQUIREMENT}");
+    assert_eq!(field_counts("daily.idb", ':', 2).len(), 19, "{REQUIREMENT}");
+    assert_eq!(
+        section_items(account, "icon signatures"),
+        222,
+        "{REQUIREMENT}"
+    );
+    assert_eq!(
+        compiled_lines_of_kind(account, "monitored URL rules"),
+        263,
+        "{REQUIREMENT}"
+    );
+    assert_eq!(
+        compiled_lines_of_kind(account, "allowed URL rules"),
+        185,
+        "{REQUIREMENT}"
+    );
+    assert_eq!(
+        section_items(account, "URL rules"),
+        263 + 185,
+        "{REQUIREMENT}"
+    );
+}
+
+#[test]
+fn every_engine_switch_in_the_pinned_databases_is_evaluated_at_the_functionality_level() {
+    const REQUIREMENT: &str =
+        "Every Engine Switch In The Pinned Databases Is Evaluated At The Functionality Level";
+    let compiled = official_image().unwrap();
+    let switches = files_of_kind(&compiled.account, "engine switches");
+    assert_eq!(switches.len(), 1, "{REQUIREMENT}: daily.cfg");
+    let outcomes = &switches[0]["outcomes"];
+    assert_eq!(
+        count(outcomes, "outside_functionality_level"),
+        21,
+        "{REQUIREMENT}"
+    );
+    assert_eq!(count(outcomes, "compiled"), 0, "{REQUIREMENT}");
+    let directory = scratch_directory("engine-switches").unwrap();
+    let databases = directory.join("databases");
+    std::fs::create_dir(&databases).unwrap();
+    write_file(
+        &databases.join("daily.cfg"),
+        b"PE:0x0:51:51\nPHISHING:0x2\n",
+    )
+    .unwrap();
+    write_file(&databases.join("local.pdb"), b"H:example.com\n").unwrap();
+    let turned_off = compile(&databases, &directory, "switched").unwrap();
+    let outcomes = &files_of_kind(&turned_off.account, "engine switches")[0]["outcomes"];
+    assert_eq!(
+        (
+            count(outcomes, "outside_functionality_level"),
+            count(outcomes, "compiled")
+        ),
+        (1, 1),
+        "{REQUIREMENT}: a switch takes effect only within its range"
+    );
+    assert_eq!(
+        count(
+            &files_of_kind(&turned_off.account, "monitored URL rules")[0]["outcomes"],
+            "not_loaded"
+        ),
+        1,
+        "{REQUIREMENT}: a switch that takes effect turns its feature off"
+    );
+    let defaults = section_items(&compiled.account, "engine features");
+    assert_eq!(
+        defaults, 86,
+        "{REQUIREMENT}: every engine feature at its default"
+    );
+    assert_eq!(
+        section_items(&turned_off.account, "engine features"),
+        defaults - 1,
+        "{REQUIREMENT}"
+    );
+}
+
+#[test]
+fn every_signature_program_in_the_pinned_databases_is_verified_and_compiled_into_the_image() {
+    const REQUIREMENT: &str =
+        "Every Signature Program In The Pinned Databases Is Verified And Compiled Into The Image";
+    let compiled = official_image().unwrap();
+    let programs = files_of_kind(&compiled.account, "signature programs");
+    assert_eq!(programs.len(), 85, "{REQUIREMENT}");
+    let left_out: Vec<&str> = programs
+        .iter()
+        .filter(|file| count(&file["outcomes"], "outside_functionality_level") > 0)
+        .map(|file| file["member"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        left_out,
+        ["4510302.cbc", "4553522.cbc", "7086472.cbc"],
+        "{REQUIREMENT}"
+    );
+    for file in &programs {
+        let outcomes = &file["outcomes"];
+        assert!(
+            count(outcomes, "compiled") == file["lines"].as_u64().unwrap()
+                || left_out.contains(&file["member"].as_str().unwrap()),
+            "{REQUIREMENT}: {}",
+            file["member"]
+        );
+    }
+    assert_eq!(
+        section_items(&compiled.account, "signature programs"),
+        82,
+        "{REQUIREMENT}"
+    );
+    let directory = scratch_directory("program-triggers").unwrap();
+    let input = directory.join("input");
+    write_file(
+        &input,
+        b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*",
+    )
+    .unwrap();
+    let report = comparison_report(&compiled.image, &input, &directory).unwrap();
+    assert!(
+        !detections(&report)
+            .iter()
+            .any(|name| name == "Eicar-Signature"),
+        "{REQUIREMENT}: a program's trigger reports no detection of its own"
+    );
+}
+
+#[test]
+fn every_pinned_database_is_verified_by_its_digital_signature() {
+    const REQUIREMENT: &str = "Every Pinned Database Is Verified By Its Digital Signature";
+    let compiled = official_image().unwrap();
+    let databases = compiled.account["databases"].as_array().unwrap();
+    assert_eq!(databases.len(), 3, "{REQUIREMENT}");
+    for database in databases {
+        assert_eq!(
+            database["provenance"], "signed container, detached signature verified",
+            "{REQUIREMENT}: {}",
+            database["name"]
+        );
+    }
+    let members = members_of_pinned_databases(&pinned_databases().unwrap()).unwrap();
+    assert!(
+        members
+            .iter()
+            .all(|member| std::path::Path::new(&member.container)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("cvd"))),
+        "{REQUIREMENT}: every member was loaded from its verified container"
+    );
+}
+
+fn refused(databases: &std::path::Path, directory: &std::path::Path, case: &str) -> String {
+    let image = directory.join(format!("{case}.image"));
+    let output = std::process::Command::new(&release_binaries().unwrap().compiler)
+        .arg("--databases")
+        .arg(databases)
+        .arg("--image")
+        .arg(&image)
+        .arg("--account")
+        .arg(directory.join(format!("{case}.json")))
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{case} compiled");
+    assert!(!image.exists(), "{case} wrote an image");
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn a_database_whose_digital_signature_does_not_verify_is_refused() {
+    const REQUIREMENT: &str = "A Database Whose Digital Signature Does Not Verify Is Refused";
+    let pinned = pinned_databases().unwrap();
+    let directory = scratch_directory("refused-signature").unwrap();
+    let mut changed = std::fs::read(pinned.join("bytecode.cvd")).unwrap();
+    let last = changed.len() - 1;
+    changed[last] ^= 1;
+    for (case, with_detached) in [("with-detached", true), ("header-only", false)] {
+        let databases = directory.join(case);
+        std::fs::create_dir(&databases).unwrap();
+        write_file(&databases.join("bytecode.cvd"), &changed).unwrap();
+        if with_detached {
+            std::fs::copy(
+                pinned.join("bytecode-339.cvd.sign"),
+                databases.join("bytecode-339.cvd.sign"),
+            )
+            .unwrap();
+        }
+        let message = refused(&databases, &directory, case);
+        assert!(
+            message.contains("bytecode.cvd"),
+            "{REQUIREMENT}: {case}: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_malformed_certificate_icon_url_rule_or_switch_line_or_a_malformed_signature_program_fails_the_compile()
+ {
+    const REQUIREMENT: &str = "A Malformed Certificate, Icon, URL-Rule Or Switch Line, Or A Malformed Signature Program, Fails The Compile";
+    let directory = scratch_directory("malformed-carried").unwrap();
+    for (case, file, contents, named) in [
+        (
+            "certificate",
+            "local.crb",
+            "# comment\na;0;b\n",
+            "local.crb line 2",
+        ),
+        (
+            "icon",
+            "local.idb",
+            "# comment\nIcon:MS:IE:00\n",
+            "local.idb line 2",
+        ),
+        (
+            "url",
+            "local.pdb",
+            "H:example.com\nQ:example.com\n",
+            "local.pdb line 2",
+        ),
+        (
+            "switch",
+            "daily.cfg",
+            "# comment\nPE:zz\n",
+            "daily.cfg line 2",
+        ),
+        ("program", "local.cbc", "ClamBX\n", "local.cbc"),
+    ] {
+        let databases = directory.join(case);
+        std::fs::create_dir(&databases).unwrap();
+        write_file(&databases.join(file), contents.as_bytes()).unwrap();
+        let message = refused(&databases, &directory, case);
+        assert!(message.contains(named), "{REQUIREMENT}: {case}: {message}");
     }
 }

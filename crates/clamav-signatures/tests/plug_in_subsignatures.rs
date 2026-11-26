@@ -119,19 +119,56 @@ fn a_malformed_regular_expression_subsignature_fails_the_compile() {
 }
 
 #[test]
-fn a_regular_expression_a_linear_engine_cannot_express_needs_a_backtracking_engine() {
+fn a_regular_expression_a_linear_engine_cannot_express_compiles_for_the_backtracking_engine() {
     for subsignature in [
         "414243;0/(a)\\1/",
         "414243;0/(?P<n>a)(?P=n)/",
+        "414243;0/(?P=n)(?P<n>a)/",
+        "414243;0/(?<n>a)\\k<n>\\g{n}\\g1\\g{-1}/",
         "414243;0/a(?=b)/",
         "414243;0/(?<!a)b/",
+        "414243;0/(?<!Unix|Inet(4|6)|Any)b/",
         "414243;0/(?>a+)b/",
         "414243;0/a++b/",
-        "414243;0/(*UTF)a/",
+        "414243;0/a$\\n/",
     ] {
         assert_eq!(
             logical_outcome(subsignature),
-            LineOutcome::NeedsBacktrackingEngine,
+            LineOutcome::Compiled,
+            "{subsignature}"
+        );
+    }
+}
+
+#[test]
+fn a_regular_expression_with_a_construct_debar_does_not_support_is_not_yet_compiled() {
+    for subsignature in [
+        "414243;0/(*UTF)a/",
+        "414243;0/(a)(?1)/",
+        "414243;0/(?(1)a|b)/",
+        "414243;0/a\\Kb/",
+    ] {
+        assert_eq!(
+            logical_outcome(subsignature),
+            LineOutcome::NotYetCompiled,
+            "{subsignature}"
+        );
+    }
+}
+
+#[test]
+fn a_backreference_to_a_group_that_does_not_exist_fails_the_compile() {
+    for subsignature in [
+        "414243;0/(a)\\g{2}/",
+        "414243;0/(?P=missing)/",
+        "414243;0/\\k<1a>/",
+        "414243;0/(?<!a+)b/",
+    ] {
+        assert!(
+            matches!(
+                malformed_expression(subsignature),
+                MalformedRegularExpressionSubsignature::Expression(_)
+            ),
             "{subsignature}"
         );
     }

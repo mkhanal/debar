@@ -1,6 +1,10 @@
 #![no_main]
 
 use debar_image::{
+    CertificateRule, CertificateTrust, EngineFeature, IconGroups, IconMetrics, IconSignature,
+    ProgramConstant, ProgramFunction, ProgramGlobal, ProgramInstruction, ProgramKind,
+    ProgramOperand, ProgramOperation, ProgramType, SignatureProgram, UrlList, UrlPattern, UrlRule,
+    UrlVerdict,
     ByteSet, Category, Digest, DigestAlgorithm, ExecutableAnchor, HashPurpose, HashSignature,
     HashedSize, Image, ImageBuilder, Indicator, KindDescription, MagicTable, MaskedByte,
     ObjectKind, OwnBytes, PartMemory, PartitionKey, Pattern, PatternElement, PatternOutcome,
@@ -23,6 +27,73 @@ fn digest(seed: u8) -> [u8; 16] {
     let mut bytes = [seed; 16];
     bytes[0] = seed.wrapping_mul(37);
     bytes
+}
+
+fn add_carried_sections(builder: &mut ImageBuilder) {
+    builder.set_engine_features(&[EngineFeature::ArchiveZip, EngineFeature::PhishingEngine]);
+    builder.add_certificate_rule(CertificateRule {
+        name: Some("Fuzz.Certificate".to_owned()),
+        trust: CertificateTrust::Blocked,
+        subject: [1; 20],
+        serial: [2; 20],
+        compares_serial: true,
+        modulus: vec![0xc0, 0xff, 0xee],
+        exponent: 65_537,
+        code_signing: true,
+        time_stamping: false,
+        certificate_signing: false,
+        not_before: 0,
+    });
+    builder.set_icon_groups(IconGroups {
+        first: vec!["MS".to_owned()],
+        second: vec!["IE".to_owned()],
+        signatures: vec![IconSignature {
+            name: "Fuzz.Icon".to_owned(),
+            first_group: 0,
+            second_group: 0,
+            metrics: IconMetrics::default(),
+        }],
+    });
+    builder.add_url_rule(UrlRule {
+        list: UrlList::Monitored,
+        pattern: UrlPattern::Host(b"example.com/".to_vec()),
+        never_matches: false,
+    });
+    builder.add_url_rule(UrlRule {
+        list: UrlList::Allowed,
+        pattern: UrlPattern::Digest {
+            digest: vec![0xab; 32],
+            verdict: UrlVerdict::Allowed,
+        },
+        never_matches: false,
+    });
+    let _ = builder.add_signature_program(SignatureProgram {
+        name: "fuzz.cbc".to_owned(),
+        kind: ProgramKind::Logical,
+        from_signed_container: false,
+        triggered: true,
+        apis: vec![5],
+        types: vec![ProgramType::Pointer(8)],
+        globals: vec![ProgramGlobal {
+            type_id: 32,
+            initial: vec![7],
+        }],
+        functions: vec![ProgramFunction {
+            argument_count: 0,
+            return_type: 32,
+            values: Vec::new(),
+            constants: vec![ProgramConstant { value: 0, bits: 32 }],
+            blocks: vec![vec![ProgramInstruction {
+                operation: ProgramOperation::Return,
+                result_type: 32,
+                destination: 0,
+                operands: vec![ProgramOperand::Constant(0)],
+                blocks: Vec::new(),
+                callee: None,
+                type_operand: None,
+            }]],
+        }],
+    });
 }
 
 fn valid_image() -> Vec<u8> {
@@ -172,6 +243,7 @@ fn valid_image() -> Vec<u8> {
         }),
     });
     builder.add_type_magic(MagicTable::Files, 0, b"head", ObjectKind::WindowsExecutable);
+    add_carried_sections(&mut builder);
     builder.finish().unwrap_or_default()
 }
 
@@ -201,6 +273,19 @@ fuzz_target!(|data: &[u8]| {
         algorithm: DigestAlgorithm::Md5,
     };
     let _ = image.databases();
+    if let Ok(Some(features)) = image.engine_features() {
+        let _ = features.enabled().count();
+    }
+    if let Ok(Some(rules)) = image.certificate_rules() {
+        let _ = rules.rules().count();
+    }
+    let _ = image.icon_groups();
+    if let Ok(Some(rules)) = image.url_rules() {
+        let _ = rules.rules().count();
+    }
+    if let Ok(Some(programs)) = image.signature_programs() {
+        let _ = programs.programs().count();
+    }
     if let Ok(Some(kinds)) = image.object_kinds() {
         let _ = kinds.describe(ObjectKind::WindowsExecutable);
         let _ = kinds.described().count();

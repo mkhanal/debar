@@ -116,3 +116,24 @@ path = "../crates/matching/fuzz_targets/plug_in_matching.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "backtracking_search"
+path = "../crates/matching/fuzz_targets/backtracking_search.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "carried_files"
+path = "../crates/clamav-signatures/fuzz_targets/carried_files.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signature_programs"
+path = "../crates/clamav-signatures/fuzz_targets/signature_programs.rs"
+test = false
+doc = false
+bench = false

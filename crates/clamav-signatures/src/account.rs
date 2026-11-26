@@ -9,12 +9,11 @@ pub enum LineOutcome {
     NotLoaded,
     NeverReports,
     ShadowedByDuplicate,
-    NeedsBacktrackingEngine,
     NotYetCompiled,
 }
 
 impl LineOutcome {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 10] = [
         Self::Compiled,
         Self::OutsideFunctionalityLevel,
         Self::Ignored,
@@ -24,7 +23,6 @@ impl LineOutcome {
         Self::NotLoaded,
         Self::NeverReports,
         Self::ShadowedByDuplicate,
-        Self::NeedsBacktrackingEngine,
         Self::NotYetCompiled,
     ];
 }

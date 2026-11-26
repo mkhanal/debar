@@ -1,10 +1,16 @@
 use std::fmt;
 use std::io::Read;
 
+use debar_image::Provenance;
 use flate2::read::GzDecoder;
 use md5::Md5;
 use sha2::{Digest as _, Sha256};
 
+use crate::FUNCTIONALITY_LEVEL;
+use crate::container_verification::{
+    DetachedSignatureInvalid, DetachedVerification, detached_signature_holds,
+    header_signature_holds, index_signature_holds,
+};
 use crate::ignore_list::hex_value;
 use crate::line_text::{lines, without_line_ending};
 use crate::numbers::leading_integer;
@@ -21,6 +27,15 @@ const LARGEST_PAYLOAD: u64 = 4 * 1024 * 1024 * 1024;
 const INDEX_SUFFIX: &str = ".info";
 const INDEX_SIGNATURE_PREFIX: &[u8] = b"DSIG:";
 const SHA256_HEX_LENGTH: usize = 64;
+const MD5_HEX_LENGTH: usize = 32;
+const SHORTEST_HEADER_SIGNATURE: usize = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerKind {
+    HeaderSigned,
+    IndexSigned,
+    Unsigned,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContainerError {
@@ -28,6 +43,10 @@ pub enum ContainerError {
     NotAContainer,
     HeaderField { field: &'static str },
     PayloadDigestMismatch,
+    HeaderSignatureMissing,
+    HeaderSignatureDoesNotVerify,
+    DetachedSignatureInvalid(DetachedSignatureInvalid),
+    IndexSignatureDoesNotVerify,
     PayloadNotGzip(String),
     PayloadTooLarge,
     TarHeaderTruncated,
@@ -62,6 +81,22 @@ impl fmt::Display for ContainerError {
                 )
             }
             Self::PayloadNotGzip(reason) => write!(formatter, "the payload is not gzip: {reason}"),
+            Self::HeaderSignatureMissing => {
+                write!(formatter, "the header carries no digital signature")
+            }
+            Self::HeaderSignatureDoesNotVerify => write!(
+                formatter,
+                "the header's digital signature does not verify against the payload"
+            ),
+            Self::DetachedSignatureInvalid(reason) => {
+                write!(formatter, "the detached signature is invalid: {reason:?}")
+            }
+            Self::IndexSignatureDoesNotVerify => {
+                write!(
+                    formatter,
+                    "the .info member's digital signature does not verify"
+                )
+            }
             Self::PayloadTooLarge => write!(formatter, "the payload unpacks to more than 4 GiB"),
             Self::TarHeaderTruncated => write!(formatter, "a tar header is cut short"),
             Self::TarSizeNotOctal { member } => {
@@ -111,6 +146,7 @@ pub struct Member {
 
 pub struct Container {
     pub header: ContainerHeader,
+    pub provenance: Provenance,
     pub members: Vec<Member>,
     pub index: Index,
 }
@@ -140,15 +176,29 @@ impl Index {
     }
 }
 
-pub fn open(contents: &[u8]) -> Result<Container, ContainerError> {
+pub fn header_version(contents: &[u8]) -> Result<u32, ContainerError> {
+    let header_bytes = contents
+        .get(..HEADER_LENGTH)
+        .ok_or(ContainerError::HeaderTooShort)?;
+    read_header(header_bytes).map(|(header, _)| header.version)
+}
+
+pub fn open(
+    contents: &[u8],
+    kind: ContainerKind,
+    detached_signature: Option<&[u8]>,
+) -> Result<Container, ContainerError> {
     let (header_bytes, payload) = contents
         .split_at_checked(HEADER_LENGTH)
         .ok_or(ContainerError::HeaderTooShort)?;
-    let (header, payload_md5) = read_header(header_bytes)?;
-    let actual_md5: [u8; 16] = Md5::digest(payload).into();
-    if actual_md5 != payload_md5 {
-        return Err(ContainerError::PayloadDigestMismatch);
-    }
+    let (header, signature_fields) = read_header(header_bytes)?;
+    let provenance = match kind {
+        ContainerKind::HeaderSigned => {
+            verify_header(contents, payload, &signature_fields, detached_signature)?
+        }
+        ContainerKind::IndexSigned => Provenance::IndexSignatureVerified,
+        ContainerKind::Unsigned => Provenance::UnsignedContainer,
+    };
     let tar = if payload.starts_with(PLAIN_TAR_START) {
         payload.to_vec()
     } else {
@@ -159,15 +209,62 @@ pub fn open(contents: &[u8]) -> Result<Container, ContainerError> {
         .iter()
         .find(|member| member.name.ends_with(INDEX_SUFFIX))
         .ok_or(ContainerError::IndexMissing)?;
-    let index = read_index(&index_member.contents, &header)?;
+    let index = read_index(
+        &index_member.contents,
+        &header,
+        kind != ContainerKind::Unsigned,
+    )?;
     Ok(Container {
         header,
+        provenance,
         members,
         index,
     })
 }
 
-fn read_header(bytes: &[u8]) -> Result<(ContainerHeader, [u8; 16]), ContainerError> {
+fn verify_header(
+    contents: &[u8],
+    payload: &[u8],
+    fields: &SignatureFields,
+    detached_signature: Option<&[u8]>,
+) -> Result<Provenance, ContainerError> {
+    let level = u32::try_from(FUNCTIONALITY_LEVEL).unwrap_or(u32::MAX);
+    if let Some(detached) = detached_signature {
+        match detached_signature_holds(contents, detached, level) {
+            DetachedVerification::Verified => return Ok(Provenance::DetachedSignatureVerified),
+            DetachedVerification::Invalid(reason) => {
+                return Err(ContainerError::DetachedSignatureInvalid(reason));
+            }
+            DetachedVerification::CannotVerify => {}
+        }
+    }
+    let actual_md5: [u8; 16] = Md5::digest(payload).into();
+    if fields.md5.len() == MD5_HEX_LENGTH && fields.md5 != lowercase_hex(&actual_md5).as_bytes() {
+        return Err(ContainerError::PayloadDigestMismatch);
+    }
+    if fields.signature.len() < SHORTEST_HEADER_SIGNATURE {
+        return Err(ContainerError::HeaderSignatureMissing);
+    }
+    if !header_signature_holds(&fields.signature, &actual_md5) {
+        return Err(ContainerError::HeaderSignatureDoesNotVerify);
+    }
+    Ok(Provenance::HeaderSignatureVerified)
+}
+
+fn lowercase_hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut text, byte| {
+        use std::fmt::Write as _;
+        let _ = write!(text, "{byte:02x}");
+        text
+    })
+}
+
+struct SignatureFields {
+    md5: Vec<u8>,
+    signature: Vec<u8>,
+}
+
+fn read_header(bytes: &[u8]) -> Result<(ContainerHeader, SignatureFields), ContainerError> {
     let text_end = bytes
         .iter()
         .rposition(|byte| !matches!(byte, b' ' | b'\0'))
@@ -200,24 +297,18 @@ fn read_header(bytes: &[u8]) -> Result<(ContainerHeader, [u8; 16]), ContainerErr
         functionality_level: small(4, "functionality level")?,
         build_seconds: number(8, "build time")?,
     };
-    let md5 = fields
-        .get(5)
-        .and_then(|hex| md5_bytes(hex))
-        .ok_or(ContainerError::HeaderField { field: "MD5" })?;
-    Ok((header, md5))
-}
-
-fn md5_bytes(hex: &[u8]) -> Option<[u8; 16]> {
-    let bytes = hex
-        .chunks(2)
-        .map(|pair| match pair {
-            [high, low] => hex_value(*high)?
-                .checked_mul(16)?
-                .checked_add(hex_value(*low)?),
-            _ => None,
-        })
-        .collect::<Option<Vec<u8>>>()?;
-    bytes.try_into().ok()
+    let field = |index: usize| {
+        fields
+            .get(index)
+            .map_or_else(Vec::new, |text| text.to_vec())
+    };
+    Ok((
+        header,
+        SignatureFields {
+            md5: field(5),
+            signature: field(6),
+        },
+    ))
 }
 
 fn gunzip(payload: &[u8]) -> Result<Vec<u8>, ContainerError> {
@@ -296,7 +387,12 @@ fn octal(field: &[u8]) -> Option<usize> {
     })
 }
 
-fn read_index(contents: &[u8], header: &ContainerHeader) -> Result<Index, ContainerError> {
+fn read_index(
+    contents: &[u8],
+    header: &ContainerHeader,
+    signed: bool,
+) -> Result<Index, ContainerError> {
+    let raw_lines: Vec<&[u8]> = contents.split(|byte| *byte == b'\n').collect();
     let mut lines = lines(contents).map(without_line_ending).enumerate();
     let (_, header_line) = lines.next().ok_or(ContainerError::IndexMissing)?;
     let fields: Vec<&[u8]> = header_line.split(|byte| *byte == b':').collect();
@@ -311,7 +407,12 @@ fn read_index(contents: &[u8], header: &ContainerHeader) -> Result<Index, Contai
     let mut listed = Vec::new();
     for (index, line) in lines {
         let line_number = index.saturating_add(1);
-        if line.starts_with(INDEX_SIGNATURE_PREFIX) {
+        if signed && line.starts_with(INDEX_SIGNATURE_PREFIX) {
+            let signed_lines = raw_lines.get(..index).unwrap_or_default();
+            let signature = line.get(INDEX_SIGNATURE_PREFIX.len()..).unwrap_or_default();
+            if !index_signature_holds(signed_lines, signature) {
+                return Err(ContainerError::IndexSignatureDoesNotVerify);
+            }
             return Ok(Index { listed });
         }
         let malformed = ContainerError::IndexLineMalformed { line: line_number };
@@ -342,5 +443,9 @@ fn read_index(contents: &[u8], header: &ContainerHeader) -> Result<Index, Contai
             .ok_or(malformed)?;
         listed.push((String::from_utf8_lossy(name).into_owned(), size, digest));
     }
-    Err(ContainerError::IndexUnsigned)
+    if signed {
+        Err(ContainerError::IndexUnsigned)
+    } else {
+        Ok(Index { listed })
+    }
 }

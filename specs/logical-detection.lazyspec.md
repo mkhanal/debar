@@ -54,3 +54,10 @@ What a scan reports for a file whose content a logical signature describes.
 - Binary bytes are read in the order the comparison names; text is read as hexadecimal or decimal.
 - Every comparison given must hold.
 - A read that starts at the first byte of the file, or runs past its end, does not hold.
+
+## A Logical Signature Whose Regular Expression Holds A Backreference Or Lookaround Is Detected When It Matches
+
+- A backreference, numbered or named, matches only what its group captured.
+- A lookahead or lookbehind, positive or negative, tests without consuming.
+- An atomic group never gives back what it matched.
+- Such an expression that exhausts 100,000 steps from one start, or 2,000 open choices, does not match.

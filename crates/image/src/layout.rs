@@ -2,7 +2,7 @@ use zerocopy::little_endian::{U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 pub const MAGIC: [u8; 8] = *b"DEBARIMG";
-pub const LAYOUT_VERSION: u32 = 5;
+pub const LAYOUT_VERSION: u32 = 6;
 pub const BYTE_ORDER_MARK: u32 = 0x0403_0201;
 pub const SECTION_ALIGNMENT: usize = 4096;
 pub const CHECKSUM_LENGTH: usize = 32;
@@ -58,6 +58,11 @@ pub enum SectionKind {
     SelectionFilters,
     PlugInSubsignatures,
     ContainerSignatures,
+    EngineFeatures,
+    CertificateRules,
+    IconSignatures,
+    UrlRules,
+    SignaturePrograms,
 }
 
 impl SectionKind {
@@ -77,6 +82,11 @@ impl SectionKind {
             Self::SelectionFilters => 11,
             Self::PlugInSubsignatures => 12,
             Self::ContainerSignatures => 13,
+            Self::EngineFeatures => 14,
+            Self::CertificateRules => 15,
+            Self::IconSignatures => 16,
+            Self::UrlRules => 17,
+            Self::SignaturePrograms => 18,
         }
     }
 
@@ -96,6 +106,11 @@ impl SectionKind {
             11 => Some(Self::SelectionFilters),
             12 => Some(Self::PlugInSubsignatures),
             13 => Some(Self::ContainerSignatures),
+            14 => Some(Self::EngineFeatures),
+            15 => Some(Self::CertificateRules),
+            16 => Some(Self::IconSignatures),
+            17 => Some(Self::UrlRules),
+            18 => Some(Self::SignaturePrograms),
             _ => None,
         }
     }

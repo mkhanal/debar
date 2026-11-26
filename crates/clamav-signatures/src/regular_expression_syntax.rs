@@ -1,15 +1,15 @@
 use std::fmt;
 
-use regex_syntax::hir::{Hir, Look, Repetition};
-
-use crate::regular_expression_classes::{
-    ByteClass, ClassEscape, any_byte, class_escape, class_hir, folded_literal, not_newline,
-    read_class,
+use debar_image::{
+    Assertion, ByteSet, ExpressionForm, ExpressionTree, Greed, LookDirection, TreeRepetition,
 };
+
+use crate::regular_expression_classes::{ByteClass, ClassEscape, class_escape, read_class};
 
 const DEEPEST_NESTING: usize = 250;
 const LARGEST_REPETITION: u32 = 65_535;
 const NEWLINE: u8 = b'\n';
+const CASE_BIT: u8 = 0x20;
 
 #[expect(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -23,11 +23,7 @@ pub struct ExpressionFlags {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BacktrackingConstruct {
-    Backreference,
-    Lookaround,
-    AtomicGroup,
-    PossessiveQuantifier,
+pub enum UnsupportedConstruct {
     Recursion,
     Conditional,
     MatchStartReset,
@@ -37,18 +33,13 @@ pub enum BacktrackingConstruct {
     ControlVerb,
     Callout,
     QuantifiedAssertion,
-    EndOfLineBeforeNewline,
     UnsupportedOption,
 }
 
-impl BacktrackingConstruct {
+impl UnsupportedConstruct {
     #[must_use]
     pub const fn describe(self) -> &'static str {
         match self {
-            Self::Backreference => "a backreference",
-            Self::Lookaround => "a lookahead or lookbehind assertion",
-            Self::AtomicGroup => "an atomic group",
-            Self::PossessiveQuantifier => "a possessive quantifier",
             Self::Recursion => "a recursion or subroutine call",
             Self::Conditional => "a conditional group",
             Self::MatchStartReset => "a match start reset",
@@ -58,9 +49,6 @@ impl BacktrackingConstruct {
             Self::ControlVerb => "a control verb",
             Self::Callout => "a callout",
             Self::QuantifiedAssertion => "a quantified assertion",
-            Self::EndOfLineBeforeNewline => {
-                "an end-of-subject assertion followed by what can match the final newline"
-            }
             Self::UnsupportedOption => "an inline option other than i, m, s, x and U",
         }
     }
@@ -81,6 +69,9 @@ pub enum MalformedRegularExpression {
     MalformedEscape,
     MalformedGroupName,
     DuplicateGroupName,
+    UnknownGroupName,
+    ReferenceToNoGroup,
+    UnboundedLookbehind,
     MalformedOption,
     TooDeep,
 }
@@ -109,6 +100,15 @@ impl fmt::Display for MalformedRegularExpression {
             Self::MalformedEscape => formatter.write_str("an escape is malformed"),
             Self::MalformedGroupName => formatter.write_str("a group name is malformed"),
             Self::DuplicateGroupName => formatter.write_str("two groups have the same name"),
+            Self::UnknownGroupName => {
+                formatter.write_str("a backreference names a group that does not exist")
+            }
+            Self::UnboundedLookbehind => {
+                formatter.write_str("a lookbehind assertion has no longest match")
+            }
+            Self::ReferenceToNoGroup => {
+                formatter.write_str("a backreference numbers a group that does not exist")
+            }
             Self::MalformedOption => formatter.write_str("an inline option is malformed"),
             Self::TooDeep => write!(
                 formatter,
@@ -120,8 +120,8 @@ impl fmt::Display for MalformedRegularExpression {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Translation {
-    Linear(Hir),
-    NeedsBacktracking(BacktrackingConstruct),
+    Compiled(ExpressionForm),
+    Unsupported(UnsupportedConstruct),
 }
 
 pub fn translate(
@@ -133,30 +133,110 @@ pub fn translate(
         at: 0,
         captures: 0,
         names: Vec::new(),
-        needs_backtracking: None,
+        named_references: Vec::new(),
+        highest_reference: 0,
+        unsupported: None,
     };
     let mut scoped = flags;
-    let hir = parser.alternation(&mut scoped, 0)?;
+    let mut tree = parser.alternation(&mut scoped, 0)?;
     if parser.at < pattern.len() {
         return Err(MalformedRegularExpression::UnmatchedClosingParenthesis);
     }
-    Ok(match parser.needs_backtracking {
-        Some(construct) => Translation::NeedsBacktracking(construct),
-        None => Translation::Linear(hir),
-    })
+    if let Some(construct) = parser.unsupported {
+        return Ok(Translation::Unsupported(construct));
+    }
+    if parser.highest_reference > parser.captures {
+        return Err(MalformedRegularExpression::ReferenceToNoGroup);
+    }
+    if !parser.named_references.is_empty() {
+        let groups = parser
+            .named_references
+            .iter()
+            .map(|name| parser.group_named(name))
+            .collect::<Result<Vec<u32>, _>>()?;
+        resolve_named_references(&mut tree, &groups, 0);
+    }
+    if has_unbounded_lookbehind(&tree, 0) {
+        return Err(MalformedRegularExpression::UnboundedLookbehind);
+    }
+    Ok(Translation::Compiled(match tree.linear_form() {
+        Ok(hir) => ExpressionForm::Linear(hir),
+        Err(_) => ExpressionForm::Backtracking(tree),
+    }))
+}
+
+const NAMED_REFERENCE_BASE: u32 = u32::MAX / 2;
+
+fn has_unbounded_lookbehind(tree: &ExpressionTree, depth: usize) -> bool {
+    if depth > DEEPEST_NESTING.saturating_mul(4) {
+        return false;
+    }
+    let depth = depth.saturating_add(1);
+    match tree {
+        ExpressionTree::Lookaround {
+            direction: LookDirection::Behind,
+            item,
+            ..
+        } => item.longest_match().is_none() || has_unbounded_lookbehind(item, depth),
+        ExpressionTree::Concat(items) | ExpressionTree::Alternation(items) => items
+            .iter()
+            .any(|item| has_unbounded_lookbehind(item, depth)),
+        ExpressionTree::Repetition(repetition) => has_unbounded_lookbehind(&repetition.item, depth),
+        ExpressionTree::Capture { item, .. }
+        | ExpressionTree::Lookaround { item, .. }
+        | ExpressionTree::Atomic(item) => has_unbounded_lookbehind(item, depth),
+        ExpressionTree::Empty
+        | ExpressionTree::Byte(_)
+        | ExpressionTree::Backreference { .. }
+        | ExpressionTree::Assertion(_) => false,
+    }
+}
+
+fn resolve_named_references(tree: &mut ExpressionTree, groups: &[u32], depth: usize) {
+    if depth > DEEPEST_NESTING.saturating_mul(4) {
+        return;
+    }
+    let depth = depth.saturating_add(1);
+    match tree {
+        ExpressionTree::Backreference { group, .. } if *group >= NAMED_REFERENCE_BASE => {
+            if let Some(resolved) = usize::try_from(group.saturating_sub(NAMED_REFERENCE_BASE))
+                .ok()
+                .and_then(|index| groups.get(index))
+            {
+                *group = *resolved;
+            }
+        }
+        ExpressionTree::Concat(items) | ExpressionTree::Alternation(items) => {
+            for item in items {
+                resolve_named_references(item, groups, depth);
+            }
+        }
+        ExpressionTree::Repetition(repetition) => {
+            resolve_named_references(&mut repetition.item, groups, depth);
+        }
+        ExpressionTree::Capture { item, .. }
+        | ExpressionTree::Lookaround { item, .. }
+        | ExpressionTree::Atomic(item) => resolve_named_references(item, groups, depth),
+        ExpressionTree::Empty
+        | ExpressionTree::Byte(_)
+        | ExpressionTree::Backreference { .. }
+        | ExpressionTree::Assertion(_) => {}
+    }
 }
 
 struct Parser<'p> {
     pattern: &'p [u8],
     at: usize,
     captures: u32,
-    names: Vec<&'p [u8]>,
-    needs_backtracking: Option<BacktrackingConstruct>,
+    names: Vec<(&'p [u8], u32)>,
+    named_references: Vec<&'p [u8]>,
+    highest_reference: u32,
+    unsupported: Option<UnsupportedConstruct>,
 }
 
 enum Atom {
-    Item(Hir),
-    Assertion(Hir),
+    Item(ExpressionTree),
+    Assertion(ExpressionTree),
     Nothing,
 }
 
@@ -183,30 +263,55 @@ impl<'p> Parser<'p> {
         Some(byte)
     }
 
-    fn note(&mut self, construct: BacktrackingConstruct) {
-        self.needs_backtracking.get_or_insert(construct);
+    fn note(&mut self, construct: UnsupportedConstruct) {
+        self.unsupported.get_or_insert(construct);
+    }
+
+    fn group_named(&self, name: &[u8]) -> Result<u32, MalformedRegularExpression> {
+        self.names
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, group)| *group)
+            .ok_or(MalformedRegularExpression::UnknownGroupName)
+    }
+
+    fn numbered_reference(&mut self, group: u32, caseless: bool) -> Atom {
+        self.highest_reference = self.highest_reference.max(group);
+        Atom::Item(ExpressionTree::Backreference { group, caseless })
+    }
+
+    fn named_reference(&mut self, name: &'p [u8], caseless: bool) -> Atom {
+        let index = u32::try_from(self.named_references.len()).unwrap_or(u32::MAX);
+        self.named_references.push(name);
+        Atom::Item(ExpressionTree::Backreference {
+            group: NAMED_REFERENCE_BASE.saturating_add(index),
+            caseless,
+        })
     }
 
     fn alternation(
         &mut self,
         flags: &mut ExpressionFlags,
         depth: usize,
-    ) -> Result<Hir, MalformedRegularExpression> {
+    ) -> Result<ExpressionTree, MalformedRegularExpression> {
         let mut branches = vec![self.concatenation(flags, depth)?];
         while self.peek() == Some(b'|') {
             self.advance(1);
             branches.push(self.concatenation(flags, depth)?);
         }
-        Ok(Hir::alternation(branches))
+        Ok(if branches.len() == 1 {
+            branches.pop().unwrap_or(ExpressionTree::Empty)
+        } else {
+            ExpressionTree::Alternation(branches)
+        })
     }
 
     fn concatenation(
         &mut self,
         flags: &mut ExpressionFlags,
         depth: usize,
-    ) -> Result<Hir, MalformedRegularExpression> {
-        let mut items: Vec<Hir> = Vec::new();
-        let mut pending_end_of_subject = false;
+    ) -> Result<ExpressionTree, MalformedRegularExpression> {
+        let mut items: Vec<ExpressionTree> = Vec::new();
         loop {
             self.skip_extended_space(*flags);
             match self.peek() {
@@ -222,27 +327,22 @@ impl<'p> Parser<'p> {
                     }
                     continue;
                 }
-                Atom::Assertion(hir) => {
+                Atom::Assertion(tree) => {
                     if self.quantifier_ahead() {
-                        self.note(BacktrackingConstruct::QuantifiedAssertion);
-                        self.quantifier(*flags, Hir::empty())?;
+                        self.note(UnsupportedConstruct::QuantifiedAssertion);
+                        self.quantifier(*flags, ExpressionTree::Empty)?;
                     }
-                    hir
+                    tree
                 }
-                Atom::Item(hir) => self.quantifier(*flags, hir)?,
+                Atom::Item(tree) => self.quantifier(*flags, tree)?,
             };
-            if pending_end_of_subject && item.properties().minimum_len() != Some(0) {
-                if can_start_with_newline(&item) {
-                    self.note(BacktrackingConstruct::EndOfLineBeforeNewline);
-                }
-                pending_end_of_subject = false;
-            }
-            if is_end_before_final_newline(&item) {
-                pending_end_of_subject = true;
-            }
             items.push(item);
         }
-        Ok(Hir::concat(items))
+        Ok(if items.len() == 1 {
+            items.pop().unwrap_or(ExpressionTree::Empty)
+        } else {
+            ExpressionTree::Concat(items)
+        })
     }
 
     fn skip_extended_space(&mut self, flags: ExpressionFlags) {
@@ -275,8 +375,8 @@ impl<'p> Parser<'p> {
     fn quantifier(
         &mut self,
         flags: ExpressionFlags,
-        item: Hir,
-    ) -> Result<Hir, MalformedRegularExpression> {
+        item: ExpressionTree,
+    ) -> Result<ExpressionTree, MalformedRegularExpression> {
         let (min, max) = match self.peek() {
             Some(b'*') => {
                 self.advance(1);
@@ -304,27 +404,35 @@ impl<'p> Parser<'p> {
             },
             _ => return Ok(item),
         };
-        let mut greedy = !flags.ungreedy;
+        let mut greed = if flags.ungreedy {
+            Greed::Lazy
+        } else {
+            Greed::Greedy
+        };
         match self.peek() {
             Some(b'?') => {
                 self.advance(1);
-                greedy = !greedy;
+                greed = if flags.ungreedy {
+                    Greed::Greedy
+                } else {
+                    Greed::Lazy
+                };
             }
             Some(b'+') => {
                 self.advance(1);
-                self.note(BacktrackingConstruct::PossessiveQuantifier);
+                greed = Greed::Possessive;
             }
             _ => {}
         }
         if self.quantifier_ahead() {
             return Err(MalformedRegularExpression::NothingToRepeat);
         }
-        Ok(Hir::repetition(Repetition {
+        Ok(ExpressionTree::Repetition(Box::new(TreeRepetition {
             min,
             max,
-            greedy,
-            sub: Box::new(item),
-        }))
+            greed,
+            item,
+        })))
     }
 
     fn atom(
@@ -341,21 +449,21 @@ impl<'p> Parser<'p> {
                 let (class, rest) = read_class(self.rest(), flags.caseless)?;
                 self.advance(self.rest().len().saturating_sub(rest.len()));
                 if class.needs_backtracking {
-                    self.note(BacktrackingConstruct::UnicodeProperty);
+                    self.note(UnsupportedConstruct::UnicodeProperty);
                 }
-                Atom::Item(class_hir(&class.bytes))
+                Atom::Item(ExpressionTree::Byte(byte_set(&class.bytes)))
             }
             b'.' => Atom::Item(if flags.dot_all {
                 any_byte()
             } else {
                 not_newline()
             }),
-            b'^' => Atom::Assertion(Hir::look(if flags.multiline {
-                Look::StartLF
+            b'^' => Atom::Assertion(ExpressionTree::Assertion(if flags.multiline {
+                Assertion::LineStartNotAtSubjectEnd
             } else {
-                Look::Start
+                Assertion::SubjectStart
             })),
-            b'$' => Atom::Assertion(end_of_line(*flags)),
+            b'$' => Atom::Assertion(ExpressionTree::Assertion(end_of_line(*flags))),
             b'\\' => self.escape(*flags)?,
             b'*' | b'+' | b'?' => return Err(MalformedRegularExpression::NothingToRepeat),
             b'{' if counted_repetition(
@@ -377,54 +485,52 @@ impl<'p> Parser<'p> {
             return Err(MalformedRegularExpression::MalformedEscape);
         };
         if letter.is_ascii_digit() && letter != b'0' {
-            return self.digit_escape();
+            return self.digit_escape(flags);
         }
-        let look = |look| Ok(Atom::Assertion(Hir::look(look)));
+        let look = |assertion| Ok(Atom::Assertion(ExpressionTree::Assertion(assertion)));
         match letter {
             b'b' => {
                 self.advance(1);
-                return look(Look::WordAscii);
+                return look(Assertion::WordBoundary);
             }
             b'B' => {
                 self.advance(1);
-                return look(Look::WordAsciiNegate);
+                return look(Assertion::NotWordBoundary);
             }
             b'A' => {
                 self.advance(1);
-                return look(Look::Start);
+                return look(Assertion::SubjectStart);
             }
             b'z' => {
                 self.advance(1);
-                return look(Look::End);
+                return look(Assertion::SubjectEnd);
             }
             b'Z' => {
                 self.advance(1);
-                return Ok(Atom::Assertion(end_before_final_newline()));
+                return look(Assertion::SubjectEndOrBeforeFinalNewline);
             }
             b'G' => {
                 self.advance(1);
-                self.note(BacktrackingConstruct::ContinuationAnchor);
-                return Ok(Atom::Assertion(Hir::empty()));
+                self.note(UnsupportedConstruct::ContinuationAnchor);
+                return Ok(Atom::Assertion(ExpressionTree::Empty));
             }
             b'K' => {
                 self.advance(1);
-                self.note(BacktrackingConstruct::MatchStartReset);
-                return Ok(Atom::Assertion(Hir::empty()));
+                self.note(UnsupportedConstruct::MatchStartReset);
+                return Ok(Atom::Assertion(ExpressionTree::Empty));
             }
             b'R' | b'X' => {
                 self.advance(1);
                 self.note(if letter == b'R' {
-                    BacktrackingConstruct::NewlineSequence
+                    UnsupportedConstruct::NewlineSequence
                 } else {
-                    BacktrackingConstruct::UnicodeProperty
+                    UnsupportedConstruct::UnicodeProperty
                 });
-                return Ok(Atom::Item(Hir::empty()));
+                return Ok(Atom::Item(ExpressionTree::Empty));
             }
             b'g' | b'k' => {
                 self.advance(1);
-                self.skip_reference_name();
-                self.note(BacktrackingConstruct::Backreference);
-                return Ok(Atom::Item(Hir::empty()));
+                return self.reference_escape(letter, flags.caseless);
             }
             b'Q' => {
                 self.advance(1);
@@ -448,15 +554,15 @@ impl<'p> Parser<'p> {
         self.advance(self.rest().len().saturating_sub(rest.len()));
         Ok(Atom::Item(match escape {
             ClassEscape::Byte(byte) => folded_literal(byte, flags.caseless),
-            ClassEscape::Set(set) => class_hir(&set),
+            ClassEscape::Set(set) => ExpressionTree::Byte(byte_set(&set)),
             ClassEscape::UnicodeProperty => {
-                self.note(BacktrackingConstruct::UnicodeProperty);
-                Hir::empty()
+                self.note(UnsupportedConstruct::UnicodeProperty);
+                ExpressionTree::Empty
             }
         }))
     }
 
-    fn digit_escape(&mut self) -> Result<Atom, MalformedRegularExpression> {
+    fn digit_escape(&mut self, flags: ExpressionFlags) -> Result<Atom, MalformedRegularExpression> {
         let digits = self
             .rest()
             .iter()
@@ -471,40 +577,101 @@ impl<'p> Parser<'p> {
         let starts_with_eight_or_nine = matches!(text.first(), Some(b'8' | b'9'));
         if value < 10 || starts_with_eight_or_nine || value <= self.captures {
             self.advance(digits);
-            self.note(BacktrackingConstruct::Backreference);
-            return Ok(Atom::Item(Hir::empty()));
+            return Ok(self.numbered_reference(value, flags.caseless));
         }
         let (escape, rest) = class_escape(self.rest(), false)?;
         self.advance(self.rest().len().saturating_sub(rest.len()));
         match escape {
-            ClassEscape::Byte(byte) => Ok(Atom::Item(Hir::literal(vec![byte]))),
+            ClassEscape::Byte(byte) => Ok(Atom::Item(ExpressionTree::Byte(ByteSet::of([byte])))),
             ClassEscape::Set(_) | ClassEscape::UnicodeProperty => {
                 Err(MalformedRegularExpression::MalformedEscape)
             }
         }
     }
 
-    fn skip_reference_name(&mut self) {
+    fn reference_escape(
+        &mut self,
+        letter: u8,
+        caseless: bool,
+    ) -> Result<Atom, MalformedRegularExpression> {
         let closing = match self.peek() {
-            Some(b'{') => b'}',
-            Some(b'<') => b'>',
-            Some(b'\'') => b'\'',
-            _ => {
-                while matches!(self.peek(), Some(b'-' | b'+' | b'0'..=b'9')) {
-                    self.advance(1);
-                }
-                return;
-            }
+            Some(b'{') => Some(b'}'),
+            Some(b'<') => Some(b'>'),
+            Some(b'\'') => Some(b'\''),
+            _ => None,
         };
-        self.advance(1);
-        while let Some(byte) = self.next() {
-            if byte == closing {
-                return;
+        let text = match closing {
+            Some(closing) => {
+                self.advance(1);
+                let length = self
+                    .rest()
+                    .iter()
+                    .position(|byte| *byte == closing)
+                    .ok_or(MalformedRegularExpression::MalformedEscape)?;
+                let text = self.rest().get(..length).unwrap_or_default();
+                self.advance(length.saturating_add(1));
+                text
             }
+            None if letter == b'g' => {
+                let length = self
+                    .rest()
+                    .iter()
+                    .enumerate()
+                    .take_while(|(position, byte)| {
+                        byte.is_ascii_digit() || (*position == 0 && matches!(byte, b'-' | b'+'))
+                    })
+                    .count();
+                let text = self.rest().get(..length).unwrap_or_default();
+                self.advance(length);
+                text
+            }
+            None => return Err(MalformedRegularExpression::MalformedEscape),
+        };
+        let numbered = letter == b'g'
+            && !text.is_empty()
+            && text
+                .iter()
+                .enumerate()
+                .all(|(position, byte)| byte.is_ascii_digit() || (position == 0 && *byte == b'-'));
+        if !numbered {
+            if text.is_empty()
+                || text.first().is_some_and(u8::is_ascii_digit)
+                || !text
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                return Err(MalformedRegularExpression::MalformedGroupName);
+            }
+            return Ok(self.named_reference(text, caseless));
         }
+        let (relative, digits) = match text.split_first() {
+            Some((b'-', digits)) => (true, digits),
+            _ => (false, text),
+        };
+        let value = digits
+            .iter()
+            .try_fold(0u32, |value, digit| {
+                value
+                    .checked_mul(10)?
+                    .checked_add(u32::from(digit.checked_sub(b'0')?))
+            })
+            .ok_or(MalformedRegularExpression::ReferenceToNoGroup)?;
+        let group = if relative {
+            self.captures
+                .checked_add(1)
+                .and_then(|next| next.checked_sub(value))
+                .filter(|group| *group > 0 && value > 0)
+                .ok_or(MalformedRegularExpression::ReferenceToNoGroup)?
+        } else {
+            value
+        };
+        if group == 0 {
+            return Err(MalformedRegularExpression::ReferenceToNoGroup);
+        }
+        Ok(self.numbered_reference(group, caseless))
     }
 
-    fn quoted(&mut self, flags: ExpressionFlags) -> Hir {
+    fn quoted(&mut self, flags: ExpressionFlags) -> ExpressionTree {
         let mut literals = Vec::new();
         while let Some(byte) = self.next() {
             if byte == b'\\' && self.peek() == Some(b'E') {
@@ -513,7 +680,7 @@ impl<'p> Parser<'p> {
             }
             literals.push(folded_literal(byte, flags.caseless));
         }
-        Hir::concat(literals)
+        ExpressionTree::Concat(literals)
     }
 
     fn group(
@@ -526,13 +693,12 @@ impl<'p> Parser<'p> {
             return Err(MalformedRegularExpression::TooDeep);
         }
         if self.peek() == Some(b'*') {
-            self.note(BacktrackingConstruct::ControlVerb);
+            self.note(UnsupportedConstruct::ControlVerb);
             self.skip_to_closing();
-            return Ok(Atom::Assertion(Hir::empty()));
+            return Ok(Atom::Assertion(ExpressionTree::Empty));
         }
         if self.peek() != Some(b'?') {
-            self.captures = self.captures.saturating_add(1);
-            return self.group_body(*flags, depth).map(Atom::Item);
+            return self.capture_group(*flags, depth);
         }
         self.advance(1);
         let Some(kind) = self.next() else {
@@ -544,47 +710,63 @@ impl<'p> Parser<'p> {
                 Ok(Atom::Nothing)
             }
             b':' | b'|' => self.group_body(*flags, depth).map(Atom::Item),
-            b'>' => self.unexpressed_group(*flags, depth, BacktrackingConstruct::AtomicGroup),
-            b'=' | b'!' => self.unexpressed_group(*flags, depth, BacktrackingConstruct::Lookaround),
+            b'>' => {
+                let item = self.group_body(*flags, depth)?;
+                Ok(Atom::Item(ExpressionTree::Atomic(Box::new(item))))
+            }
+            b'=' | b'!' => self.lookaround(*flags, depth, LookDirection::Ahead, kind == b'!'),
             b'<' if matches!(self.peek(), Some(b'=' | b'!')) => {
-                self.advance(1);
-                self.unexpressed_group(*flags, depth, BacktrackingConstruct::Lookaround)
+                let negated = self.next() == Some(b'!');
+                self.lookaround(*flags, depth, LookDirection::Behind, negated)
             }
             b'<' => self.named_group(b'>', *flags, depth),
             b'\'' => self.named_group(b'\'', *flags, depth),
             b'P' => match self.next() {
                 Some(b'<') => self.named_group(b'>', *flags, depth),
                 Some(b'=') => {
-                    self.skip_to_closing();
-                    self.note(BacktrackingConstruct::Backreference);
-                    Ok(Atom::Item(Hir::empty()))
+                    let length = self
+                        .rest()
+                        .iter()
+                        .position(|byte| *byte == b')')
+                        .ok_or(MalformedRegularExpression::UnmatchedOpeningParenthesis)?;
+                    let name = self.rest().get(..length).unwrap_or_default();
+                    self.advance(length.saturating_add(1));
+                    if name.is_empty()
+                        || name.first().is_some_and(u8::is_ascii_digit)
+                        || !name
+                            .iter()
+                            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                    {
+                        return Err(MalformedRegularExpression::MalformedGroupName);
+                    }
+                    Ok(self.named_reference(name, flags.caseless))
                 }
                 Some(b'>') => {
                     self.skip_to_closing();
-                    self.note(BacktrackingConstruct::Recursion);
-                    Ok(Atom::Item(Hir::empty()))
+                    self.note(UnsupportedConstruct::Recursion);
+                    Ok(Atom::Item(ExpressionTree::Empty))
                 }
                 _ => Err(MalformedRegularExpression::MalformedGroupName),
             },
             b'R' | b'&' | b'+' | b'0'..=b'9' => {
                 self.skip_to_closing();
-                self.note(BacktrackingConstruct::Recursion);
-                Ok(Atom::Item(Hir::empty()))
+                self.note(UnsupportedConstruct::Recursion);
+                Ok(Atom::Item(ExpressionTree::Empty))
             }
             b'-' if self.peek().is_some_and(|byte| byte.is_ascii_digit()) => {
                 self.skip_to_closing();
-                self.note(BacktrackingConstruct::Recursion);
-                Ok(Atom::Item(Hir::empty()))
+                self.note(UnsupportedConstruct::Recursion);
+                Ok(Atom::Item(ExpressionTree::Empty))
             }
             b'(' => {
                 self.skip_balanced();
-                self.note(BacktrackingConstruct::Conditional);
-                Ok(Atom::Item(Hir::empty()))
+                self.note(UnsupportedConstruct::Conditional);
+                Ok(Atom::Item(ExpressionTree::Empty))
             }
             b'C' => {
                 self.skip_to_closing();
-                self.note(BacktrackingConstruct::Callout);
-                Ok(Atom::Assertion(Hir::empty()))
+                self.note(UnsupportedConstruct::Callout);
+                Ok(Atom::Assertion(ExpressionTree::Empty))
             }
             _ => {
                 self.at = self.at.saturating_sub(1);
@@ -619,7 +801,7 @@ impl<'p> Parser<'p> {
                 b'm' => changed.multiline = turning_on,
                 b'x' => changed.extended = turning_on,
                 b'U' => changed.ungreedy = turning_on,
-                b'n' | b'J' => self.note(BacktrackingConstruct::UnsupportedOption),
+                b'n' | b'J' => self.note(UnsupportedConstruct::UnsupportedOption),
                 b')' => {
                     *flags = changed;
                     return Ok(Atom::Nothing);
@@ -648,41 +830,54 @@ impl<'p> Parser<'p> {
         {
             return Err(MalformedRegularExpression::MalformedGroupName);
         }
-        if self.names.contains(&name) {
+        if self.names.iter().any(|(known, _)| *known == name) {
             return Err(MalformedRegularExpression::DuplicateGroupName);
         }
-        self.names.push(name);
+        self.names.push((name, self.captures.saturating_add(1)));
         self.advance(length.saturating_add(1));
+        self.capture_group(flags, depth)
+    }
+
+    fn capture_group(
+        &mut self,
+        flags: ExpressionFlags,
+        depth: usize,
+    ) -> Result<Atom, MalformedRegularExpression> {
         self.captures = self.captures.saturating_add(1);
-        self.group_body(flags, depth).map(Atom::Item)
+        let group = self.captures;
+        let item = self.group_body(flags, depth)?;
+        Ok(Atom::Item(ExpressionTree::Capture {
+            group,
+            item: Box::new(item),
+        }))
     }
 
     fn group_body(
         &mut self,
         flags: ExpressionFlags,
         depth: usize,
-    ) -> Result<Hir, MalformedRegularExpression> {
+    ) -> Result<ExpressionTree, MalformedRegularExpression> {
         let mut inner = flags;
-        let hir = self.alternation(&mut inner, depth)?;
+        let tree = self.alternation(&mut inner, depth)?;
         if self.next() != Some(b')') {
             return Err(MalformedRegularExpression::UnmatchedOpeningParenthesis);
         }
-        Ok(hir)
+        Ok(tree)
     }
 
-    fn unexpressed_group(
+    fn lookaround(
         &mut self,
         flags: ExpressionFlags,
         depth: usize,
-        construct: BacktrackingConstruct,
+        direction: LookDirection,
+        negated: bool,
     ) -> Result<Atom, MalformedRegularExpression> {
-        self.group_body(flags, depth)?;
-        self.note(construct);
-        Ok(if construct == BacktrackingConstruct::Lookaround {
-            Atom::Assertion(Hir::empty())
-        } else {
-            Atom::Item(Hir::empty())
-        })
+        let item = self.group_body(flags, depth)?;
+        Ok(Atom::Assertion(ExpressionTree::Lookaround {
+            direction,
+            negated,
+            item: Box::new(item),
+        }))
     }
 
     fn skip_to_closing(&mut self) {
@@ -694,7 +889,7 @@ impl<'p> Parser<'p> {
     }
 
     fn skip_balanced(&mut self) {
-        let mut open: usize = 1;
+        let mut open: usize = 2;
         while let Some(byte) = self.next() {
             match byte {
                 b'\\' => self.advance(1),
@@ -757,36 +952,32 @@ fn counted_repetition(text: &[u8]) -> Option<CountedRepetition> {
     })
 }
 
-fn end_of_line(flags: ExpressionFlags) -> Hir {
+fn end_of_line(flags: ExpressionFlags) -> Assertion {
     if flags.multiline {
-        Hir::look(Look::EndLF)
+        Assertion::LineEnd
     } else if flags.dollar_end_only {
-        Hir::look(Look::End)
+        Assertion::SubjectEnd
     } else {
-        end_before_final_newline()
+        Assertion::SubjectEndOrBeforeFinalNewline
     }
 }
 
-fn end_before_final_newline() -> Hir {
-    Hir::alternation(vec![
-        Hir::look(Look::End),
-        Hir::concat(vec![Hir::literal(vec![NEWLINE]), Hir::look(Look::End)]),
-    ])
+fn byte_set(class: &ByteClass) -> ByteSet {
+    ByteSet::of((0..=u8::MAX).filter(|byte| class.contains(*byte)))
 }
 
-fn is_end_before_final_newline(hir: &Hir) -> bool {
-    *hir == end_before_final_newline()
+fn any_byte() -> ExpressionTree {
+    ExpressionTree::Byte(ByteSet::of(0..=u8::MAX))
 }
 
-fn can_start_with_newline(hir: &Hir) -> bool {
-    use regex_syntax::hir::HirKind;
-    match hir.kind() {
-        HirKind::Empty | HirKind::Look(_) => false,
-        HirKind::Literal(literal) => literal.0.first() == Some(&NEWLINE),
-        HirKind::Class(class) => ByteClass::of_hir_class(class).contains(NEWLINE),
-        HirKind::Repetition(repetition) => can_start_with_newline(&repetition.sub),
-        HirKind::Capture(capture) => can_start_with_newline(&capture.sub),
-        HirKind::Concat(items) => items.iter().any(can_start_with_newline),
-        HirKind::Alternation(branches) => branches.iter().any(can_start_with_newline),
+fn not_newline() -> ExpressionTree {
+    ExpressionTree::Byte(ByteSet::of((0..=u8::MAX).filter(|byte| *byte != NEWLINE)))
+}
+
+fn folded_literal(byte: u8, caseless: bool) -> ExpressionTree {
+    if caseless && byte.is_ascii_alphabetic() {
+        ExpressionTree::Byte(ByteSet::of([byte, byte ^ CASE_BIT]))
+    } else {
+        ExpressionTree::Byte(ByteSet::of([byte]))
     }
 }

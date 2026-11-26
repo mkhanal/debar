@@ -1,3 +1,4 @@
+mod backtracking_search;
 mod byte_values;
 mod container_entries;
 mod digests;
@@ -12,6 +13,7 @@ mod second_pass_search;
 pub use second_pass_search::largest_armed_search_bytes;
 mod verification;
 
+pub use backtracking_search::{BacktrackingBounds, BacktrackingSearch, backtracking_search};
 pub use container_entries::{ContainerEntry, ContainerEntryError, container_entry_detections};
 pub use digests::{DigestNeed, ObjectDigests};
 pub use executable_layout::{ExecutableLayout, ExecutableSection};

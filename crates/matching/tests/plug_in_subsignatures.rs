@@ -7,12 +7,13 @@
 )]
 
 use debar_image::{
-    ByteComparison, ByteEncoding, ByteOrder, Category, ContainerSignature, ContentSubsignature,
-    CountComparison, CountTest, Expression, ExpressionAnchoring, ExpressionMatches, Image,
-    ImageBuilder, Indicator, KindCondition, KindDescription, LogicalConditions, LogicalSignature,
-    MaskedByte, ObjectKind, OwnBytes, Pattern, PatternElement, Placement, RecognitionRank,
-    RegularExpressionSubsignature, ReportWindows, SignatureGroup, SizeCondition, Subsignature,
-    ValueComparison,
+    ByteComparison, ByteEncoding, ByteOrder, ByteSet, Category, ContainerSignature,
+    ContentSubsignature, CountComparison, CountTest, Expression, ExpressionAnchoring,
+    ExpressionForm, ExpressionMatches, ExpressionTree, Greed, Image, ImageBuilder, Indicator,
+    KindCondition, KindDescription, LogicalConditions, LogicalOutcome, LogicalSignature,
+    LookDirection, MaskedByte, ObjectKind, OwnBytes, Pattern, PatternElement, Placement,
+    RecognitionRank, RegularExpressionSubsignature, ReportWindows, SignatureGroup,
+    SignatureProgramId, SizeCondition, Subsignature, TreeRepetition, ValueComparison,
 };
 use debar_matching::{
     ContainerEntry, GroupSelection, ObjectContext, PatternRequest, PatternSettings,
@@ -63,7 +64,7 @@ fn regular(pattern: &str) -> RegularExpressionSubsignature {
     RegularExpressionSubsignature {
         trigger: Some(leaf(0)),
         placement: Placement::Anywhere,
-        expression: hir(pattern),
+        expression: ExpressionForm::Linear(hir(pattern)),
         anchoring: ExpressionAnchoring::AtAnUnshiftedPlacement,
         matches: ExpressionMatches::First,
         bounded_by_shift: false,
@@ -95,6 +96,7 @@ fn image_of(signatures: &[Signature], windows: Option<ReportWindows>) -> Vec<u8>
     for signature in signatures {
         builder
             .add_logical_signature(&LogicalSignature {
+                outcome: LogicalOutcome::Detection,
                 group: GENERIC,
                 category: Category::Malware,
                 name: signature.name,
@@ -555,5 +557,110 @@ fn container_signatures_are_tested_last_loaded_first() {
     assert_eq!(
         container_detections(&image, &entry(b"a"), true),
         ["Test.Second", "Test.First"]
+    );
+}
+
+fn backtracking(tree: ExpressionTree) -> RegularExpressionSubsignature {
+    RegularExpressionSubsignature {
+        trigger: Some(leaf(0)),
+        placement: Placement::Anywhere,
+        expression: ExpressionForm::Backtracking(tree),
+        anchoring: ExpressionAnchoring::AtAnUnshiftedPlacement,
+        matches: ExpressionMatches::First,
+        bounded_by_shift: false,
+    }
+}
+
+fn word_run() -> ExpressionTree {
+    ExpressionTree::Repetition(Box::new(TreeRepetition {
+        min: 1,
+        max: None,
+        greed: Greed::Greedy,
+        item: ExpressionTree::Byte(ByteSet::of((0..=u8::MAX).filter(u8::is_ascii_alphanumeric))),
+    }))
+}
+
+#[test]
+fn a_regular_expression_with_a_backreference_matches_through_the_image() {
+    let tree = ExpressionTree::Concat(vec![
+        ExpressionTree::literal(b"var "),
+        ExpressionTree::Capture {
+            group: 1,
+            item: Box::new(word_run()),
+        },
+        ExpressionTree::literal(b"="),
+        ExpressionTree::Backreference {
+            group: 1,
+            caseless: false,
+        },
+    ]);
+    let signature = || with_expression(leaf(1), backtracking(tree.clone()));
+    assert!(detected(signature(), b"MARK var abc=abc;"));
+    assert!(!detected(signature(), b"MARK var abc=abd;"));
+}
+
+#[test]
+fn a_regular_expression_with_lookaround_matches_through_the_image() {
+    let tree = ExpressionTree::Concat(vec![
+        ExpressionTree::Lookaround {
+            direction: LookDirection::Behind,
+            negated: true,
+            item: Box::new(ExpressionTree::Byte(ByteSet::of(
+                (0..=u8::MAX).filter(u8::is_ascii_alphanumeric),
+            ))),
+        },
+        ExpressionTree::literal(b"inject"),
+        ExpressionTree::Lookaround {
+            direction: LookDirection::Ahead,
+            negated: false,
+            item: Box::new(ExpressionTree::literal(b".java")),
+        },
+    ]);
+    let signature = || with_expression(leaf(1), backtracking(tree.clone()));
+    assert!(detected(signature(), b"MARK inject.java"));
+    assert!(!detected(signature(), b"MARK reinject.java"));
+    assert!(!detected(signature(), b"MARK inject.class"));
+}
+
+#[test]
+fn a_logical_signature_that_triggers_a_program_reports_the_trigger_and_no_detection() {
+    let subsignatures = [content(b"MARK")];
+    let expression = leaf(0);
+    let mut builder = ImageBuilder::new();
+    builder
+        .add_logical_signature(&LogicalSignature {
+            outcome: LogicalOutcome::RunProgram(SignatureProgramId(0)),
+            group: GENERIC,
+            category: Category::Malware,
+            name: "Test.Program",
+            indicator: Indicator::Strong,
+            expression: &expression,
+            subsignatures: &subsignatures,
+            conditions: &LogicalConditions::default(),
+        })
+        .unwrap();
+    builder.describe_object_kind(ObjectKind::BinaryData, binary_data());
+    let bytes = builder.finish().unwrap();
+    let image = Image::open(&bytes).unwrap();
+    let object = b"....MARK....";
+    let request = PatternRequest {
+        selection: GroupSelection::ForKind(ObjectKind::BinaryData),
+        settings: PatternSettings {
+            potentially_unwanted: false,
+            unwanted_categories: UnwantedCategories::Every,
+            every_match: true,
+            largest_object_for_regular_expressions: None,
+        },
+        object_length: object.len() as u64,
+        context: ObjectContext::TOP_LEVEL,
+        image_fuzzy_hash: None,
+    };
+    let findings = scan_object(&image, request, || None, object)
+        .unwrap()
+        .logical;
+    assert_eq!(findings.detections, []);
+    assert_eq!(
+        findings.program_triggers,
+        [LogicalOutcome::RunProgram(SignatureProgramId(0))]
     );
 }

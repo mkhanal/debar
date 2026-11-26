@@ -5,7 +5,12 @@ use crate::logical_expression::{ExpressionMalformed, ExpressionStep, expression_
 use crate::model::{
     Category, CountComparison, CountTest, InclusiveRange, KindCondition, LogicalConditions,
 };
+use crate::model::{LogicalOutcome, SignatureProgramId};
 use crate::names::NameId;
+
+const OUTCOME_DETECTION: u8 = 0;
+const OUTCOME_RUN_PROGRAM: u8 = 1;
+const OUTCOME_HOOK_TRIGGERED: u8 = 2;
 use crate::object_kind::ObjectKind;
 use crate::pattern_group::PatternSignatureId;
 
@@ -81,8 +86,9 @@ struct LogicalHeader {
 #[repr(C)]
 struct LogicalEntry {
     name: U32,
+    program: U32,
     category: u8,
-    reserved: u8,
+    outcome: u8,
     step_count: U16,
     first_subsignature: U32,
     subsignature_count: U32,
@@ -146,6 +152,7 @@ pub struct PendingSubsignature {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingLogicalSignature {
     pub name: NameId,
+    pub outcome: LogicalOutcome,
     pub category: Category,
     pub steps: Vec<ExpressionStep>,
     pub subsignatures: Vec<PendingSubsignature>,
@@ -244,13 +251,19 @@ impl Parts {
             self.conditions.push(entry);
             u32::try_from(self.conditions.len().saturating_sub(1)).map_err(too_large)?
         };
+        let (outcome, program) = match signature.outcome {
+            LogicalOutcome::Detection => (OUTCOME_DETECTION, 0),
+            LogicalOutcome::RunProgram(program) => (OUTCOME_RUN_PROGRAM, program.0),
+            LogicalOutcome::HookTriggered(program) => (OUTCOME_HOOK_TRIGGERED, program.0),
+        };
         self.signatures.push(LogicalEntry {
             name: U32::new(signature.name.0),
+            program: U32::new(program),
+            outcome,
             category: match signature.category {
                 Category::Malware => CATEGORY_MALWARE,
                 Category::PotentiallyUnwanted => CATEGORY_POTENTIALLY_UNWANTED,
             },
-            reserved: 0,
             step_count: U16::new(u16::try_from(signature.steps.len()).map_err(too_large)?),
             first_subsignature: U32::new(
                 u32::try_from(self.subsignatures.len()).map_err(too_large)?,
@@ -441,6 +454,7 @@ pub struct SubsignatureRecord {
 #[derive(Debug, Clone, Copy)]
 pub struct LogicalSignatureRecord<'m> {
     pub name: NameId,
+    pub outcome: LogicalOutcome,
     pub category: Category,
     pub first_subsignature: u32,
     pub subsignature_count: u32,
@@ -561,8 +575,16 @@ impl<'m> LogicalGroup<'m> {
             CATEGORY_POTENTIALLY_UNWANTED => Category::PotentiallyUnwanted,
             _ => return Err(malformed),
         };
+        let program = SignatureProgramId(entry.program.get());
+        let outcome = match entry.outcome {
+            OUTCOME_DETECTION => LogicalOutcome::Detection,
+            OUTCOME_RUN_PROGRAM => LogicalOutcome::RunProgram(program),
+            OUTCOME_HOOK_TRIGGERED => LogicalOutcome::HookTriggered(program),
+            _ => return Err(malformed),
+        };
         Ok(LogicalSignatureRecord {
             name: NameId(entry.name.get()),
+            outcome,
             category,
             first_subsignature: entry.first_subsignature.get(),
             subsignature_count: entry.subsignature_count.get(),

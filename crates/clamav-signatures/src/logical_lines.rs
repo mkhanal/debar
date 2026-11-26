@@ -18,7 +18,7 @@ use crate::logical_expression::{MalformedExpression, parse_expression};
 use crate::regular_expression_subsignatures::{
     MalformedRegularExpressionSubsignature, ReadRegularExpression, read_regular_expression,
 };
-use crate::regular_expression_syntax::BacktrackingConstruct;
+use crate::regular_expression_syntax::UnsupportedConstruct;
 use crate::type_names::{NamedType, type_named};
 
 const FIELD_SEPARATOR: u8 = b';';
@@ -163,6 +163,7 @@ impl fmt::Display for MalformedLogicalLine {
 pub enum SubsignatureNotYetCompiled {
     Macro,
     ClassAtAnInnerPartEdge,
+    RegularExpression(UnsupportedConstruct),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,16 +194,41 @@ pub enum ReadLogicalLine<'a> {
         reason: SubsignatureNotYetCompiled,
         loaded: LoadedContent,
     },
-    NeedsBacktrackingEngine {
-        construct: BacktrackingConstruct,
-        loaded: LoadedContent,
-    },
     Signature(LogicalLine<'a>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubsignatureCount {
+    AsTheExpressionNames,
+    AtLeastTheExpressionNames,
 }
 
 pub fn read_line<'a>(
     line_without_ending: &'a [u8],
     ignored: &IgnoreList,
+) -> Result<ReadLogicalLine<'a>, MalformedLogicalLine> {
+    read_logical_line(
+        line_without_ending,
+        ignored,
+        SubsignatureCount::AsTheExpressionNames,
+    )
+}
+
+pub fn read_program_trigger<'a>(
+    line_without_ending: &'a [u8],
+    ignored: &IgnoreList,
+) -> Result<ReadLogicalLine<'a>, MalformedLogicalLine> {
+    read_logical_line(
+        line_without_ending,
+        ignored,
+        SubsignatureCount::AtLeastTheExpressionNames,
+    )
+}
+
+fn read_logical_line<'a>(
+    line_without_ending: &'a [u8],
+    ignored: &IgnoreList,
+    counting: SubsignatureCount,
 ) -> Result<ReadLogicalLine<'a>, MalformedLogicalLine> {
     if line_without_ending.len() > LONGEST_LINE {
         return Err(MalformedLogicalLine::TooLong);
@@ -230,7 +256,11 @@ pub fn read_line<'a>(
     let named = usize::try_from(parsed.highest_index)
         .unwrap_or(usize::MAX)
         .saturating_add(1);
-    if named != subsignature_fields.len() {
+    let disagrees = match counting {
+        SubsignatureCount::AsTheExpressionNames => named != subsignature_fields.len(),
+        SubsignatureCount::AtLeastTheExpressionNames => named > subsignature_fields.len(),
+    };
+    if disagrees {
         return Err(MalformedLogicalLine::SubsignatureCountDisagrees {
             named,
             given: subsignature_fields.len(),
@@ -273,9 +303,6 @@ pub fn read_line<'a>(
     if let Some(reason) = read.not_yet_compiled {
         return Ok(ReadLogicalLine::NotYetCompiled { reason, loaded });
     }
-    if let Some(construct) = read.needs_backtracking {
-        return Ok(ReadLogicalLine::NeedsBacktrackingEngine { construct, loaded });
-    }
     let (subsignatures, longest_part) = (read.subsignatures, read.longest_part);
     Ok(ReadLogicalLine::Signature(LogicalLine {
         target,
@@ -292,7 +319,6 @@ pub fn read_line<'a>(
 struct ReadSubsignatures {
     subsignatures: Vec<Subsignature>,
     not_yet_compiled: Option<SubsignatureNotYetCompiled>,
-    needs_backtracking: Option<BacktrackingConstruct>,
     longest_part: u32,
 }
 
@@ -318,9 +344,6 @@ fn read_subsignatures(
             } => {
                 read.longest_part = read.longest_part.max(longest_part);
                 read.not_yet_compiled = read.not_yet_compiled.or(Some(reason));
-            }
-            ReadSubsignature::NeedsBacktracking(construct) => {
-                read.needs_backtracking = read.needs_backtracking.or(Some(construct));
             }
         }
     }
@@ -510,7 +533,6 @@ enum ReadSubsignature {
         reason: SubsignatureNotYetCompiled,
         longest_part: u32,
     },
-    NeedsBacktracking(BacktrackingConstruct),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -581,8 +603,11 @@ fn read_subsignature(
                 ReadRegularExpression::Compiled(expression) => {
                     Ok(compiled(Subsignature::RegularExpression(expression)))
                 }
-                ReadRegularExpression::NeedsBacktracking(construct) => {
-                    Ok(ReadSubsignature::NeedsBacktracking(construct))
+                ReadRegularExpression::Unsupported(construct) => {
+                    Ok(ReadSubsignature::NotYetCompiled {
+                        reason: SubsignatureNotYetCompiled::RegularExpression(construct),
+                        longest_part: 0,
+                    })
                 }
             };
         }

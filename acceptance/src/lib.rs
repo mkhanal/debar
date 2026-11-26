@@ -114,6 +114,10 @@ pub fn compile(databases: &Path, into: &Path, name: &str) -> Outcome<CompiledIma
 }
 
 pub fn official_image() -> Outcome<CompiledImage> {
+    static COMPILING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = COMPILING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let compiler = fs::read(&release_binaries()?.compiler)?;
     let directory = target_directory().join("acceptance").join(format!(
         "official-{}",

@@ -1,6 +1,7 @@
 #![no_main]
 
 use debar_image::{
+    LogicalOutcome,
     Category, ContentSubsignature, Subsignature, CountComparison, CountTest, Expression, Image, ImageBuilder,
     Indicator, KindDescription, LogicalConditions, LogicalSignature, MaskedByte, ObjectKind,
     OwnBytes, Pattern, PatternElement, Placement, RecognitionRank, SignatureGroup,
@@ -102,6 +103,7 @@ fn image(choices: &mut Choices<'_>) -> Option<Vec<u8>> {
         let expression = expression(choices, 0);
         builder
             .add_logical_signature(&LogicalSignature {
+                outcome: LogicalOutcome::Detection,
                 group: GENERIC,
                 category: Category::Malware,
                 name,

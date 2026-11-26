@@ -73,7 +73,7 @@ Test.Compiled;Engine:51-255,Target:0;0&1;41424344;45464748::i
             LineOutcome::NotLoaded,
             LineOutcome::NotLoaded,
             LineOutcome::Compiled,
-            LineOutcome::NeedsBacktrackingEngine,
+            LineOutcome::Compiled,
             LineOutcome::NotYetCompiled,
             LineOutcome::Compiled,
         ]

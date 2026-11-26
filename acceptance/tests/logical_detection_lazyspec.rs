@@ -360,3 +360,56 @@ fn a_byte_comparison_holds_when_the_bytes_after_its_subsignatures_last_match_com
     assert!(!found(b"AMARK.....", "Test.Back"), "{REQUIREMENT}");
     assert!(!found(b"......MARK\x02", "Test.Binary"), "{REQUIREMENT}");
 }
+
+const BACKTRACKING_EXPRESSIONS: &str = "\
+Test.Numbered;Target:0;0&1;4d41524b;0/var (\\w+)=\\1;/
+Test.Named;Target:0;0&1;4d41524b;0/(?P<f>\\w+)\\(\\).{0,20}?(?P=f)\\(\\)/
+Test.Ahead;Target:0;0&1;4d41524b;0/load(?!ed)/
+Test.Behind;Target:0;0&1;4d41524b;0/(?<!\\w)inject\\w+\\.java/
+Test.Atomic;Target:0;0&1;4d41524b;0/\\[(?>a+)ab\\]/
+Test.Exhausting;Target:0;0&1;4d41524b;0/(a+)+\\1b/
+";
+
+#[test]
+fn a_logical_signature_whose_regular_expression_holds_a_backreference_or_lookaround_is_detected_when_it_matches()
+ {
+    const REQUIREMENT: &str = "A Logical Signature Whose Regular Expression Holds A Backreference Or Lookaround Is Detected When It Matches";
+    let (directory, compiled) =
+        loose_databases("backtracking", &[("local.ldb", BACKTRACKING_EXPRESSIONS)]);
+    let scan = |contents: &[u8]| scanned(&directory, &compiled.image, &[], contents);
+    let found =
+        |contents: &[u8], name: &str| scan(contents).contains(&format!("{name}.UNOFFICIAL"));
+
+    assert!(
+        found(b"MARK var abc=abc;", "Test.Numbered"),
+        "{REQUIREMENT}"
+    );
+    assert!(
+        !found(b"MARK var abc=abd;", "Test.Numbered"),
+        "{REQUIREMENT}"
+    );
+    assert!(
+        found(b"MARK run() then run()", "Test.Named"),
+        "{REQUIREMENT}"
+    );
+    assert!(
+        !found(b"MARK run() then walk()", "Test.Named"),
+        "{REQUIREMENT}"
+    );
+    assert!(found(b"MARK loader", "Test.Ahead"), "{REQUIREMENT}");
+    assert!(!found(b"MARK loaded", "Test.Ahead"), "{REQUIREMENT}");
+    assert!(
+        found(b"MARK injectAll.java", "Test.Behind"),
+        "{REQUIREMENT}"
+    );
+    assert!(
+        !found(b"MARK reinjectAll.java", "Test.Behind"),
+        "{REQUIREMENT}"
+    );
+    assert!(!found(b"MARK [aaab]", "Test.Atomic"), "{REQUIREMENT}");
+    let mut exhausting = b"MARK ".to_vec();
+    exhausting.extend([b'a'; 25]);
+    exhausting.extend_from_slice(b"c ab");
+    assert!(found(b"MARK aaab", "Test.Exhausting"), "{REQUIREMENT}");
+    assert!(!found(&exhausting, "Test.Exhausting"), "{REQUIREMENT}");
+}

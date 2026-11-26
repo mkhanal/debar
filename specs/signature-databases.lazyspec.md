@@ -8,9 +8,13 @@
 
 What becomes of the databases a user loads: every line accounted for, and the image they compile to.
 
+## Every Line Of Every Pinned Database File Is Accounted For And None Is Left Uncompiled
+
+- Compiling the pinned databases accounts for every line of every file in them, file by file, with one outcome per line.
+- No line of any kind of file is left not yet compiled.
+
 ## Every Hash Signature Line In The Pinned Databases Is Accounted For In The Image
 
-- Compiling the pinned databases accounts for every line of every file in them, file by file.
 - Each hash signature line is compiled, left out because its functionality-level range excludes the reference scanner's level, dropped by an ignore list, or shadowed by a line with the same hash and size whose name is reported instead. None is unsupported.
 - The image holds one entry for each compiled hash signature line.
 
@@ -38,10 +42,8 @@ What becomes of the databases a user loads: every line accounted for, and the im
 
 ## Every Logical Signature Line In The Pinned Databases Is Accounted For In The Image
 
-- Every logical signature line has one outcome: compiled, outside the functionality level, ignored, a comment, its target not loaded, not loaded for an unknown attribute or type, needing a backtracking regular-expression engine, or not yet compiled.
-- A line needs a backtracking engine only when one of its regular expressions holds a backreference, a lookaround or an atomic group.
-- A line is not yet compiled only when it holds a macro subsignature.
-- Every other loaded line is compiled, its regular-expression, byte-comparison and image fuzzy hash subsignatures included.
+- Every logical signature line has one outcome: compiled, outside the functionality level, ignored, a comment, its target not loaded, or not loaded for an unknown attribute or type.
+- Every loaded line is compiled, its regular-expression, byte-comparison and image fuzzy hash subsignatures included, and regular expressions with backreferences, lookaround or atomic groups among them.
 - The image holds one logical signature for each compiled line.
 
 ## A Malformed Logical Signature Line Fails The Compile
@@ -58,4 +60,37 @@ What becomes of the databases a user loads: every line accounted for, and the im
 ## A Malformed Container Signature Line Fails The Compile
 
 - A line with fewer than 10 or more than 12 fields, an unknown container type, a malformed size, position, encrypted flag, functionality level or entry name expression fails the compile, naming the file and line.
+- No image is written.
+
+## Every Certificate Rule, Icon Signature And URL Rule In The Pinned Databases Is Compiled Into The Image
+
+- All 30 certificate rules compile, 8 trusting and 22 blocking a certificate.
+- All 222 icon signatures compile, into 22 groups of the first kind and 19 of the second.
+- All 263 monitored and 185 allowed URL rules compile.
+- The image holds one entry for each compiled line.
+
+## Every Engine Switch In The Pinned Databases Is Evaluated At The Functionality Level
+
+- A switch line takes effect only when the functionality level lies within its range.
+- None of the 21 pinned switch lines takes effect, so the image records every engine feature at its default.
+
+## Every Signature Program In The Pinned Databases Is Verified And Compiled Into The Image
+
+- The 82 programs whose level range holds the functionality level pass every load-time check and compile; the other 3 are left out.
+- A program's trigger compiles as a logical signature that triggers the program instead of reporting a detection.
+- Each program records whether it came from a signed container.
+
+## Every Pinned Database Is Verified By Its Digital Signature
+
+- Each pinned database is recorded as verified by its detached signature.
+- Each member it loads matches the size and SHA-256 its signed index lists.
+
+## A Database Whose Digital Signature Does Not Verify Is Refused
+
+- A signed container changed after signing fails the compile, naming the file, whether or not its detached signature is beside it.
+- No image is written.
+
+## A Malformed Certificate, Icon, URL-Rule Or Switch Line, Or A Malformed Signature Program, Fails The Compile
+
+- The compile fails, naming the file and, for a line, its number.
 - No image is written.

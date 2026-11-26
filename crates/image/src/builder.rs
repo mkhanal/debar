@@ -6,8 +6,11 @@ use zerocopy::IntoBytes;
 use zerocopy::little_endian::{U32, U64};
 
 use crate::byte_rarity::rarity_of;
+use crate::certificate_rules::{self, CertificateRule};
 use crate::container_signatures::{self, ContainerSignaturesNotBuilt, PendingContainerSignature};
+use crate::engine_features::{self, EngineFeature};
 use crate::hash_partition::{self, PartitionKey, PartitionNotBuilt, PendingEntry};
+use crate::icon_signatures::{self, IconGroups};
 use crate::layout::{
     BYTE_ORDER_MARK, CHECKSUM_LENGTH, DATABASE_NAME_LENGTH, DatabaseEntry, DirectoryEntry, Header,
     LAYOUT_VERSION, MAGIC, SECTION_ALIGNMENT, SectionKind,
@@ -19,11 +22,12 @@ use crate::logical_group::{
     self, LogicalGroupNotBuilt, LogicalSignatureId, MatchingPass, PendingLogicalSignature,
     PendingSubsignature,
 };
+use crate::model::SignatureProgramId;
 use crate::model::{
     Category, ContainerSignature, DatabaseRecord, Digest, Expression, HashSignature, HashedSize,
-    Indicator, LogicalConditions, LogicalSignature, PartMemory, PatternOutcome, PatternSignature,
-    Placement, Provenance, ReportWindows, SignatureGroup, Subsignature, TypeFinding,
-    UnwantedCategory,
+    Indicator, LogicalConditions, LogicalOutcome, LogicalSignature, PartMemory, PatternOutcome,
+    PatternSignature, Placement, Provenance, ReportWindows, SignatureGroup, Subsignature,
+    TypeFinding, UnwantedCategory,
 };
 use crate::names::{self, NameId};
 use crate::object_kind::ObjectKind;
@@ -36,8 +40,10 @@ use crate::plug_in_subsignatures::{
     self, PendingComparison, PendingExpression, PendingImageHash, PendingPlugIns, PlugInsNotBuilt,
 };
 use crate::selection_filters::{self, GroupAnchors};
+use crate::signature_programs::{self, SignatureProgram};
 use crate::type_magic::{self, MagicTable, PendingMagic};
 use crate::unwanted_categories;
+use crate::url_rules::{self, UrlRule, UrlRulesNotBuilt};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum BuildError {
@@ -73,6 +79,8 @@ pub enum BuildError {
         reason: PlugInsNotBuilt,
     },
     ContainerSignatures(ContainerSignaturesNotBuilt),
+    CarriedSection(SectionKind),
+    UrlRules(UrlRulesNotBuilt),
     ObjectKinds(KindsNotBuilt),
     TypeMagicTooLarge,
     UnwantedCategories,
@@ -124,6 +132,8 @@ impl fmt::Display for BuildError {
                 "cannot build the regular expressions, byte comparisons and image hashes of group {}: {reason:?}",
                 group.0
             ),
+            Self::CarriedSection(kind) => write!(formatter, "the {kind:?} section is too large"),
+            Self::UrlRules(reason) => write!(formatter, "cannot build the URL rules: {reason:?}"),
             Self::ContainerSignatures(reason) => {
                 write!(
                     formatter,
@@ -185,6 +195,11 @@ pub struct ImageBuilder {
     magic: Vec<PendingMagic>,
     unwanted_categories: BTreeMap<String, Option<String>>,
     containers: Vec<PendingContainer>,
+    engine_features: Option<Vec<EngineFeature>>,
+    certificate_rules: Vec<CertificateRule>,
+    icon_groups: Option<IconGroups>,
+    url_rules: Vec<UrlRule>,
+    programs: Vec<SignatureProgram>,
 }
 
 struct PendingContainer {
@@ -232,6 +247,7 @@ struct PendingPattern {
 
 struct PendingLogical {
     name: u32,
+    outcome: LogicalOutcome,
     category: Category,
     steps: Vec<crate::logical_expression::ExpressionStep>,
     subsignatures: Vec<PendingSubsignature>,
@@ -417,6 +433,7 @@ impl ImageBuilder {
         }
         group.logical.push(PendingLogical {
             name,
+            outcome: signature.outcome,
             category: signature.category,
             steps,
             subsignatures,
@@ -424,6 +441,31 @@ impl ImageBuilder {
             holds_with_no_matches: holds_without_matches,
         });
         Ok(())
+    }
+
+    pub fn set_engine_features(&mut self, enabled: &[EngineFeature]) {
+        self.engine_features = Some(enabled.to_vec());
+    }
+
+    pub fn add_certificate_rule(&mut self, rule: CertificateRule) {
+        self.certificate_rules.push(rule);
+    }
+
+    pub fn set_icon_groups(&mut self, groups: IconGroups) {
+        self.icon_groups = Some(groups);
+    }
+
+    pub fn add_url_rule(&mut self, rule: UrlRule) {
+        self.url_rules.push(rule);
+    }
+
+    pub fn add_signature_program(
+        &mut self,
+        program: SignatureProgram,
+    ) -> Result<SignatureProgramId, BuildError> {
+        let id = u32::try_from(self.programs.len()).map_err(|_| BuildError::TooManySignatures)?;
+        self.programs.push(program);
+        Ok(SignatureProgramId(id))
     }
 
     pub fn add_container_signature(
@@ -614,6 +656,11 @@ impl ImageBuilder {
             magic,
             unwanted_categories,
             containers,
+            engine_features,
+            certificate_rules,
+            icon_groups,
+            url_rules,
+            programs,
         } = self;
         let (sorted_names, name_ids) = distinct_sorted_names(&name_text, &name_spans)?;
         let categories_section = categories_section(&unwanted_categories, &sorted_names)?;
@@ -643,6 +690,13 @@ impl ImageBuilder {
         sections.extend(pattern_sections);
         sections.extend(logical_sections);
         sections.extend(containers_section);
+        sections.extend(carried_sections(
+            engine_features,
+            &certificate_rules,
+            icon_groups.as_ref(),
+            &url_rules,
+            &programs,
+        )?);
         sections.extend(categories_section);
         sections.extend(hash_sections);
         sections.push(Section {
@@ -747,6 +801,69 @@ fn add_plug_in(
         }),
         Subsignature::Content(_) => {}
     }
+}
+
+fn carried_section(
+    kind: SectionKind,
+    item_count: usize,
+    bytes: Vec<u8>,
+) -> Result<Section, BuildError> {
+    Ok(Section {
+        kind,
+        qualifier: 0,
+        item_count: u64::try_from(item_count).map_err(|_| BuildError::CarriedSection(kind))?,
+        bytes,
+    })
+}
+
+fn carried_sections(
+    engine_features: Option<Vec<EngineFeature>>,
+    certificate_rules: &[CertificateRule],
+    icon_groups: Option<&IconGroups>,
+    url_rules: &[UrlRule],
+    programs: &[SignatureProgram],
+) -> Result<Vec<Section>, BuildError> {
+    let mut sections = Vec::new();
+    if let Some(enabled) = engine_features {
+        sections.push(carried_section(
+            SectionKind::EngineFeatures,
+            enabled.len(),
+            engine_features::build(&enabled),
+        )?);
+    }
+    if !certificate_rules.is_empty() {
+        let kind = SectionKind::CertificateRules;
+        sections.push(carried_section(
+            kind,
+            certificate_rules.len(),
+            certificate_rules::build(certificate_rules)
+                .map_err(|_| BuildError::CarriedSection(kind))?,
+        )?);
+    }
+    if let Some(groups) = icon_groups {
+        let kind = SectionKind::IconSignatures;
+        sections.push(carried_section(
+            kind,
+            groups.signatures.len(),
+            icon_signatures::build(groups).map_err(|_| BuildError::CarriedSection(kind))?,
+        )?);
+    }
+    if !url_rules.is_empty() {
+        sections.push(carried_section(
+            SectionKind::UrlRules,
+            url_rules.len(),
+            url_rules::build(url_rules).map_err(BuildError::UrlRules)?,
+        )?);
+    }
+    if !programs.is_empty() {
+        let kind = SectionKind::SignaturePrograms;
+        sections.push(carried_section(
+            kind,
+            programs.len(),
+            signature_programs::build(programs).map_err(|_| BuildError::CarriedSection(kind))?,
+        )?);
+    }
+    Ok(sections)
 }
 
 fn containers_section(
@@ -979,6 +1096,7 @@ fn logical_section(
         .map(|logical| {
             Ok(PendingLogicalSignature {
                 name: name_id(name_ids, logical.name)?,
+                outcome: logical.outcome,
                 category: logical.category,
                 steps: logical.steps,
                 subsignatures: logical.subsignatures,
@@ -1064,8 +1182,10 @@ fn databases_section(databases: &[DatabaseRecord]) -> Result<Section, BuildError
 #[must_use]
 pub(crate) const fn provenance_code(provenance: Provenance) -> u32 {
     match provenance {
-        Provenance::SignedContainerNotYetVerified => 1,
-        Provenance::UnsignedFile => 2,
+        Provenance::DetachedSignatureVerified => 1,
+        Provenance::HeaderSignatureVerified => 2,
+        Provenance::IndexSignatureVerified => 3,
+        Provenance::UnsignedContainer => 4,
     }
 }
 

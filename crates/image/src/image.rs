@@ -5,8 +5,11 @@ use sha2::{Digest as _, Sha256};
 use zerocopy::FromBytes;
 
 use crate::builder::provenance_code;
+use crate::certificate_rules::CertificateRules;
 use crate::container_signatures::ContainerSignatures;
+use crate::engine_features::EngineFeatures;
 use crate::hash_partition::{HashPartition, PartitionKey, PartitionMalformed};
+use crate::icon_signatures::{self, IconGroups};
 use crate::layout::{
     BYTE_ORDER_MARK, CHECKSUM_LENGTH, DatabaseEntry, DirectoryEntry, Header, LAYOUT_VERSION, MAGIC,
     SECTION_ALIGNMENT, SectionKind,
@@ -19,8 +22,10 @@ use crate::object_kinds::{KindsMalformed, ObjectKinds};
 use crate::pattern_group::{GroupMalformed, PatternGroup};
 use crate::plug_in_subsignatures::{PlugInSubsignatures, PlugInsMalformed};
 use crate::selection_filters::{self, FiltersMalformed, SelectionFilter};
+use crate::signature_programs::SignaturePrograms;
 use crate::type_magic::{MagicMalformed, TypeMagic};
 use crate::unwanted_categories::{CategoriesMalformed, UnwantedCategories};
+use crate::url_rules::UrlRules;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ImageError {
@@ -76,6 +81,7 @@ pub enum ImageError {
         reason: PlugInsMalformed,
     },
     ContainerSignaturesMalformed,
+    CarriedSectionMalformed(SectionKind),
 }
 
 impl fmt::Display for ImageError {
@@ -86,6 +92,9 @@ impl fmt::Display for ImageError {
                 "the regular expressions, byte comparisons or image hashes of group {} are malformed: {reason:?}",
                 group.0
             ),
+            Self::CarriedSectionMalformed(kind) => {
+                write!(formatter, "the {kind:?} section is malformed")
+            }
             Self::ContainerSignaturesMalformed => {
                 write!(formatter, "the container signatures are malformed")
             }
@@ -236,13 +245,10 @@ impl<'m> Image<'m> {
                     .get(..name_length)
                     .and_then(|name| std::str::from_utf8(name).ok())
                     .ok_or(ImageError::DatabasesMalformed)?;
-                let provenance = [
-                    Provenance::SignedContainerNotYetVerified,
-                    Provenance::UnsignedFile,
-                ]
-                .into_iter()
-                .find(|known| provenance_code(*known) == entry.provenance.get())
-                .ok_or(ImageError::DatabasesMalformed)?;
+                let provenance = Provenance::ALL
+                    .into_iter()
+                    .find(|known| provenance_code(*known) == entry.provenance.get())
+                    .ok_or(ImageError::DatabasesMalformed)?;
                 Ok(DatabaseRecord {
                     name: name.to_owned(),
                     version: entry.version.get(),
@@ -304,6 +310,46 @@ impl<'m> Image<'m> {
             .map(ContainerSignatures::read)
             .transpose()
             .map_err(|_| ImageError::ContainerSignaturesMalformed)
+    }
+
+    pub fn engine_features(&self) -> Result<Option<EngineFeatures<'m>>, ImageError> {
+        let kind = SectionKind::EngineFeatures;
+        self.optional_section_bytes(kind, 0)
+            .map(EngineFeatures::read)
+            .transpose()
+            .map_err(|_| ImageError::CarriedSectionMalformed(kind))
+    }
+
+    pub fn certificate_rules(&self) -> Result<Option<CertificateRules<'m>>, ImageError> {
+        let kind = SectionKind::CertificateRules;
+        self.optional_section_bytes(kind, 0)
+            .map(CertificateRules::read)
+            .transpose()
+            .map_err(|_| ImageError::CarriedSectionMalformed(kind))
+    }
+
+    pub fn icon_groups(&self) -> Result<Option<IconGroups>, ImageError> {
+        let kind = SectionKind::IconSignatures;
+        self.optional_section_bytes(kind, 0)
+            .map(icon_signatures::read)
+            .transpose()
+            .map_err(|_| ImageError::CarriedSectionMalformed(kind))
+    }
+
+    pub fn url_rules(&self) -> Result<Option<UrlRules<'m>>, ImageError> {
+        let kind = SectionKind::UrlRules;
+        self.optional_section_bytes(kind, 0)
+            .map(UrlRules::read)
+            .transpose()
+            .map_err(|_| ImageError::CarriedSectionMalformed(kind))
+    }
+
+    pub fn signature_programs(&self) -> Result<Option<SignaturePrograms<'m>>, ImageError> {
+        let kind = SectionKind::SignaturePrograms;
+        self.optional_section_bytes(kind, 0)
+            .map(SignaturePrograms::read)
+            .transpose()
+            .map_err(|_| ImageError::CarriedSectionMalformed(kind))
     }
 
     pub fn object_kinds(&self) -> Result<Option<ObjectKinds<'m>>, ImageError> {
