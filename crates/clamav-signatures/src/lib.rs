@@ -8,6 +8,7 @@ mod hash_duplicates;
 mod hash_lines;
 mod ignore_list;
 mod line_text;
+mod logical_expression;
 mod logical_lines;
 mod numbers;
 mod type_names;
@@ -19,5 +20,7 @@ pub use database_files::{DatabaseError, DatabaseFile, compile};
 pub use extended_lines::MalformedExtendedLine;
 pub use file_type_lines::MalformedFileTypeLine;
 pub use hash_lines::MalformedLine;
+pub use logical_expression::MalformedExpression;
+pub use logical_lines::{MalformedLogicalLine, MalformedSubsignature};
 
 pub const FUNCTIONALITY_LEVEL: i64 = 234;

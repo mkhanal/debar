@@ -40,16 +40,39 @@ pub struct Displacement {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorCase {
+    Exact,
+    Folded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Anchor {
     Long {
         bytes: [u8; LONG_ANCHOR_LENGTH],
+        case: AnchorCase,
         displacement: Displacement,
     },
     Short {
         bytes: [u8; SHORT_ANCHOR_LENGTH],
+        case: AnchorCase,
         displacement: Displacement,
     },
     Everywhere,
+}
+
+const CASE_BIT: u8 = 0x20;
+const FOLDED_LETTER_MASK: u8 = !CASE_BIT;
+
+#[must_use]
+pub fn folded_letter(byte: MaskedByte) -> Option<u8> {
+    let upper = byte.value & FOLDED_LETTER_MASK;
+    (byte.mask == FOLDED_LETTER_MASK && upper.is_ascii_uppercase())
+        .then_some(upper.to_ascii_lowercase())
+}
+
+#[must_use]
+pub fn ascii_lowercase<const LENGTH: usize>(window: [u8; LENGTH]) -> [u8; LENGTH] {
+    window.map(|byte| byte.to_ascii_lowercase())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,6 +243,7 @@ fn step_span(step: &Step) -> Result<(u32, u32), PatternNotCompiled> {
 struct AnchorCandidate {
     score: u32,
     bytes: Vec<u8>,
+    case: AnchorCase,
     displacement: Displacement,
 }
 
@@ -229,6 +253,7 @@ fn anchor_of(steps: &[Step]) -> Anchor {
     {
         return Anchor::Long {
             bytes,
+            case: best.case,
             displacement: best.displacement,
         };
     }
@@ -237,11 +262,21 @@ fn anchor_of(steps: &[Step]) -> Anchor {
     {
         return Anchor::Short {
             bytes,
+            case: best.case,
             displacement: best.displacement,
         };
     }
     Anchor::Everywhere
 }
+
+fn anchor_byte(byte: MaskedByte) -> Option<(u8, AnchorCase)> {
+    if byte.is_exact() {
+        return Some((byte.value, AnchorCase::Exact));
+    }
+    folded_letter(byte).map(|lower| (lower, AnchorCase::Folded))
+}
+
+const FOLDED_BYTE_PENALTY: u32 = 16;
 
 fn best_window(steps: &[Step], window_length: usize) -> Option<AnchorCandidate> {
     let mut nearest: u32 = 0;
@@ -250,24 +285,49 @@ fn best_window(steps: &[Step], window_length: usize) -> Option<AnchorCandidate> 
     for step in steps {
         if let Step::Bytes(run) = step {
             for (start, window) in run.windows(window_length).enumerate() {
-                if !window.iter().all(|byte| byte.is_exact()) {
+                let Some(anchored) = window
+                    .iter()
+                    .map(|byte| anchor_byte(*byte))
+                    .collect::<Option<Vec<(u8, AnchorCase)>>>()
+                else {
                     continue;
-                }
+                };
                 let Ok(start) = u32::try_from(start) else {
                     continue;
                 };
-                let bytes: Vec<u8> = window.iter().map(|byte| byte.value).collect();
+                let folded_bytes = anchored
+                    .iter()
+                    .filter(|(_, case)| *case == AnchorCase::Folded)
+                    .count();
+                let case = if folded_bytes == 0 {
+                    AnchorCase::Exact
+                } else {
+                    AnchorCase::Folded
+                };
+                let bytes: Vec<u8> = anchored
+                    .iter()
+                    .map(|(byte, _)| match case {
+                        AnchorCase::Exact => *byte,
+                        AnchorCase::Folded => byte.to_ascii_lowercase(),
+                    })
+                    .collect();
                 let displacement = Displacement {
                     nearest: nearest.saturating_add(start),
                     farthest: farthest.saturating_add(start),
                 };
-                let score = rarity_of(&bytes).saturating_sub(spread_penalty(
-                    displacement.farthest.saturating_sub(displacement.nearest),
-                ));
+                let score = rarity_of(&bytes)
+                    .saturating_sub(spread_penalty(
+                        displacement.farthest.saturating_sub(displacement.nearest),
+                    ))
+                    .saturating_sub(
+                        FOLDED_BYTE_PENALTY
+                            .saturating_mul(u32::try_from(folded_bytes).unwrap_or(u32::MAX)),
+                    );
                 if best.as_ref().is_none_or(|best| score > best.score) {
                     best = Some(AnchorCandidate {
                         score,
                         bytes,
+                        case,
                         displacement,
                     });
                 }
@@ -292,11 +352,80 @@ pub struct ProgramHeader {
     pub longest: U32,
     pub step_count: U32,
     pub context_flags: U32,
+    pub after_reach: U32,
+    pub anchor: [u8; LONG_ANCHOR_LENGTH],
+    pub anchor_length: u8,
+    pub anchor_case: u8,
+    pub reserved: [u8; 2],
+    pub anchor_nearest: U32,
+    pub anchor_farthest: U32,
+}
+
+impl ProgramHeader {
+    #[must_use]
+    pub fn is_armed_by_predecessor(&self) -> bool {
+        self.context_flags.get() & ARMED_BY_PREDECESSOR != 0
+    }
+
+    #[must_use]
+    pub fn anchor(&self) -> ProgramAnchor {
+        let short = <[u8; SHORT_ANCHOR_LENGTH]>::try_from(
+            self.anchor.get(..SHORT_ANCHOR_LENGTH).unwrap_or_default(),
+        )
+        .ok();
+        ProgramAnchor {
+            bytes: match (usize::from(self.anchor_length), short) {
+                (LONG_ANCHOR_LENGTH, _) => AnchorBytes::Long(self.anchor),
+                (SHORT_ANCHOR_LENGTH, Some(bytes)) => AnchorBytes::Short(bytes),
+                _ => AnchorBytes::None,
+            },
+            case: if self.anchor_case == CASE_FOLDED {
+                AnchorCase::Folded
+            } else {
+                AnchorCase::Exact
+            },
+            displacement: Displacement {
+                nearest: self.anchor_nearest.get(),
+                farthest: self.anchor_farthest.get(),
+            },
+        }
+    }
 }
 
 const HAS_BEFORE: u32 = 1;
 const HAS_AFTER: u32 = 2;
 const HAS_GAP_MOST: u32 = 4;
+const ARMED_BY_PREDECESSOR: u32 = 8;
+const CASE_EXACT: u8 = 0;
+const CASE_FOLDED: u8 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorBytes {
+    Long([u8; LONG_ANCHOR_LENGTH]),
+    Short([u8; SHORT_ANCHOR_LENGTH]),
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgramAnchor {
+    pub bytes: AnchorBytes,
+    pub case: AnchorCase,
+    pub displacement: Displacement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArmedAnchor {
+    pub bytes: Option<[u8; SHORT_ANCHOR_LENGTH]>,
+    pub case: AnchorCase,
+    pub displacement: Displacement,
+}
+
+impl Segment {
+    #[must_use]
+    pub fn is_armed_by_predecessor(&self, segment_index: u32) -> bool {
+        segment_index > 0 && matches!(self.anchor, Anchor::Short { .. } | Anchor::Everywhere)
+    }
+}
 const TAG_BYTES: u8 = 1;
 const TAG_ONE_OF: u8 = 2;
 const TAG_GAP: u8 = 3;
@@ -311,6 +440,38 @@ pub struct ProgramPlace {
 
 pub fn encode(segment: &Segment, place: &ProgramPlace) -> Result<Vec<u8>, PatternNotCompiled> {
     let mut context_flags = 0;
+    if segment.is_armed_by_predecessor(place.segment) {
+        context_flags |= ARMED_BY_PREDECESSOR;
+    }
+    let mut anchor = [0u8; LONG_ANCHOR_LENGTH];
+    let (anchor_length, anchor_case, displacement) = match segment.anchor {
+        Anchor::Long {
+            bytes,
+            case,
+            displacement,
+        } => {
+            anchor = bytes;
+            (LONG_ANCHOR_LENGTH, case, displacement)
+        }
+        Anchor::Short {
+            bytes,
+            case,
+            displacement,
+        } => {
+            for (slot, byte) in anchor.iter_mut().zip(bytes) {
+                *slot = byte;
+            }
+            (SHORT_ANCHOR_LENGTH, case, displacement)
+        }
+        Anchor::Everywhere => (
+            0,
+            AnchorCase::Exact,
+            Displacement {
+                nearest: 0,
+                farthest: 0,
+            },
+        ),
+    };
     if segment.before.is_some() {
         context_flags |= HAS_BEFORE;
     }
@@ -332,6 +493,17 @@ pub fn encode(segment: &Segment, place: &ProgramPlace) -> Result<Vec<u8>, Patter
             u32::try_from(segment.steps.len()).map_err(|_| PatternNotCompiled::ElementTooLarge)?,
         ),
         context_flags: U32::new(context_flags),
+        after_reach: U32::new(context_reach(segment.after.as_ref())),
+        anchor,
+        anchor_length: u8::try_from(anchor_length)
+            .map_err(|_| PatternNotCompiled::ElementTooLarge)?,
+        anchor_case: match anchor_case {
+            AnchorCase::Exact => CASE_EXACT,
+            AnchorCase::Folded => CASE_FOLDED,
+        },
+        reserved: [0; 2],
+        anchor_nearest: U32::new(displacement.nearest),
+        anchor_farthest: U32::new(displacement.farthest),
     };
     let mut bytes = header.as_bytes().to_vec();
     for test in [&segment.before, &segment.after].into_iter().flatten() {
@@ -537,6 +709,22 @@ impl<'m> ProgramView<'m> {
             let step;
             (step, rest) = read_step(rest)?;
             Ok(step)
+        })
+    }
+
+    #[must_use]
+    pub fn armed_anchor(&self) -> Option<ArmedAnchor> {
+        if !self.header.is_armed_by_predecessor() {
+            return None;
+        }
+        let anchor = self.header.anchor();
+        Some(ArmedAnchor {
+            bytes: match anchor.bytes {
+                AnchorBytes::Short(bytes) => Some(bytes),
+                AnchorBytes::Long(_) | AnchorBytes::None => None,
+            },
+            case: anchor.case,
+            displacement: anchor.displacement,
         })
     }
 

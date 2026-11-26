@@ -4,10 +4,12 @@ use debar_image::{
 };
 
 use crate::digests::{DigestNeed, ObjectDigests};
+use crate::logical_state::UnwantedCategories;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct HashSettings {
+pub struct HashSettings<'s> {
     pub potentially_unwanted: bool,
+    pub unwanted_categories: UnwantedCategories<'s>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +27,7 @@ pub enum Trust {
 pub fn whole_object_digest_need(
     image: &Image<'_>,
     size: u64,
-    settings: HashSettings,
+    settings: HashSettings<'_>,
 ) -> Result<DigestNeed, ImageError> {
     let detection = partitions(image, HashPurpose::WholeObjectDetection, settings)?;
     if detection.is_empty() {
@@ -38,7 +40,7 @@ pub fn whole_object_digest_need(
 pub fn executable_section_digest_need(
     image: &Image<'_>,
     size: u64,
-    settings: HashSettings,
+    settings: HashSettings<'_>,
 ) -> Result<DigestNeed, ImageError> {
     let detection = partitions(image, HashPurpose::ExecutableSectionDetection, settings)?;
     Ok(need_at(size, detection.iter()))
@@ -48,7 +50,7 @@ pub fn whole_object_detections(
     image: &Image<'_>,
     size: u64,
     digests: &ObjectDigests,
-    settings: HashSettings,
+    settings: HashSettings<'_>,
 ) -> Result<Vec<HashDetection>, ImageError> {
     detections(
         image,
@@ -63,7 +65,7 @@ pub fn executable_section_detections(
     image: &Image<'_>,
     size: u64,
     digests: &ObjectDigests,
-    settings: HashSettings,
+    settings: HashSettings<'_>,
 ) -> Result<Vec<HashDetection>, ImageError> {
     detections(
         image,
@@ -95,13 +97,14 @@ pub fn whole_object_trust(
 
 struct LivePartition<'m> {
     algorithm: DigestAlgorithm,
+    category: Category,
     table: HashPartition<'m>,
 }
 
 fn partitions<'m>(
     image: &Image<'m>,
     purpose: HashPurpose,
-    settings: HashSettings,
+    settings: HashSettings<'_>,
 ) -> Result<Vec<LivePartition<'m>>, ImageError> {
     let mut live = Vec::new();
     for algorithm in DigestAlgorithm::ALL {
@@ -112,19 +115,23 @@ fn partitions<'m>(
                 algorithm,
             };
             if let Some(table) = image.hash_partition(key)? {
-                live.push(LivePartition { algorithm, table });
+                live.push(LivePartition {
+                    algorithm,
+                    category,
+                    table,
+                });
             }
         }
     }
     Ok(live)
 }
 
-fn live_categories(settings: HashSettings) -> Vec<Category> {
-    let mut categories = vec![Category::Malware];
+fn live_categories(settings: HashSettings<'_>) -> Vec<Category> {
     if settings.potentially_unwanted {
-        categories.push(Category::PotentiallyUnwanted);
+        vec![Category::PotentiallyUnwanted, Category::Malware]
+    } else {
+        vec![Category::Malware]
     }
-    categories
 }
 
 fn need_at<'p, 'm: 'p>(
@@ -160,7 +167,7 @@ fn detections(
     purpose: HashPurpose,
     size: u64,
     digests: &ObjectDigests,
-    settings: HashSettings,
+    settings: HashSettings<'_>,
 ) -> Result<Vec<HashDetection>, ImageError> {
     let live = partitions(image, purpose, settings)?;
     let exact_size = u32::try_from(size).ok();
@@ -181,19 +188,31 @@ fn detections(
             },
             reason,
         };
+        let admitted = |partition: &LivePartition<'_>, name| -> Result<bool, ImageError> {
+            if partition.category == Category::PotentiallyUnwanted {
+                settings.unwanted_categories.admit(image, name)
+            } else {
+                Ok(true)
+            }
+        };
         let mut at_exact_size = None;
         let mut at_any_size = None;
         for partition in &tables {
             if at_exact_size.is_none()
                 && let Some(size) = exact_size
-            {
-                at_exact_size = partition
+                && let Some(name) = partition
                     .table
                     .lookup_exact_size(size, digest)
-                    .map_err(malformed)?;
+                    .map_err(malformed)?
+                && admitted(partition, name)?
+            {
+                at_exact_size = Some(name);
             }
-            if at_any_size.is_none() {
-                at_any_size = partition.table.lookup_any_size(digest).map_err(malformed)?;
+            if at_any_size.is_none()
+                && let Some(name) = partition.table.lookup_any_size(digest).map_err(malformed)?
+                && admitted(partition, name)?
+            {
+                at_any_size = Some(name);
             }
         }
         for name in [at_exact_size, at_any_size].into_iter().flatten() {

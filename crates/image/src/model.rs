@@ -263,3 +263,103 @@ pub struct ReportWindows {
     pub length: u32,
     pub overlap: u32,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CountComparison {
+    Exactly(u32),
+    MoreThan(u32),
+    FewerThan(u32),
+}
+
+impl CountComparison {
+    #[must_use]
+    pub fn holds_for(self, matches: u64) -> bool {
+        match self {
+            Self::Exactly(expected) => matches == u64::from(expected),
+            Self::MoreThan(bound) => matches > u64::from(bound),
+            Self::FewerThan(bound) => matches < u64::from(bound),
+        }
+    }
+
+    #[must_use]
+    pub const fn threshold(self) -> u32 {
+        match self {
+            Self::Exactly(threshold) | Self::MoreThan(threshold) | Self::FewerThan(threshold) => {
+                threshold
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CountTest {
+    pub comparison: CountComparison,
+    pub distinct_at_least: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expression {
+    Subsignature {
+        index: u16,
+        count: Option<CountTest>,
+    },
+    All(Box<Expression>, Box<Expression>),
+    Any(Box<Expression>, Box<Expression>),
+    Block {
+        inner: Box<Expression>,
+        count: CountTest,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum KindCondition {
+    AnyKind,
+    Kind(ObjectKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InclusiveRange {
+    pub lowest: u32,
+    pub highest: u32,
+}
+
+impl InclusiveRange {
+    #[must_use]
+    pub fn holds(self, value: u64) -> bool {
+        value >= u64::from(self.lowest) && value <= u64::from(self.highest)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogicalConditions {
+    pub container: Option<KindCondition>,
+    pub intermediates: Vec<KindCondition>,
+    pub file_size: Option<InclusiveRange>,
+    pub entry_point: Option<InclusiveRange>,
+    pub number_of_sections: Option<InclusiveRange>,
+    pub handler_type: Option<ObjectKind>,
+    pub icon_groups: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentSubsignature {
+    pub placement: Placement,
+    pub patterns: Vec<Pattern>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicalSignature<'a> {
+    pub group: SignatureGroup,
+    pub category: Category,
+    pub name: &'a str,
+    pub indicator: Indicator,
+    pub expression: &'a Expression,
+    pub subsignatures: &'a [ContentSubsignature],
+    pub conditions: &'a LogicalConditions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UnwantedCategory<'a> {
+    Named(&'a str),
+    Unnamed,
+}

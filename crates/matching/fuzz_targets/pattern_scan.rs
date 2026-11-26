@@ -5,7 +5,7 @@ use debar_image::{
     KindDescription, MaskedByte, ObjectKind, OwnBytes, Pattern, PatternElement, PatternOutcome,
     PatternSignature, Placement, RecognitionRank, SignatureGroup,
 };
-use debar_matching::{
+use debar_matching::{ObjectContext, UnwantedCategories, 
     ExecutableLayout, ExecutableSection, GroupSelection, PatternRequest, PatternScan,
     PatternSettings,
 };
@@ -235,12 +235,14 @@ fn image() -> Vec<u8> {
 fn detections(image: &Image<'_>, object: &[u8], chunk: usize) -> Vec<String> {
     let settings = PatternSettings {
         potentially_unwanted: false,
+        unwanted_categories: UnwantedCategories::Every,
         every_match: true,
     };
     let request = PatternRequest {
         selection: GroupSelection::ForKind(ObjectKind::WindowsExecutable),
         settings,
         object_length: object.len() as u64,
+        context: ObjectContext::TOP_LEVEL,
     };
     let layout = ExecutableLayout {
         entry_point: u32::from(object.first().copied().unwrap_or(0)),
@@ -261,6 +263,7 @@ fn detections(image: &Image<'_>, object: &[u8], chunk: usize) -> Vec<String> {
         scan.feed(piece).expect("a chunk is accepted");
     }
     scan.finish()
+        .and_then(debar_matching::ScanEnd::into_outcomes)
         .expect("the scan finishes")
         .detections
         .into_iter()

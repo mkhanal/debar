@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use debar_image::{
     BuildError, Category, DatabaseRecord, HashEntryId, HashPurpose, HashSignature, ImageBuilder,
-    MagicTable, PartMemory, Pattern, PatternOutcome, PatternSignature, Placement, Provenance,
-    ReportWindows, SignatureGroup, TypeFinding,
+    LogicalSignature, MagicTable, PartMemory, Pattern, PatternOutcome, PatternSignature, Placement,
+    Provenance, ReportWindows, SignatureGroup, TypeFinding, UnwantedCategory,
 };
 
 use crate::account::{Account, FileAccount, LineOutcome};
@@ -16,7 +16,7 @@ use crate::hash_duplicates::entries_not_reported;
 use crate::hash_lines::{FieldOrder, HashFile, MalformedLine, ReadLine, read_line};
 use crate::ignore_list::IgnoreList;
 use crate::line_text::{lines, without_line_ending};
-use crate::logical_lines;
+use crate::logical_lines::{self, MalformedLogicalLine, ReadLogicalLine};
 use crate::type_names::{GENERIC_GROUP, TYPE_RECOGNITION_GROUP, describe_object_kinds};
 
 const UNOFFICIAL_SUFFIX: &str = ".UNOFFICIAL";
@@ -55,6 +55,12 @@ pub enum DatabaseError {
         line: usize,
         reason: MalformedFileTypeLine,
     },
+    MalformedLogicalLine {
+        file: String,
+        member: Option<String>,
+        line: usize,
+        reason: MalformedLogicalLine,
+    },
     EmptyHashFile {
         file: String,
         member: Option<String>,
@@ -92,6 +98,12 @@ impl fmt::Display for DatabaseError {
                 line,
                 reason,
             } => write!(formatter, "{} line {line}: {reason}", place(file, member)),
+            Self::MalformedLogicalLine {
+                file,
+                member,
+                line,
+                reason,
+            } => write!(formatter, "{} line {line}: {reason}", place(file, member)),
             Self::EmptyHashFile { file, member } | Self::EmptyDatabaseFile { file, member } => {
                 write!(formatter, "{} is empty", place(file, member))
             }
@@ -109,7 +121,7 @@ enum FileKind {
     Hashes(HashFile),
     Extended(Category),
     FileTypes,
-    Logical,
+    Logical(Category),
     NotYetCompiled,
 }
 
@@ -174,8 +186,8 @@ const FILE_KINDS: [(&str, FileKind); 37] = [
     ("idb", FileKind::NotYetCompiled),
     ("imp", FileKind::NotYetCompiled),
     ("ioc", FileKind::NotYetCompiled),
-    ("ldb", FileKind::Logical),
-    ("ldu", FileKind::Logical),
+    ("ldb", FileKind::Logical(Category::Malware)),
+    ("ldu", FileKind::Logical(Category::PotentiallyUnwanted)),
     ("ndb", FileKind::Extended(Category::Malware)),
     ("ndu", FileKind::Extended(Category::PotentiallyUnwanted)),
     ("pdb", FileKind::NotYetCompiled),
@@ -224,7 +236,10 @@ fn kind_description(kind: FileKind) -> &'static str {
             "extended signatures, potentially unwanted"
         }
         FileKind::FileTypes => "file types",
-        FileKind::Logical => "logical signatures, not yet compiled",
+        FileKind::Logical(Category::Malware) => "logical signatures",
+        FileKind::Logical(Category::PotentiallyUnwanted) => {
+            "logical signatures, potentially unwanted"
+        }
         FileKind::NotYetCompiled => "not yet compiled",
     }
 }
@@ -365,6 +380,15 @@ impl Loader<'_> {
         for bucket in self.image.hash_buckets_with_repeated_keys() {
             withdrawn.extend(entries_not_reported(&bucket));
         }
+        for (bucket, unwanted) in self.image.hash_buckets_shared_with_unwanted() {
+            withdrawn.extend(
+                entries_not_reported(&bucket)
+                    .into_iter()
+                    .filter(|id| unwanted.contains(id)),
+            );
+        }
+        withdrawn.sort();
+        withdrawn.dedup();
         for id in &withdrawn {
             let place = usize::try_from(id.0)
                 .ok()
@@ -435,22 +459,7 @@ impl Loader<'_> {
             FileKind::Hashes(hash_file) => self.load_hashes(source, hash_file, kind, contents),
             FileKind::Extended(category) => self.load_extended(source, category, kind, contents),
             FileKind::FileTypes => self.load_file_types(source, kind, contents),
-            FileKind::Logical => {
-                for line in lines(contents) {
-                    if let Some(content) =
-                        logical_lines::loaded_content(without_line_ending(line), &self.ignored)
-                    {
-                        self.lengthen(SignatureGroup(content.target), content.longest_part);
-                    }
-                }
-                self.account_every_line(
-                    source,
-                    kind_description(kind),
-                    contents,
-                    LineOutcome::NotYetCompiled,
-                );
-                Ok(())
-            }
+            FileKind::Logical(category) => self.load_logical(source, category, kind, contents),
             FileKind::IgnoreList => {
                 self.ignored.add_entries_from(contents);
                 self.account_every_line(
@@ -511,6 +520,10 @@ impl Loader<'_> {
                         unofficial_name.push_str(UNOFFICIAL_SUFFIX);
                         &unofficial_name
                     };
+                    if signature.category == Category::PotentiallyUnwanted {
+                        self.image
+                            .set_unwanted_category(name, unwanted_category_of(signature.name));
+                    }
                     let id = self
                         .image
                         .add_hash_signature(&HashSignature {
@@ -583,6 +596,10 @@ impl Loader<'_> {
                         &unofficial_name
                     };
                     self.lengthen(SignatureGroup(signature.target), signature.longest_part);
+                    if signature.category == Category::PotentiallyUnwanted {
+                        self.image
+                            .set_unwanted_category(name, unwanted_category_of(signature.name));
+                    }
                     self.add_pattern(
                         SignatureGroup(signature.target),
                         signature.category,
@@ -594,6 +611,69 @@ impl Loader<'_> {
                             indicator: signature.indicator,
                         },
                     )?;
+                    LineOutcome::Compiled
+                }
+            });
+        }
+        self.record(source, kind_description(kind), outcomes);
+        Ok(())
+    }
+
+    fn load_logical(
+        &mut self,
+        source: &Source<'_>,
+        category: Category,
+        kind: FileKind,
+        contents: &[u8],
+    ) -> Result<(), DatabaseError> {
+        let mut outcomes = Vec::new();
+        let mut unofficial_name = String::new();
+        for (index, line) in lines(contents).enumerate() {
+            let read = logical_lines::read_line(without_line_ending(line), &self.ignored).map_err(
+                |reason| DatabaseError::MalformedLogicalLine {
+                    file: source.file.to_owned(),
+                    member: source.member.map(str::to_owned),
+                    line: index.saturating_add(1),
+                    reason,
+                },
+            )?;
+            outcomes.push(match read {
+                ReadLogicalLine::Comment => LineOutcome::Comment,
+                ReadLogicalLine::Ignored => LineOutcome::Ignored,
+                ReadLogicalLine::OutsideFunctionalityLevel => {
+                    LineOutcome::OutsideFunctionalityLevel
+                }
+                ReadLogicalLine::TargetNotLoaded => LineOutcome::TargetNotLoaded,
+                ReadLogicalLine::NotLoaded => LineOutcome::NotLoaded,
+                ReadLogicalLine::NotYetCompiled { loaded, .. } => {
+                    self.lengthen(SignatureGroup(loaded.target), loaded.longest_part);
+                    LineOutcome::NotYetCompiled
+                }
+                ReadLogicalLine::Signature(signature) => {
+                    let name = if source.official {
+                        signature.name
+                    } else {
+                        unofficial_name.clear();
+                        unofficial_name.push_str(signature.name);
+                        unofficial_name.push_str(UNOFFICIAL_SUFFIX);
+                        &unofficial_name
+                    };
+                    self.lengthen(SignatureGroup(signature.target), signature.longest_part);
+                    if category == Category::PotentiallyUnwanted {
+                        self.image
+                            .set_unwanted_category(name, unwanted_category_of(signature.name));
+                    }
+                    self.image
+                        .add_logical_signature(&LogicalSignature {
+                            group: SignatureGroup(signature.target),
+                            category,
+                            name,
+                            indicator: signature.indicator,
+                            expression: &signature.expression,
+                            subsignatures: &signature.subsignatures,
+                            conditions: &signature.conditions,
+                        })
+                        .map_err(DatabaseError::Image)?;
                     LineOutcome::Compiled
                 }
             });
@@ -705,6 +785,25 @@ impl Loader<'_> {
             kind,
             lines,
         });
+    }
+}
+
+const UNWANTED_PREFIX: &str = "PUA";
+const LONGEST_UNWANTED_CATEGORY: usize = 31;
+
+fn unwanted_category_of(name: &str) -> UnwantedCategory<'_> {
+    let Some(rest) = name.strip_prefix(UNWANTED_PREFIX) else {
+        return UnwantedCategory::Unnamed;
+    };
+    if !rest.starts_with('.') {
+        return UnwantedCategory::Unnamed;
+    }
+    match rest.rfind('.') {
+        Some(last) if last > 0 => rest
+            .get(..=last)
+            .filter(|category| category.len() <= LONGEST_UNWANTED_CATEGORY)
+            .map_or(UnwantedCategory::Unnamed, UnwantedCategory::Named),
+        _ => UnwantedCategory::Unnamed,
     }
 }
 

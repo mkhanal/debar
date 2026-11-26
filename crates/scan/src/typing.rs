@@ -5,7 +5,8 @@ use debar_image::{
     ObjectKinds, TypingRules,
 };
 use debar_matching::{
-    GroupSelection, PatternRequest, PatternScan, PatternScanError, PatternSettings, TypeFound,
+    GroupSelection, ObjectContext, PatternRequest, PatternScan, PatternScanError, PatternSettings,
+    TypeFound, UnwantedCategories,
 };
 
 const LITTLE_ENDIAN_MARK: [u8; 2] = [0xff, 0xfe];
@@ -180,13 +181,15 @@ fn recognition_winner(
         selection: GroupSelection::TypeRecognitionOnly(current),
         settings: PatternSettings {
             potentially_unwanted: false,
+            unwanted_categories: UnwantedCategories::Every,
             every_match: true,
         },
         object_length: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        context: ObjectContext::TOP_LEVEL,
     };
     let mut scan = PatternScan::new(image, request, || None)?;
     scan.feed(bytes)?;
-    winning_kind(kinds, &scan.finish()?.types_found)
+    winning_kind(kinds, &scan.finish()?.into_outcomes()?.types_found)
 }
 
 fn winning_kind(

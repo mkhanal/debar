@@ -20,6 +20,7 @@ license = "MPL-2.0"
 publish = false
 
 [workspace.dependencies]
+aho-corasick = { version = "=1.1.5", default-features = false, features = ["std", "perf-literal"] }
 debar-clamav-signatures = { path = "crates/clamav-signatures" }
 debar-image = { path = "crates/image" }
 debar-matching = { path = "crates/matching" }

@@ -3,13 +3,13 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use debar_image::{Image, ObjectKind};
-use debar_matching::{GroupSelection, PatternRequest, PatternScan, PatternSettings};
+use debar_matching::{
+    GroupSelection, ObjectContext, PatternRequest, PatternSettings, UnwantedCategories, scan_object,
+};
 use debar_platform::command_line::arguments;
 use debar_platform::input::read_scanned_file;
 use debar_platform::mapped_file::MappedFile;
 use debar_platform::stopwatch::Stopwatch;
-
-const CHUNK_LENGTH: usize = 128 * 1024;
 
 fn main() -> ExitCode {
     let mut paths = arguments().into_iter().map(PathBuf::from);
@@ -37,6 +37,7 @@ fn measure(image_path: &Path, files: &[PathBuf]) -> Result<String, Box<dyn std::
     let image = Image::open(mapped.bytes())?;
     let settings = PatternSettings {
         potentially_unwanted: false,
+        unwanted_categories: UnwantedCategories::Every,
         every_match: true,
     };
     let mut scanned_bytes: u64 = 0;
@@ -50,12 +51,12 @@ fn measure(image_path: &Path, files: &[PathBuf]) -> Result<String, Box<dyn std::
             selection: GroupSelection::ForKind(ObjectKind::BinaryData),
             settings,
             object_length: length,
+            context: ObjectContext::TOP_LEVEL,
         };
-        let mut scan = PatternScan::new(&image, request, || None)?;
-        for chunk in object.chunks(CHUNK_LENGTH) {
-            scan.feed(chunk)?;
-        }
-        detections = detections.saturating_add(scan.finish()?.detections.len());
+        let outcomes = scan_object(&image, request, || None, &object)?;
+        detections = detections
+            .saturating_add(outcomes.detections.len())
+            .saturating_add(outcomes.logical.detections.len());
         scanning = scanning.saturating_add(stopwatch.elapsed());
         scanned_bytes = scanned_bytes.saturating_add(length);
     }

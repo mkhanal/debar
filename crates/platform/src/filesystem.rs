@@ -56,6 +56,40 @@ pub fn regular_files_in(directory: &Path) -> Result<Vec<PathBuf>, FilesystemErro
     Ok(files)
 }
 
+pub fn regular_files_under(path: &Path) -> Result<Vec<PathBuf>, FilesystemError> {
+    let failed = |path: &Path| {
+        let path = path.to_path_buf();
+        move |reason| FilesystemError {
+            operation: Operation::ListDirectory,
+            path,
+            reason,
+        }
+    };
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+    let kind = std::fs::symlink_metadata(path)
+        .map_err(failed(path))?
+        .file_type();
+    if kind.is_file() {
+        files.push(path.to_path_buf());
+    } else if kind.is_dir() {
+        directories.push(path.to_path_buf());
+    }
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(&directory).map_err(failed(&directory))? {
+            let entry = entry.map_err(failed(&directory))?;
+            let kind = entry.file_type().map_err(failed(&directory))?;
+            if kind.is_file() {
+                files.push(entry.path());
+            } else if kind.is_dir() {
+                directories.push(entry.path());
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
 pub fn read_file(path: &Path) -> Result<Vec<u8>, FilesystemError> {
     std::fs::read(path).map_err(|reason| FilesystemError {
         operation: Operation::Read,

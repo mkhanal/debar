@@ -60,7 +60,7 @@ impl PositionSet {
         self.ranges.first().map(|range| range.start)
     }
 
-    fn positions(&self) -> impl Iterator<Item = u64> + '_ {
+    pub(crate) fn positions(&self) -> impl Iterator<Item = u64> + '_ {
         self.ranges.iter().flat_map(Clone::clone)
     }
 

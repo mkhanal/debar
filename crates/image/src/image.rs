@@ -10,11 +10,15 @@ use crate::layout::{
     BYTE_ORDER_MARK, CHECKSUM_LENGTH, DatabaseEntry, DirectoryEntry, Header, LAYOUT_VERSION, MAGIC,
     SECTION_ALIGNMENT, SectionKind,
 };
+use crate::logical_group::{LogicalGroup, LogicalGroupMalformed};
+use crate::model::UnwantedCategory;
 use crate::model::{DatabaseRecord, Provenance, SignatureGroup, SignatureName};
 use crate::names::{NameId, NamesMalformed, NamesView};
 use crate::object_kinds::{KindsMalformed, ObjectKinds};
 use crate::pattern_group::{GroupMalformed, PatternGroup};
+use crate::selection_filters::{self, FiltersMalformed, SelectionFilter};
 use crate::type_magic::{MagicMalformed, TypeMagic};
+use crate::unwanted_categories::{CategoriesMalformed, UnwantedCategories};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ImageError {
@@ -57,8 +61,14 @@ pub enum ImageError {
         group: SignatureGroup,
         reason: GroupMalformed,
     },
+    LogicalGroupMalformed {
+        group: SignatureGroup,
+        reason: LogicalGroupMalformed,
+    },
     ObjectKindsMalformed(KindsMalformed),
     TypeMagicMalformed(MagicMalformed),
+    UnwantedCategoriesMalformed(CategoriesMalformed),
+    SelectionFiltersMalformed(FiltersMalformed),
 }
 
 impl fmt::Display for ImageError {
@@ -111,12 +121,24 @@ impl fmt::Display for ImageError {
                 "the pattern signatures of group {} are malformed: {reason:?}",
                 group.0
             ),
+            Self::LogicalGroupMalformed { group, reason } => write!(
+                formatter,
+                "the logical signatures of group {} are malformed: {reason:?}",
+                group.0
+            ),
             Self::ObjectKindsMalformed(reason) => {
                 write!(formatter, "the object kinds are malformed: {reason:?}")
             }
             Self::TypeMagicMalformed(reason) => {
                 write!(formatter, "the type magic is malformed: {reason:?}")
             }
+            Self::SelectionFiltersMalformed(reason) => {
+                write!(formatter, "the selection filters are malformed: {reason:?}")
+            }
+            Self::UnwantedCategoriesMalformed(reason) => write!(
+                formatter,
+                "the categories of potentially unwanted signatures are malformed: {reason:?}"
+            ),
         }
     }
 }
@@ -169,7 +191,11 @@ impl<'m> Image<'m> {
         if Sha256::digest(checked).as_slice() != checksum {
             return Err(ImageError::HeaderChecksumMismatch);
         }
-        let sections = section_extents(directory, bytes.len())?;
+        let directory_end = checked_length
+            .checked_add(CHECKSUM_LENGTH)
+            .ok_or(ImageError::TooShort)?
+            .next_multiple_of(SECTION_ALIGNMENT);
+        let sections = section_extents(directory, bytes.len(), directory_end)?;
         Ok(Self { bytes, sections })
     }
 
@@ -238,6 +264,16 @@ impl<'m> Image<'m> {
             .map_err(|reason| ImageError::PatternGroupMalformed { group, reason })
     }
 
+    pub fn logical_group(
+        &self,
+        group: SignatureGroup,
+    ) -> Result<Option<LogicalGroup<'m>>, ImageError> {
+        self.optional_section_bytes(SectionKind::LogicalGroup, group.0)
+            .map(LogicalGroup::read)
+            .transpose()
+            .map_err(|reason| ImageError::LogicalGroupMalformed { group, reason })
+    }
+
     pub fn object_kinds(&self) -> Result<Option<ObjectKinds<'m>>, ImageError> {
         self.optional_section_bytes(SectionKind::ObjectKinds, 0)
             .map(ObjectKinds::read)
@@ -250,6 +286,28 @@ impl<'m> Image<'m> {
             .map(TypeMagic::read)
             .transpose()
             .map_err(ImageError::TypeMagicMalformed)
+    }
+
+    pub fn selection_filter(
+        &self,
+        groups: &[SignatureGroup],
+    ) -> Result<Option<SelectionFilter<'m>>, ImageError> {
+        let Some(bytes) = self.optional_section_bytes(SectionKind::SelectionFilters, 0) else {
+            return Ok(None);
+        };
+        selection_filters::find(bytes, groups).map_err(ImageError::SelectionFiltersMalformed)
+    }
+
+    pub fn unwanted_category(
+        &self,
+        name: NameId,
+    ) -> Result<Option<UnwantedCategory<'m>>, ImageError> {
+        let Some(bytes) = self.optional_section_bytes(SectionKind::UnwantedCategories, 0) else {
+            return Ok(None);
+        };
+        UnwantedCategories::read(bytes)
+            .and_then(|categories| categories.of(name))
+            .map_err(ImageError::UnwantedCategoriesMalformed)
     }
 
     pub fn signature_name(&self, id: NameId) -> Result<SignatureName, ImageError> {
@@ -295,8 +353,9 @@ impl<'m> Image<'m> {
 fn section_extents(
     directory: &[DirectoryEntry],
     image_length: usize,
+    directory_end: usize,
 ) -> Result<Vec<SectionExtent>, ImageError> {
-    let mut earliest_start = SECTION_ALIGNMENT;
+    let mut earliest_start = directory_end;
     let mut extents = Vec::with_capacity(directory.len());
     for (index, entry) in directory.iter().enumerate() {
         let kind = SectionKind::from_code(entry.kind.get()).ok_or(ImageError::UnknownSection {

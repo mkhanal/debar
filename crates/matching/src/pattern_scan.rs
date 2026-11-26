@@ -1,21 +1,31 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
 use debar_image::{
-    AnchoredProgram, Category, GroupMalformed, Image, ImageError, Indicator, KindsMalformed,
-    LONG_ANCHOR_LENGTH, ObjectKind, PatternGroup, PatternSignatureId, PatternSignatureRecord,
-    ProgramId, ProgramView, RecordedOutcome, ReportWindows, SHORT_ANCHOR_LENGTH, SignatureGroup,
+    AnchorCase, AnchorTables, AnchoredProgram, ArmedAnchor, Category, Displacement, GroupMalformed,
+    Image, ImageError, Indicator, KindsMalformed, LONG_ANCHOR_LENGTH, LogicalGroup,
+    LogicalSignatureId, LongAnchorFilter, LongAnchorTable, MatchingPass, ObjectKind, PatternGroup,
+    PatternSignatureId, PatternSignatureRecord, ProgramHeader, ProgramId, ProgramMalformed,
+    ProgramView, RecordedOutcome, ReportWindows, SHORT_ANCHOR_LENGTH, SelectionFilter,
+    ShortAnchorFilter, SignatureGroup, ascii_lowercase,
 };
 
 use crate::executable_layout::{ExecutableLayout, LayoutState, placed_starts};
+use crate::logical_state::{
+    CountedMatches, LogicalFindings, LogicalState, ObjectContext, UnwantedCategories,
+};
 use crate::part_ends::RememberedEnds;
+use crate::second_pass_search::{ArmedGroup, SecondPassSearch};
 use crate::verification::{PositionSet, RetainedBytes, match_ends};
 
 const POSITIONS_PER_PASS: u64 = 4096;
+const CHUNK_LENGTH: usize = 128 * 1024;
+const ARMED_FILTER_WORDS: usize = 1 << 10;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PatternSettings {
+pub struct PatternSettings<'s> {
     pub potentially_unwanted: bool,
+    pub unwanted_categories: UnwantedCategories<'s>,
     pub every_match: bool,
 }
 
@@ -37,10 +47,11 @@ impl GroupSelection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PatternRequest {
+pub struct PatternRequest<'r> {
     pub selection: GroupSelection,
-    pub settings: PatternSettings,
+    pub settings: PatternSettings<'r>,
     pub object_length: u64,
+    pub context: ObjectContext<'r>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +70,7 @@ pub struct TypeFound {
 pub struct PatternOutcomes {
     pub detections: Vec<PatternDetection>,
     pub types_found: Vec<TypeFound>,
+    pub logical: LogicalFindings,
 }
 
 #[derive(Debug)]
@@ -71,6 +83,8 @@ pub enum PatternScanError {
     MoreBytesThanDeclared { declared: u64 },
     FewerBytesThanDeclared { declared: u64, fed: u64 },
     RetainedBytesLost { position: u64 },
+    SecondPassNotRun,
+    ArmedSearchNotBuilt,
 }
 
 impl fmt::Display for PatternScanError {
@@ -102,6 +116,14 @@ impl fmt::Display for PatternScanError {
                 formatter,
                 "the bytes at {position} were released before a candidate there was verified"
             ),
+            Self::ArmedSearchNotBuilt => write!(
+                formatter,
+                "the search for the armed logical signatures could not be built"
+            ),
+            Self::SecondPassNotRun => write!(
+                formatter,
+                "the object must be matched a second time before its outcomes are known"
+            ),
         }
     }
 }
@@ -126,6 +148,49 @@ pub enum ScanProgress {
     Stopped,
 }
 
+pub enum ScanEnd<'i, 'm, 'r> {
+    Complete(PatternOutcomes),
+    SecondPassNeeded(Box<PatternScan<'i, 'm, 'r>>),
+}
+
+impl ScanEnd<'_, '_, '_> {
+    pub fn into_outcomes(self) -> Result<PatternOutcomes, PatternScanError> {
+        match self {
+            Self::Complete(outcomes) => Ok(outcomes),
+            Self::SecondPassNeeded(_) => Err(PatternScanError::SecondPassNotRun),
+        }
+    }
+}
+
+pub fn scan_object(
+    image: &Image<'_>,
+    request: PatternRequest<'_>,
+    executable_layout: impl FnOnce() -> Option<ExecutableLayout>,
+    object: &[u8],
+) -> Result<PatternOutcomes, PatternScanError> {
+    let mut scan = PatternScan::new(image, request, executable_layout)?;
+    loop {
+        for chunk in object.chunks(CHUNK_LENGTH) {
+            if scan.feed(chunk)? == ScanProgress::Stopped {
+                break;
+            }
+        }
+        if object.len() > scan.fed_length() {
+            let rest =
+                object
+                    .get(scan.fed_length()..)
+                    .ok_or(PatternScanError::MoreBytesThanDeclared {
+                        declared: request.object_length,
+                    })?;
+            scan.skip(rest.len())?;
+        }
+        match scan.finish()? {
+            ScanEnd::Complete(outcomes) => return Ok(outcomes),
+            ScanEnd::SecondPassNeeded(second) => scan = *second,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Candidate {
     group: usize,
@@ -136,26 +201,291 @@ struct Candidate {
     ready_at: u64,
 }
 
-struct SelectedGroup<'m> {
-    view: PatternGroup<'m>,
-    chains: BTreeMap<u32, Vec<RememberedEnds>>,
-    detected: BTreeSet<u32>,
+#[derive(Debug, Clone)]
+struct ArmedPart {
+    group: usize,
+    program: ProgramId,
+    anchor: Option<[u8; SHORT_ANCHOR_LENGTH]>,
+    case: AnchorCase,
+    displacement: Displacement,
+    first_start: u64,
+    last_start: Option<u64>,
 }
 
-pub struct PatternScan<'i, 'm> {
+impl ArmedPart {
+    fn anchored_by(&self, window: [u8; SHORT_ANCHOR_LENGTH]) -> bool {
+        self.anchor.is_some_and(|anchor| match self.case {
+            AnchorCase::Exact => window == anchor,
+            AnchorCase::Folded => ascii_lowercase(window) == anchor,
+        })
+    }
+
+    fn admits_anchor_at(&self, position: u64) -> bool {
+        position
+            >= self
+                .first_start
+                .saturating_add(u64::from(self.displacement.nearest))
+            && self.last_start.is_none_or(|last| {
+                position <= last.saturating_add(u64::from(self.displacement.farthest))
+            })
+    }
+}
+
+#[derive(Default)]
+struct ArmedParts {
+    parts: Vec<ArmedPart>,
+    by_program: BTreeMap<(usize, u32), usize>,
+    by_anchor: BTreeMap<[u8; SHORT_ANCHOR_LENGTH], Vec<usize>>,
+    filter: Vec<u64>,
+}
+
+impl ArmedParts {
+    fn clear(&mut self) {
+        self.parts.clear();
+        self.by_program.clear();
+        self.by_anchor.clear();
+        self.filter.clear();
+    }
+
+    fn may_hold(&self, window: u16) -> bool {
+        self.filter
+            .get(usize::from(window >> 6))
+            .is_some_and(|word| word & (1u64 << (window & 63)) != 0)
+    }
+
+    fn arm(&mut self, part: ArmedPart) -> Option<usize> {
+        let key = (part.group, part.program.0);
+        if let Some(existing) = self
+            .by_program
+            .get(&key)
+            .and_then(|index| self.parts.get_mut(*index))
+        {
+            existing.first_start = existing.first_start.min(part.first_start);
+            existing.last_start = existing
+                .last_start
+                .zip(part.last_start)
+                .map(|(a, b)| a.max(b));
+            return None;
+        }
+        let index = self.parts.len();
+        if let Some(anchor) = part.anchor.map(ascii_lowercase) {
+            if self.filter.is_empty() {
+                self.filter.resize(ARMED_FILTER_WORDS, 0);
+            }
+            let window = u16::from_le_bytes(anchor);
+            if let Some(word) = self.filter.get_mut(usize::from(window >> 6)) {
+                *word |= 1u64 << (window & 63);
+            }
+            self.by_anchor.entry(anchor).or_default().push(index);
+        }
+        self.by_program.insert(key, index);
+        self.parts.push(part);
+        Some(index)
+    }
+}
+
+struct GroupProbe<'m> {
+    group: usize,
+    tables: AnchorTables<'m>,
+    exact: LongAnchorTable<'m>,
+    exact_filter: LongAnchorFilter<'m>,
+    folded: Option<(LongAnchorTable<'m>, LongAnchorFilter<'m>)>,
+    short: Option<ShortAnchorFilter<'m>>,
+}
+
+impl<'m> GroupProbe<'m> {
+    fn of(group: usize, tables: AnchorTables<'m>) -> Self {
+        let exact = tables.exact_long();
+        let folded = tables.folded_long();
+        Self {
+            group,
+            tables,
+            exact,
+            exact_filter: exact.filter(),
+            folded: (!folded.is_empty()).then(|| (folded, folded.filter())),
+            short: tables
+                .has_short_anchors()
+                .then(|| tables.short_anchor_filter()),
+        }
+    }
+}
+
+struct ProbedWindow<'b, 'm> {
+    bytes: &'b [u8],
+    positions: usize,
+    first_position: u64,
+    selection_filter: Option<SelectionFilter<'m>>,
+}
+
+impl ProbedWindow<'_, '_> {
+    fn position(&self, offset: usize) -> u64 {
+        self.first_position
+            .saturating_add(u64::try_from(offset).unwrap_or(u64::MAX))
+    }
+}
+
+fn probe_long_windows(
+    window: &ProbedWindow<'_, '_>,
+    probes: &[GroupProbe<'_>],
+    probes_folded: bool,
+    hits: &mut Vec<(u64, usize, AnchoredProgram)>,
+) {
+    let mut value: u32 = 0;
+    for (index, byte) in window.bytes.iter().enumerate() {
+        value = (value >> 8) | (u32::from(*byte) << 24);
+        let Some(offset) = index.checked_sub(LONG_ANCHOR_LENGTH - 1) else {
+            continue;
+        };
+        if offset >= window.positions {
+            break;
+        }
+        if window
+            .selection_filter
+            .is_some_and(|filter| !filter.may_hold_long(value))
+        {
+            continue;
+        }
+        let lowered = if probes_folded {
+            ascii_lowercase_word(value)
+        } else {
+            value
+        };
+        for probe in probes {
+            if probe.exact_filter.may_hold(value) {
+                let position = window.position(offset);
+                hits.extend(
+                    probe
+                        .exact
+                        .anchored(value.to_le_bytes())
+                        .map(|hit| (position, probe.group, hit)),
+                );
+            }
+            if let Some((folded, filter)) = &probe.folded
+                && filter.may_hold(lowered)
+            {
+                let position = window.position(offset);
+                hits.extend(
+                    folded
+                        .anchored(lowered.to_le_bytes())
+                        .map(|hit| (position, probe.group, hit)),
+                );
+            }
+        }
+    }
+}
+
+fn probe_everywhere(
+    window: &ProbedWindow<'_, '_>,
+    probes: &[GroupProbe<'_>],
+    hits: &mut Vec<(u64, usize, AnchoredProgram)>,
+) {
+    for probe in probes {
+        let everywhere: Vec<ProgramId> = probe.tables.everywhere().collect();
+        if everywhere.is_empty() {
+            continue;
+        }
+        for offset in 0..window.positions {
+            let position = window.position(offset);
+            hits.extend(everywhere.iter().map(|program| {
+                (
+                    position,
+                    probe.group,
+                    AnchoredProgram {
+                        program: *program,
+                        displacement: Displacement {
+                            nearest: 0,
+                            farthest: 0,
+                        },
+                    },
+                )
+            }));
+        }
+    }
+}
+
+const ASCII_SEVEN_BITS: u32 = 0x7f7f_7f7f;
+const PAST_CAPITAL_Z: u32 = 0x2525_2525;
+const FROM_CAPITAL_A: u32 = 0x3f3f_3f3f;
+const HIGH_BITS: u32 = 0x8080_8080;
+const HIGH_BIT_TO_CASE_BIT: u32 = 2;
+
+fn ascii_lowercase_word(word: u32) -> u32 {
+    let seven_bits = word & ASCII_SEVEN_BITS;
+    let at_least_a = seven_bits.wrapping_add(FROM_CAPITAL_A);
+    let past_z = seven_bits.wrapping_add(PAST_CAPITAL_Z);
+    let capitals = at_least_a & !past_z & !word & HIGH_BITS;
+    word | (capitals >> HIGH_BIT_TO_CASE_BIT)
+}
+
+struct SignatureBits {
+    words: Vec<u64>,
+    signatures: usize,
+}
+
+impl SignatureBits {
+    fn sized_for(signatures: usize) -> Self {
+        Self {
+            words: Vec::new(),
+            signatures,
+        }
+    }
+
+    fn contains(&self, signature: u32) -> bool {
+        usize::try_from(signature / u64::BITS)
+            .ok()
+            .and_then(|word| self.words.get(word))
+            .is_some_and(|word| word & (1u64 << (signature % u64::BITS)) != 0)
+    }
+
+    fn insert(&mut self, signature: u32) {
+        if self.words.is_empty() {
+            self.words.resize(self.signatures.div_ceil(64), 0);
+        }
+        if let Some(word) = usize::try_from(signature / u64::BITS)
+            .ok()
+            .and_then(|word| self.words.get_mut(word))
+        {
+            *word |= 1u64 << (signature % u64::BITS);
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        self.words
+            .capacity()
+            .saturating_mul(std::mem::size_of::<u64>())
+    }
+}
+
+struct SelectedGroup<'m> {
+    view: PatternGroup<'m>,
+    tables: AnchorTables<'m>,
+    logical: Option<LogicalState<'m>>,
+    chains: BTreeMap<u32, Vec<RememberedEnds>>,
+    detected: SignatureBits,
+}
+
+pub struct PatternScan<'i, 'm, 'r> {
     image: &'i Image<'m>,
     groups: Vec<SelectedGroup<'m>>,
     kind: ObjectKind,
-    settings: PatternSettings,
+    settings: PatternSettings<'r>,
+    context: ObjectContext<'r>,
     object_length: u64,
+    pass: MatchingPass,
     report_windows: Option<ReportWindows>,
     lookback: u32,
+    executable_layout: Option<ExecutableLayout>,
+    layout_need: LayoutNeed,
     retained: Vec<u8>,
     first_retained: u64,
     fed: u64,
     probed_to: u64,
     positional: VecDeque<Candidate>,
     queue: VecDeque<Candidate>,
+    hits: Vec<(u64, usize, AnchoredProgram)>,
+    armed: ArmedParts,
+    second_pass_search: Option<SecondPassSearch>,
+    selection_filter: Option<SelectionFilter<'m>>,
     found: Vec<Found>,
     types_found: Vec<TypeFound>,
     stop_once_past: Option<u64>,
@@ -175,20 +505,25 @@ struct Found {
     detection: PatternDetection,
 }
 
-impl<'i, 'm> PatternScan<'i, 'm> {
+impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
     pub fn new(
         image: &'i Image<'m>,
-        request: PatternRequest,
+        request: PatternRequest<'r>,
         executable_layout: impl FnOnce() -> Option<ExecutableLayout>,
     ) -> Result<Self, PatternScanError> {
         let selected = selected_groups(image, request.selection)?;
+        let selected_ids: Vec<SignatureGroup> =
+            selected.groups.iter().map(|(group, _, _)| *group).collect();
+        let selection_filter = image.selection_filter(&selected_ids)?;
         let groups = selected
             .groups
             .into_iter()
-            .map(|view| SelectedGroup {
+            .map(|(group, view, logical)| SelectedGroup {
                 view,
+                tables: view.anchor_tables(MatchingPass::Main),
+                logical: logical.map(|logical| LogicalState::new(logical, group)),
                 chains: BTreeMap::new(),
-                detected: BTreeSet::new(),
+                detected: SignatureBits::sized_for(view.signature_count()),
             })
             .collect::<Vec<_>>();
         let report_windows = combined_report_windows(&groups);
@@ -197,37 +532,44 @@ impl<'i, 'm> PatternScan<'i, 'm> {
             .map(|group| group.view.lookback())
             .max()
             .unwrap_or(0);
-        let layout = match selected.layout {
-            LayoutNeed::NotExecutable => None,
-            LayoutNeed::NeverResolved => Some(None),
-            LayoutNeed::Executable => Some(executable_layout()),
+        let executable_layout = match selected.layout {
+            LayoutNeed::Executable => executable_layout(),
+            LayoutNeed::NotExecutable | LayoutNeed::NeverResolved => None,
         };
         let mut scan = Self {
             image,
             groups,
             kind: request.selection.kind(),
             settings: request.settings,
+            context: request.context,
             object_length: request.object_length,
+            pass: MatchingPass::Main,
             report_windows,
             lookback,
+            executable_layout,
+            layout_need: selected.layout,
             retained: Vec::new(),
             first_retained: 0,
             fed: 0,
             probed_to: 0,
             positional: VecDeque::new(),
             queue: VecDeque::new(),
+            hits: Vec::new(),
+            armed: ArmedParts::default(),
+            second_pass_search: None,
+            selection_filter,
             found: Vec::new(),
             types_found: Vec::new(),
             stop_once_past: None,
             stopped: false,
         };
-        let state = match &layout {
-            None => LayoutState::NotExecutable,
-            Some(None) => LayoutState::Missing,
-            Some(Some(layout)) => LayoutState::Known(layout),
-        };
-        scan.place_positional(state)?;
+        scan.place_positional()?;
         Ok(scan)
+    }
+
+    #[must_use]
+    pub fn fed_length(&self) -> usize {
+        usize::try_from(self.fed).unwrap_or(usize::MAX)
     }
 
     pub fn feed(&mut self, chunk: &[u8]) -> Result<ScanProgress, PatternScanError> {
@@ -239,7 +581,7 @@ impl<'i, 'm> PatternScan<'i, 'm> {
             .ok_or(PatternScanError::MoreBytesThanDeclared {
                 declared: self.object_length,
             })?;
-        if self.stopped || self.groups.is_empty() {
+        if self.is_done() || self.groups.is_empty() {
             self.fed = fed;
             return Ok(self.progress());
         }
@@ -249,59 +591,193 @@ impl<'i, 'm> PatternScan<'i, 'm> {
         Ok(self.progress())
     }
 
-    pub fn finish(mut self) -> Result<PatternOutcomes, PatternScanError> {
+    fn skip(&mut self, length: usize) -> Result<(), PatternScanError> {
+        if !self.is_done() && !self.groups.is_empty() {
+            return Err(PatternScanError::FewerBytesThanDeclared {
+                declared: self.object_length,
+                fed: self.fed,
+            });
+        }
+        self.fed = self
+            .fed
+            .checked_add(u64::try_from(length).unwrap_or(u64::MAX))
+            .filter(|fed| *fed <= self.object_length)
+            .ok_or(PatternScanError::MoreBytesThanDeclared {
+                declared: self.object_length,
+            })?;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn logical_state_bytes(&self) -> usize {
+        self.groups
+            .iter()
+            .map(|group| {
+                group
+                    .logical
+                    .as_ref()
+                    .map_or(0, LogicalState::state_bytes)
+                    .saturating_add(group.detected.bytes())
+            })
+            .fold(
+                self.second_pass_search
+                    .as_ref()
+                    .map_or(0, SecondPassSearch::state_bytes),
+                usize::saturating_add,
+            )
+    }
+
+    pub fn finish(mut self) -> Result<ScanEnd<'i, 'm, 'r>, PatternScanError> {
         if self.fed != self.object_length {
             return Err(PatternScanError::FewerBytesThanDeclared {
                 declared: self.object_length,
                 fed: self.fed,
             });
         }
-        if !self.stopped && !self.groups.is_empty() {
+        if !self.is_done() && !self.groups.is_empty() {
             self.advance()?;
         }
+        if self.pass == MatchingPass::Main && !self.stopped && self.needs_second_pass() {
+            self.start_second_pass()?;
+            return Ok(ScanEnd::SecondPassNeeded(Box::new(self)));
+        }
+        Ok(ScanEnd::Complete(self.outcomes()?))
+    }
+
+    fn needs_second_pass(&self) -> bool {
+        self.groups.iter().any(|group| {
+            group
+                .logical
+                .as_ref()
+                .is_some_and(LogicalState::needs_second_pass)
+        })
+    }
+
+    fn is_done(&self) -> bool {
+        self.stopped
+    }
+
+    fn start_second_pass(&mut self) -> Result<(), PatternScanError> {
+        self.pass = MatchingPass::Second;
+        let armed: Vec<ArmedGroup<'_, '_>> = self
+            .groups
+            .iter()
+            .enumerate()
+            .filter_map(|(index, group)| {
+                group.logical.as_ref().map(|state| ArmedGroup {
+                    index,
+                    patterns: &group.view,
+                    logical: state.view(),
+                    armed: state.armed_signatures(),
+                })
+            })
+            .collect();
+        self.second_pass_search = SecondPassSearch::for_armed(&armed)?;
+        for group in &mut self.groups {
+            group.tables = group.view.anchor_tables(MatchingPass::Second);
+            group.chains.clear();
+        }
+        self.retained.clear();
+        self.first_retained = 0;
+        self.fed = 0;
+        self.probed_to = 0;
+        self.positional.clear();
+        self.queue.clear();
+        self.armed.clear();
+        Ok(())
+    }
+
+    fn outcomes(mut self) -> Result<PatternOutcomes, PatternScanError> {
         self.found.sort_by_key(|found| found.order);
         let mut detections = Vec::with_capacity(self.found.len());
-        for found in self.found {
+        let mut strong_found = false;
+        for found in std::mem::take(&mut self.found) {
             let strong = found.detection.indicator == Indicator::Strong;
             detections.push(found.detection);
             if strong && !self.settings.every_match {
+                strong_found = true;
                 break;
             }
         }
         self.types_found.sort_by_key(|found| found.offset);
+        let logical = if strong_found || self.stopped {
+            LogicalFindings::default()
+        } else {
+            self.logical_findings()?
+        };
         Ok(PatternOutcomes {
             detections,
             types_found: self.types_found,
+            logical,
         })
     }
 
+    fn logical_findings(&self) -> Result<LogicalFindings, PatternScanError> {
+        let mut findings = LogicalFindings::default();
+        let layout = match self.layout_need {
+            LayoutNeed::Executable => match &self.executable_layout {
+                Some(layout) => LayoutState::Known(layout),
+                None => LayoutState::Missing,
+            },
+            LayoutNeed::NotExecutable | LayoutNeed::NeverResolved => LayoutState::NotExecutable,
+        };
+        for group in &self.groups {
+            let Some(logical) = &group.logical else {
+                continue;
+            };
+            logical.evaluate(
+                self.image,
+                &self.settings,
+                &self.context,
+                self.object_length,
+                layout,
+                &mut findings,
+            )?;
+            if findings.ends_the_scan(self.settings.every_match) {
+                break;
+            }
+        }
+        Ok(findings)
+    }
+
     fn progress(&self) -> ScanProgress {
-        if self.stopped {
+        if self.is_done() {
             ScanProgress::Stopped
         } else {
             ScanProgress::Continue
         }
     }
 
-    fn place_positional(&mut self, layout: LayoutState<'_>) -> Result<(), PatternScanError> {
+    fn place_positional(&mut self) -> Result<(), PatternScanError> {
+        let layout = match self.layout_need {
+            LayoutNeed::NotExecutable => LayoutState::NotExecutable,
+            LayoutNeed::NeverResolved => LayoutState::Missing,
+            LayoutNeed::Executable => match &self.executable_layout {
+                Some(layout) => LayoutState::Known(layout),
+                None => LayoutState::Missing,
+            },
+        };
         let mut placed = Vec::new();
+        let mut starts = Vec::new();
         for (group_index, group) in self.groups.iter().enumerate() {
             for id in group.view.positional() {
                 let record = group.view.signature(id)?;
                 if !self.category_is_live(record.category) {
                     continue;
                 }
-                let program = group.view.program(record.first_program)?;
-                for (first_start, last_start) in
-                    placed_starts(record.placement, self.object_length, layout)
-                {
+                placed_starts(record.placement, self.object_length, layout, &mut starts);
+                if starts.is_empty() {
+                    continue;
+                }
+                let program = group.view.program_header(record.first_program)?;
+                for (first_start, last_start) in starts.iter().copied() {
                     placed.push(Candidate {
                         group: group_index,
                         anchor: first_start,
                         program: record.first_program,
                         first_start,
                         last_start,
-                        ready_at: ready_at(&program, last_start),
+                        ready_at: ready_at(program, last_start),
                     });
                 }
             }
@@ -325,7 +801,7 @@ impl<'i, 'm> PatternScan<'i, 'm> {
         } else {
             self.fed.saturating_sub(3)
         };
-        while self.probed_to < probe_limit && !self.stopped {
+        while self.probed_to < probe_limit && !self.is_done() {
             let pass_end = self
                 .probed_to
                 .saturating_add(POSITIONS_PER_PASS)
@@ -344,21 +820,18 @@ impl<'i, 'm> PatternScan<'i, 'm> {
     }
 
     fn probe(&mut self, pass_end: u64) -> Result<(), PatternScanError> {
-        let mut hits: Vec<(u64, usize, AnchoredProgram)> = Vec::new();
-        for (group_index, group) in self.groups.iter().enumerate() {
-            self.probe_group(group_index, &group.view, pass_end, &mut hits);
-        }
-        if self.groups.len() > 1 {
-            hits.sort_by_key(|(position, group, _)| (*position, *group));
-        }
+        let mut hits = std::mem::take(&mut self.hits);
+        hits.clear();
+        self.probe_positions(pass_end, &mut hits);
+        hits.sort_by_key(|(position, group, _)| (*position, *group));
         self.probed_to = pass_end;
-        for (position, group_index, hit) in hits {
+        for (position, group_index, hit) in hits.drain(..) {
             self.admit_positional_up_to(position);
             let group = self
                 .groups
                 .get(group_index)
                 .ok_or(GroupMalformed::UnknownProgram(hit.program))?;
-            let program = group.view.program(hit.program)?;
+            let program = group.view.program_header(hit.program)?;
             let Some(last_start) = position.checked_sub(u64::from(hit.displacement.nearest)) else {
                 continue;
             };
@@ -369,63 +842,259 @@ impl<'i, 'm> PatternScan<'i, 'm> {
                 program: hit.program,
                 first_start,
                 last_start,
-                ready_at: ready_at(&program, last_start),
+                ready_at: ready_at(program, last_start),
             });
         }
+        self.hits = hits;
         self.admit_positional_up_to(pass_end.saturating_sub(1));
+        self.expire_armed();
         Ok(())
     }
 
-    fn probe_group(
+    fn expire_armed(&mut self) {
+        let probed_to = self.probed_to;
+        let expired = |part: &ArmedPart| {
+            part.last_start.is_some_and(|last| {
+                last.saturating_add(u64::from(part.displacement.farthest)) < probed_to
+            })
+        };
+        let stale = self.armed.parts.iter().filter(|part| expired(part)).count();
+        if stale.saturating_mul(2) <= self.armed.parts.len() {
+            return;
+        }
+        let kept: Vec<ArmedPart> = self
+            .armed
+            .parts
+            .drain(..)
+            .filter(|part| !expired(part))
+            .collect();
+        self.armed.clear();
+        for part in kept {
+            self.armed.arm(part);
+        }
+    }
+
+    fn arm_next_part(
+        &mut self,
+        group: usize,
+        part_program: ProgramId,
+        part_end: u64,
+    ) -> Result<(), PatternScanError> {
+        let Some(view) = self.groups.get(group).map(|group| group.view) else {
+            return Ok(());
+        };
+        let next = ProgramId(part_program.0.saturating_add(1));
+        let program = view.program(next)?;
+        let Some(ArmedAnchor {
+            bytes: anchor,
+            case,
+            displacement,
+        }) = program.armed_anchor()
+        else {
+            return Ok(());
+        };
+        let first_start = part_end.saturating_add(u64::from(program.header.gap_before.get()));
+        let last_start = program
+            .gap_most()
+            .map(|most| part_end.saturating_add(u64::from(most)))
+            .or(match anchor {
+                Some(_) => None,
+                None => Some(self.object_length.saturating_sub(1)),
+            });
+        let part = ArmedPart {
+            group,
+            program: next,
+            anchor,
+            case,
+            displacement,
+            first_start,
+            last_start,
+        };
+        let Some(index) = self.armed.arm(part.clone()) else {
+            return Ok(());
+        };
+        if anchor.is_none() {
+            let last = last_start.unwrap_or(first_start);
+            self.insert_in_order(Candidate {
+                group,
+                anchor: first_start,
+                program: next,
+                first_start,
+                last_start: last,
+                ready_at: ready_at(program.header, last),
+            });
+        } else {
+            {
+                let from = first_start
+                    .saturating_add(u64::from(displacement.nearest))
+                    .max(self.first_retained);
+                let mut found = Vec::new();
+                let first =
+                    usize::try_from(from.saturating_sub(self.first_retained)).unwrap_or(usize::MAX);
+                let last = usize::try_from(
+                    self.probed_to
+                        .saturating_sub(self.first_retained)
+                        .saturating_add(1),
+                )
+                .unwrap_or(usize::MAX)
+                .min(self.retained.len());
+                if let Some(searched) = self.retained.get(first..last) {
+                    for (offset, window) in searched.windows(SHORT_ANCHOR_LENGTH).enumerate() {
+                        let Ok(window) = <[u8; SHORT_ANCHOR_LENGTH]>::try_from(window) else {
+                            continue;
+                        };
+                        let position = from.saturating_add(u64::try_from(offset).unwrap_or(0));
+                        if position < self.probed_to
+                            && part.anchored_by(window)
+                            && part.admits_anchor_at(position)
+                        {
+                            found.push(position);
+                        }
+                    }
+                }
+                let _ = index;
+                for position in found {
+                    let Some(last) = position.checked_sub(u64::from(displacement.nearest)) else {
+                        continue;
+                    };
+                    self.insert_in_order(Candidate {
+                        group,
+                        anchor: position,
+                        program: next,
+                        first_start: position.saturating_sub(u64::from(displacement.farthest)),
+                        last_start: last,
+                        ready_at: ready_at(program.header, last),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn insert_in_order(&mut self, candidate: Candidate) {
+        let at = self
+            .queue
+            .partition_point(|queued| queued.anchor <= candidate.anchor);
+        self.queue.insert(at, candidate);
+    }
+
+    fn probe_positions(&self, pass_end: u64, hits: &mut Vec<(u64, usize, AnchoredProgram)>) {
+        if pass_end <= self.probed_to {
+            return;
+        }
+        let Some(start) = self
+            .probed_to
+            .checked_sub(self.first_retained)
+            .and_then(|start| usize::try_from(start).ok())
+        else {
+            return;
+        };
+        let positions = usize::try_from(pass_end.saturating_sub(self.probed_to)).unwrap_or(0);
+        let end = start
+            .saturating_add(positions)
+            .saturating_add(LONG_ANCHOR_LENGTH - 1)
+            .min(self.retained.len());
+        let Some(bytes) = self.retained.get(start..end) else {
+            return;
+        };
+        let pass = self.pass;
+        if let Some(search) = &self.second_pass_search {
+            search.search(bytes, self.probed_to, positions, hits);
+        }
+        let probes: Vec<GroupProbe<'m>> = if self.second_pass_search.is_some() {
+            Vec::new()
+        } else {
+            self.groups
+                .iter()
+                .enumerate()
+                .filter(|(_, group)| !group.tables.is_empty())
+                .map(|(index, group)| GroupProbe::of(index, group.tables))
+                .collect()
+        };
+        let probes_folded = probes.iter().any(|probe| probe.folded.is_some());
+        let probes_short = probes.iter().any(|probe| probe.short.is_some());
+        let probes_armed = !self.armed.by_anchor.is_empty();
+        let selection_filter = self.selection_filter.filter(|_| pass == MatchingPass::Main);
+        let window = ProbedWindow {
+            bytes,
+            positions,
+            first_position: self.probed_to,
+            selection_filter,
+        };
+        if !probes.is_empty() {
+            probe_long_windows(&window, &probes, probes_folded, hits);
+        }
+        if probes_short || probes_armed {
+            self.probe_short_windows(&window, &probes, probes_short, probes_armed, hits);
+        }
+        probe_everywhere(&window, &probes, hits);
+    }
+
+    fn probe_short_windows(
         &self,
-        group_index: usize,
-        group: &PatternGroup<'m>,
-        pass_end: u64,
+        window: &ProbedWindow<'_, 'm>,
+        probes: &[GroupProbe<'m>],
+        probes_short: bool,
+        probes_armed: bool,
         hits: &mut Vec<(u64, usize, AnchoredProgram)>,
     ) {
-        let long_filter = group.long_anchor_filter();
-        let short_filter = group.short_anchor_filter();
-        let probes_short = group.has_short_anchors();
-        let everywhere: Vec<ProgramId> = group.everywhere().collect();
-        let mut position = self.probed_to;
-        while position < pass_end {
-            if let Some(window) = self
-                .window_at(position, LONG_ANCHOR_LENGTH)
-                .and_then(|window| <[u8; LONG_ANCHOR_LENGTH]>::try_from(window).ok())
-                && long_filter.may_hold(u32::from_le_bytes(window))
-            {
-                hits.extend(
-                    group
-                        .long_anchored(window)
-                        .map(|hit| (position, group_index, hit)),
-                );
+        let mut value: u16 = 0;
+        for (index, byte) in window.bytes.iter().enumerate() {
+            value = (value >> 8) | (u16::from(*byte) << 8);
+            let Some(offset) = index.checked_sub(SHORT_ANCHOR_LENGTH - 1) else {
+                continue;
+            };
+            if offset >= window.positions {
+                break;
             }
-            if probes_short
-                && let Some(window) = self
-                    .window_at(position, SHORT_ANCHOR_LENGTH)
-                    .and_then(|window| <[u8; SHORT_ANCHOR_LENGTH]>::try_from(window).ok())
-                && short_filter.may_hold(u16::from_le_bytes(window))
-            {
-                hits.extend(
-                    group
-                        .short_anchored(window)
-                        .map(|hit| (position, group_index, hit)),
-                );
+            let bytes = value.to_le_bytes();
+            let short_may_hold = probes_short
+                && window
+                    .selection_filter
+                    .is_none_or(|filter| filter.may_hold_short(value));
+            for probe in probes.iter().filter(|_| short_may_hold) {
+                if let Some(short) = &probe.short
+                    && short.may_hold(value)
+                {
+                    let position = window.position(offset);
+                    hits.extend(
+                        probe
+                            .tables
+                            .short_anchored(bytes)
+                            .map(|hit| (position, probe.group, hit)),
+                    );
+                }
             }
-            for program in &everywhere {
+            if probes_armed {
+                let lowered = ascii_lowercase(bytes);
+                if self.armed.may_hold(u16::from_le_bytes(lowered)) {
+                    self.armed_hits(bytes, lowered, window.position(offset), hits);
+                }
+            }
+        }
+    }
+
+    fn armed_hits(
+        &self,
+        window: [u8; SHORT_ANCHOR_LENGTH],
+        lowered: [u8; SHORT_ANCHOR_LENGTH],
+        position: u64,
+        hits: &mut Vec<(u64, usize, AnchoredProgram)>,
+    ) {
+        for index in self.armed.by_anchor.get(&lowered).into_iter().flatten() {
+            if let Some(part) = self.armed.parts.get(*index)
+                && part.anchored_by(window)
+                && part.admits_anchor_at(position)
+            {
                 hits.push((
                     position,
-                    group_index,
+                    part.group,
                     AnchoredProgram {
-                        program: *program,
-                        displacement: debar_image::Displacement {
-                            nearest: 0,
-                            farthest: 0,
-                        },
+                        program: part.program,
+                        displacement: part.displacement,
                     },
                 ));
             }
-            position = position.saturating_add(1);
         }
     }
 
@@ -439,11 +1108,6 @@ impl<'i, 'm> PatternScan<'i, 'm> {
                 self.queue.push_back(candidate);
             }
         }
-    }
-
-    fn window_at(&self, position: u64, length: usize) -> Option<&[u8]> {
-        let start = usize::try_from(position.checked_sub(self.first_retained)?).ok()?;
-        self.retained.get(start..start.checked_add(length)?)
     }
 
     fn verify_ready(&mut self) -> Result<(), PatternScanError> {
@@ -478,34 +1142,28 @@ impl<'i, 'm> PatternScan<'i, 'm> {
         let view = group.view;
         let program = view.program(candidate.program)?;
         let signature = program.header.signature.get();
-        if group.detected.contains(&signature) {
+        if group.detected.contains(signature) {
+            return Ok(());
+        }
+        let segment = program.header.segment.get();
+        if segment > 0 && !group.chains.contains_key(&signature) {
             return Ok(());
         }
         let record = view.signature(PatternSignatureId(signature))?;
         if !self.category_is_live(record.category) {
             return Ok(());
         }
-        let segment = program.header.segment.get();
-        let starts = match segment.checked_sub(1) {
-            None => PositionSet::between(candidate.first_start, candidate.last_start),
-            Some(previous) => {
-                let Some(previous_ends) = group
-                    .chains
-                    .get(&signature)
-                    .and_then(|ends| ends.get(usize::try_from(previous).ok()?))
-                else {
-                    return Ok(());
-                };
-                let gap_least = u64::from(program.header.gap_before.get());
-                let gap_most = program.gap_most().map(u64::from);
-                PositionSet::of_ranges(previous_ends.iter().map(|end| {
-                    let first = candidate.first_start.max(end.saturating_add(gap_least));
-                    let last = gap_most.map_or(candidate.last_start, |most| {
-                        candidate.last_start.min(end.saturating_add(most))
-                    });
-                    (first, last)
-                }))
-            }
+        if let RecordedOutcome::Subsignature { logical, .. } = record.outcome
+            && self.pass == MatchingPass::Second
+            && !group
+                .logical
+                .as_ref()
+                .is_some_and(|state| state.is_armed(logical))
+        {
+            return Ok(());
+        }
+        let Some(starts) = candidate_starts(group, &program, candidate) else {
+            return Ok(());
         };
         let Some(first_start) = starts.first() else {
             return Ok(());
@@ -538,7 +1196,26 @@ impl<'i, 'm> PatternScan<'i, 'm> {
             if let Some(remembered) = ends.get_mut(index) {
                 remembered.remember(earliest_end);
             }
-            return Ok(());
+            return self.arm_next_part(candidate.group, candidate.program, earliest_end);
+        }
+        if let RecordedOutcome::Subsignature { logical, index } = record.outcome {
+            let counts_each_start = record.segment_count == 1
+                && self
+                    .groups
+                    .get(candidate.group)
+                    .and_then(|group| group.logical.as_ref())
+                    .map(|state| state.counts_each_match(logical, index))
+                    .transpose()?
+                    .unwrap_or(false);
+            let matches = counted_matches(
+                &program,
+                &bytes,
+                &starts,
+                record.segment_count,
+                counts_each_start,
+            )
+            .map_err(|_| GroupMalformed::Program(candidate.program))?;
+            return self.count_subsignature(candidate.group, signature, logical, index, &matches);
         }
         let order = ReportOrder {
             window: report_window(self.report_windows, earliest_end),
@@ -547,6 +1224,28 @@ impl<'i, 'm> PatternScan<'i, 'm> {
             position: candidate.anchor,
         };
         self.matched(candidate, signature, &record, order)
+    }
+
+    fn count_subsignature(
+        &mut self,
+        group_index: usize,
+        signature: u32,
+        logical: LogicalSignatureId,
+        index: u16,
+        matches: &CountedMatches,
+    ) -> Result<(), PatternScanError> {
+        let pass = self.pass;
+        let Some(group) = self.groups.get_mut(group_index) else {
+            return Ok(());
+        };
+        let Some(state) = group.logical.as_mut() else {
+            return Ok(());
+        };
+        if state.count(logical, index, matches, pass)?.saturated {
+            group.detected.insert(signature);
+            group.chains.remove(&signature);
+        }
+        Ok(())
     }
 
     fn matched(
@@ -562,6 +1261,11 @@ impl<'i, 'm> PatternScan<'i, 'm> {
         }
         match record.outcome {
             RecordedOutcome::Detection(name) => {
+                if record.category == Category::PotentiallyUnwanted
+                    && !self.settings.unwanted_categories.admit(self.image, name)?
+                {
+                    return Ok(());
+                }
                 let name = self.image.signature_name(name)?;
                 if name.indicator == Indicator::Strong
                     && !self.settings.every_match
@@ -588,6 +1292,7 @@ impl<'i, 'm> PatternScan<'i, 'm> {
                     });
                 }
             }
+            RecordedOutcome::Subsignature { .. } => {}
         }
         Ok(())
     }
@@ -612,14 +1317,17 @@ impl<'i, 'm> PatternScan<'i, 'm> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LayoutNeed {
     NotExecutable,
     NeverResolved,
     Executable,
 }
 
+type SelectedViews<'m> = Vec<(SignatureGroup, PatternGroup<'m>, Option<LogicalGroup<'m>>)>;
+
 struct Selected<'m> {
-    groups: Vec<PatternGroup<'m>>,
+    groups: SelectedViews<'m>,
     layout: LayoutNeed,
 }
 
@@ -660,7 +1368,7 @@ fn selected_groups<'m>(
     let mut groups = Vec::with_capacity(wanted.len());
     for group in wanted {
         if let Some(view) = image.pattern_group(group)? {
-            groups.push(view);
+            groups.push((group, view, image.logical_group(group)?));
         }
     }
     Ok(Selected { groups, layout })
@@ -696,16 +1404,57 @@ fn window_end(windows: Option<ReportWindows>, window: u64) -> u64 {
         .saturating_add(u64::from(windows.length))
 }
 
-fn ready_at(program: &ProgramView<'_>, last_start: u64) -> u64 {
-    let after_reach = program.after.map_or(0, |after| {
-        after
-            .sequences()
-            .filter_map(Result::ok)
-            .map(|sets| u64::try_from(sets.len() / 32).unwrap_or(u64::MAX))
-            .max()
-            .unwrap_or(0)
-    });
+fn candidate_starts(
+    group: &SelectedGroup<'_>,
+    program: &ProgramView<'_>,
+    candidate: &Candidate,
+) -> Option<PositionSet> {
+    let signature = program.header.signature.get();
+    let Some(previous) = program.header.segment.get().checked_sub(1) else {
+        return Some(PositionSet::between(
+            candidate.first_start,
+            candidate.last_start,
+        ));
+    };
+    let previous_ends = group
+        .chains
+        .get(&signature)
+        .and_then(|ends| ends.get(usize::try_from(previous).ok()?))?;
+    let gap_least = u64::from(program.header.gap_before.get());
+    let gap_most = program.gap_most().map(u64::from);
+    Some(PositionSet::of_ranges(previous_ends.iter().map(|end| {
+        let first = candidate.first_start.max(end.saturating_add(gap_least));
+        let last = gap_most.map_or(candidate.last_start, |most| {
+            candidate.last_start.min(end.saturating_add(most))
+        });
+        (first, last)
+    })))
+}
+
+fn counted_matches(
+    program: &ProgramView<'_>,
+    bytes: &RetainedBytes<'_>,
+    starts: &PositionSet,
+    segment_count: u32,
+    counts_each_start: bool,
+) -> Result<CountedMatches, ProgramMalformed> {
+    if segment_count > 1 {
+        return Ok(CountedMatches::Completion);
+    }
+    if !counts_each_start {
+        return Ok(CountedMatches::Once);
+    }
+    let mut matching = Vec::new();
+    for start in starts.positions() {
+        if !match_ends(program, bytes, &PositionSet::between(start, start))?.is_empty() {
+            matching.push(start);
+        }
+    }
+    Ok(CountedMatches::EachStart(matching))
+}
+
+fn ready_at(program: &ProgramHeader, last_start: u64) -> u64 {
     last_start
-        .saturating_add(u64::from(program.header.longest.get()))
-        .saturating_add(after_reach)
+        .saturating_add(u64::from(program.longest.get()))
+        .saturating_add(u64::from(program.after_reach.get()))
 }

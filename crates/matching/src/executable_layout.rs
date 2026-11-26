@@ -17,34 +17,29 @@ pub(crate) fn placed_starts(
     placement: Placement,
     object_length: u64,
     layout: LayoutState<'_>,
-) -> Vec<(u64, u64)> {
+    starts: &mut Vec<(u64, u64)>,
+) {
+    starts.clear();
     let Some(last_position) = object_length.checked_sub(1) else {
-        return Vec::new();
+        return;
     };
     let length = u32::try_from(object_length).unwrap_or(u32::MAX);
-    let ranges: Vec<(u64, u64)> = match (placement, layout) {
+    match (placement, layout) {
         (Placement::Anywhere, _)
         | (Placement::BeforeEnd { .. }, LayoutState::Missing)
-        | (Placement::InExecutable { .. }, LayoutState::Missing | LayoutState::NotExecutable) => {
-            Vec::new()
-        }
-        (Placement::FromStart { distance, shift }, _) => {
-            shifted(distance, shift).into_iter().collect()
-        }
+        | (Placement::InExecutable { .. }, LayoutState::Missing | LayoutState::NotExecutable) => {}
+        (Placement::FromStart { distance, shift }, _) => starts.extend(shifted(distance, shift)),
         (Placement::BeforeEnd { distance, shift }, _) => {
-            shifted(length.wrapping_sub(distance), shift)
-                .into_iter()
-                .collect()
+            starts.extend(shifted(length.wrapping_sub(distance), shift));
         }
         (Placement::InExecutable { anchor, shift }, LayoutState::Known(layout)) => {
-            executable_ranges(anchor, shift, length, layout)
+            executable_ranges(anchor, shift, length, layout, starts);
         }
-    };
-    ranges
-        .into_iter()
-        .filter(|(first, _)| *first <= last_position)
-        .map(|(first, last)| (first, last.min(last_position)))
-        .collect()
+    }
+    starts.retain(|(first, _)| *first <= last_position);
+    for (_, last) in starts.iter_mut() {
+        *last = (*last).min(last_position);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -64,13 +59,14 @@ fn executable_ranges(
     shift: u32,
     object_length: u32,
     layout: &ExecutableLayout,
-) -> Vec<(u64, u64)> {
+    starts: &mut Vec<(u64, u64)>,
+) {
     let section = |index: u32| {
         usize::try_from(index)
             .ok()
             .and_then(|index| layout.sections.get(index))
     };
-    match anchor {
+    let ranges: Vec<(u64, u64)> = match anchor {
         ExecutableAnchor::AfterEntryPoint { distance } => {
             shifted(layout.entry_point.wrapping_add(distance), shift)
                 .into_iter()
@@ -120,5 +116,6 @@ fn executable_ranges(
             .iter()
             .map(|offset| (u64::from(*offset), u64::from(*offset)))
             .collect(),
-    }
+    };
+    starts.extend(ranges);
 }

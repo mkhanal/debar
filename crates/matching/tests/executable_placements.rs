@@ -13,8 +13,8 @@ use debar_image::{
     Placement, RecognitionRank, SignatureGroup,
 };
 use debar_matching::{
-    ExecutableLayout, ExecutableSection, GroupSelection, PatternRequest, PatternScan,
-    PatternSettings,
+    ExecutableLayout, ExecutableSection, GroupSelection, ObjectContext, PatternRequest,
+    PatternScan, PatternSettings, UnwantedCategories,
 };
 
 const GENERIC: SignatureGroup = SignatureGroup(0);
@@ -118,13 +118,21 @@ fn detected(
         selection: GroupSelection::ForKind(kind),
         settings: PatternSettings {
             potentially_unwanted: false,
+            unwanted_categories: UnwantedCategories::Every,
             every_match: true,
         },
         object_length: object.len() as u64,
+        context: ObjectContext::TOP_LEVEL,
     };
     let mut scan = PatternScan::new(&image, request, || layout).unwrap();
     scan.feed(object).unwrap();
-    !scan.finish().unwrap().detections.is_empty()
+    !scan
+        .finish()
+        .unwrap()
+        .into_outcomes()
+        .unwrap()
+        .detections
+        .is_empty()
 }
 
 fn in_executable(anchor: ExecutableAnchor, shift: u32) -> Placement {
@@ -315,14 +323,18 @@ fn without_an_executable_layout_only_absolute_and_unplaced_signatures_match() {
             selection: GroupSelection::ForKind(kind),
             settings: PatternSettings {
                 potentially_unwanted: false,
+                unwanted_categories: UnwantedCategories::Every,
                 every_match: true,
             },
             object_length: object.len() as u64,
+            context: ObjectContext::TOP_LEVEL,
         };
         let mut scan = PatternScan::new(&image, request, || layout).unwrap();
         scan.feed(&object).unwrap();
         let mut names: Vec<String> = scan
             .finish()
+            .unwrap()
+            .into_outcomes()
             .unwrap()
             .detections
             .into_iter()
@@ -354,6 +366,7 @@ fn the_executable_layout_is_asked_for_only_for_an_executable_kind() {
             selection: GroupSelection::ForKind(kind),
             settings: PatternSettings::default(),
             object_length: 16,
+            context: ObjectContext::TOP_LEVEL,
         };
         let scan = PatternScan::new(&image, request, || {
             asked.set(asked.get() + 1);

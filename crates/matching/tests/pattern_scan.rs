@@ -14,7 +14,10 @@ use debar_image::{
     ObjectKind, OwnBytes, Pattern, PatternElement, PatternOutcome, PatternSignature, Placement,
     RecognitionRank, SignatureGroup,
 };
-use debar_matching::{GroupSelection, PatternRequest, PatternScan, PatternSettings, ScanProgress};
+use debar_matching::{
+    GroupSelection, ObjectContext, PatternRequest, PatternScan, PatternSettings, ScanProgress,
+    UnwantedCategories,
+};
 
 const GENERIC: SignatureGroup = SignatureGroup(0);
 
@@ -333,12 +336,14 @@ fn engine_detections(
 ) -> Vec<String> {
     let settings = PatternSettings {
         potentially_unwanted: false,
+        unwanted_categories: UnwantedCategories::Every,
         every_match,
     };
     let request = PatternRequest {
         selection: GroupSelection::ForKind(ObjectKind::BinaryData),
         settings,
         object_length: object.len() as u64,
+        context: ObjectContext::TOP_LEVEL,
     };
     let mut scan = PatternScan::new(image, request, || None).unwrap();
     let mut rest = object;
@@ -358,6 +363,8 @@ fn engine_detections(
         rest = after;
     }
     scan.finish()
+        .unwrap()
+        .into_outcomes()
         .unwrap()
         .detections
         .into_iter()

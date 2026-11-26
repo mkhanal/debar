@@ -13,6 +13,9 @@ const DEEPEST_ALTERNATIVES: usize = 16;
 const MOST_EXPANDED_ALTERNATIVES: usize = 4096;
 const SHORTEST_PLAIN_EXTENDED_BODY: usize = 3;
 const SHORTEST_PLAIN_TYPE_RECOGNITION_BODY: usize = 2;
+const SHORTEST_PLAIN_SUBSIGNATURE_BODY: usize = 2;
+const PREFILTERED_TARGETS: [u32; 4] = [0, 1, 4, 7];
+const ELEMENTS_A_PREFILTER_NEEDS: usize = 2;
 const SHORTEST_PART: usize = 2;
 const SHORTEST_FIXED_RUN: usize = 2;
 
@@ -32,6 +35,7 @@ pub enum MalformedBody {
     NegatedGenericAlternatives { at: usize },
     UnsupportedInsideAlternatives { at: usize },
     TooManyAlternatives { at: usize },
+    NoPrefilterInPart,
 }
 
 impl fmt::Display for MalformedBody {
@@ -80,6 +84,10 @@ impl fmt::Display for MalformedBody {
             Self::TooManyAlternatives { at } => write!(
                 formatter,
                 "the alternatives at {at} expand to more than {MOST_EXPANDED_ALTERNATIVES} strings"
+            ),
+            Self::NoPrefilterInPart => write!(
+                formatter,
+                "a part of the body does not begin with two elements a prefilter can be made from"
             ),
         }
     }
@@ -135,15 +143,31 @@ enum Token {
     },
 }
 
-pub fn read_body(text: &[u8]) -> Result<ReadBody, MalformedBody> {
-    read_body_at_least(text, SHORTEST_PLAIN_EXTENDED_BODY)
+pub fn read_body(text: &[u8], target: u32) -> Result<ReadBody, MalformedBody> {
+    read_body_at_least(
+        text,
+        SHORTEST_PLAIN_EXTENDED_BODY,
+        PREFILTERED_TARGETS.contains(&target),
+    )
+}
+
+pub fn read_subsignature_body(text: &[u8], target: u32) -> Result<ReadBody, MalformedBody> {
+    read_body_at_least(
+        text,
+        SHORTEST_PLAIN_SUBSIGNATURE_BODY,
+        PREFILTERED_TARGETS.contains(&target),
+    )
 }
 
 pub fn read_type_recognition_body(text: &[u8]) -> Result<ReadBody, MalformedBody> {
-    read_body_at_least(text, SHORTEST_PLAIN_TYPE_RECOGNITION_BODY)
+    read_body_at_least(text, SHORTEST_PLAIN_TYPE_RECOGNITION_BODY, false)
 }
 
-fn read_body_at_least(text: &[u8], shortest_plain_body: usize) -> Result<ReadBody, MalformedBody> {
+fn read_body_at_least(
+    text: &[u8],
+    shortest_plain_body: usize,
+    prefiltered: bool,
+) -> Result<ReadBody, MalformedBody> {
     let mut reader = Reader { text, at: 0 };
     let mut tokens = Vec::new();
     while reader.peek().is_some() {
@@ -178,6 +202,9 @@ fn read_body_at_least(text: &[u8], shortest_plain_body: usize) -> Result<ReadBod
     let parts = split_into_parts(tokens)?;
     for part in &parts {
         validate_part(&part.tokens)?;
+        if prefiltered && !begins_with_prefilter_elements(&part.tokens) {
+            return Err(MalformedBody::NoPrefilterInPart);
+        }
     }
     let inner_edge_class = parts.iter().any(|part| {
         matches!(part.tokens.first(), Some(Token::Class { .. }))
@@ -362,6 +389,38 @@ fn split_into_parts(tokens: Vec<Token>) -> Result<Vec<Part>, MalformedBody> {
         return Err(MalformedBody::EmptyPart);
     }
     Ok(parts)
+}
+
+fn is_prefilter_special(token: &Token) -> bool {
+    match token {
+        Token::Byte(_) | Token::LoneByteDistance { .. } => false,
+        Token::Choice(strings) => strings.iter().any(|string| string.len() != 1),
+        Token::NoneOf { width, .. } => *width != 1,
+        Token::Class { .. } | Token::Star | Token::Gap { .. } => true,
+    }
+}
+
+fn begins_with_prefilter_elements(tokens: &[Token]) -> bool {
+    let elements: Vec<&Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::LoneByteDistance { .. }))
+        .collect();
+    let has_wildcard_prefix =
+        matches!(elements.first(), Some(Token::Byte(byte)) if !byte.is_exact());
+    let skipped = if has_wildcard_prefix {
+        0
+    } else {
+        elements
+            .iter()
+            .take_while(|token| is_prefilter_special(token))
+            .count()
+    };
+    elements
+        .iter()
+        .skip(skipped)
+        .take_while(|token| !is_prefilter_special(token))
+        .count()
+        >= ELEMENTS_A_PREFILTER_NEEDS
 }
 
 fn validate_part(tokens: &[Token]) -> Result<(), MalformedBody> {

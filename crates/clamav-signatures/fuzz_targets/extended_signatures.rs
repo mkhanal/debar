@@ -2,7 +2,7 @@
 
 use debar_clamav_signatures::{DatabaseFile, compile};
 use debar_image::{Image, ImageBuilder, ObjectKind};
-use debar_matching::{
+use debar_matching::{ObjectContext, UnwantedCategories, 
     ExecutableLayout, ExecutableSection, GroupSelection, PatternRequest, PatternScan,
     PatternSettings,
 };
@@ -32,6 +32,7 @@ fuzz_target!(|data: &[u8]| {
     let image = Image::open(&bytes).expect("a built image opens");
     let settings = PatternSettings {
         potentially_unwanted: true,
+        unwanted_categories: UnwantedCategories::Every,
         every_match: true,
     };
     let layout = ExecutableLayout {
@@ -58,12 +59,15 @@ fuzz_target!(|data: &[u8]| {
             selection: GroupSelection::ForKindRecognisingTypes(kind),
             settings,
             object_length: object.len() as u64,
+            context: ObjectContext::TOP_LEVEL,
         };
         let layout = layout.clone();
         let mut scan = PatternScan::new(&image, request, || Some(layout)).expect("the scan starts");
         for chunk in object.chunks(7) {
             scan.feed(chunk).expect("a chunk is accepted");
         }
-        scan.finish().expect("the scan finishes");
+        scan.finish()
+            .and_then(debar_matching::ScanEnd::into_outcomes)
+            .expect("the scan finishes");
     }
 });

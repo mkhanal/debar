@@ -24,8 +24,24 @@ pub fn account_report(account: &Account, image: &[u8]) -> Result<Value, ImageErr
             } else {
                 None
             };
+            let logical = if section.kind == SectionKind::LogicalGroup {
+                opened
+                    .logical_group(SignatureGroup(section.qualifier))
+                    .ok()
+                    .flatten()
+                    .map(|group| {
+                        json!({
+                            "subsignatures": group.subsignature_count(),
+                            "counted_subsignatures": group.counted_subsignature_count(),
+                            "second_pass_subsignatures": group.second_pass_subsignature_count(),
+                        })
+                    })
+            } else {
+                None
+            };
             json!({
                 "window_overlap": window_overlap,
+                "logical": logical,
                 "kind": if recognises_types {
                     "type recognition signatures"
                 } else {
@@ -114,6 +130,7 @@ fn outcome_name(outcome: LineOutcome) -> &'static str {
         LineOutcome::Comment => "comment",
         LineOutcome::NotASignature => "not_a_signature",
         LineOutcome::TargetNotLoaded => "target_not_loaded",
+        LineOutcome::NotLoaded => "not_loaded",
         LineOutcome::NeverReports => "never_reports",
         LineOutcome::ShadowedByDuplicate => "shadowed_by_duplicate",
         LineOutcome::NotYetCompiled => "not_yet_compiled",
@@ -130,6 +147,9 @@ fn section_kind_name(kind: SectionKind) -> &'static str {
         SectionKind::Names => "names",
         SectionKind::ObjectKinds => "object kinds",
         SectionKind::TypeMagic => "type magic",
+        SectionKind::LogicalGroup => "logical signatures",
+        SectionKind::UnwantedCategories => "categories of potentially unwanted signatures",
+        SectionKind::SelectionFilters => "filters of the signature groups each kind selects",
     }
 }
 

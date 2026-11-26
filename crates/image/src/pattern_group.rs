@@ -1,13 +1,15 @@
 use zerocopy::little_endian::{U16, U32};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
+use crate::logical_group::{LogicalSignatureId, MatchingPass};
 use crate::model::{Category, ExecutableAnchor, PartMemory, Placement, ReportWindows, TypeFinding};
 use crate::names::NameId;
 use crate::object_kind::ObjectKind;
 use crate::pattern_program::{
-    Anchor, Displacement, LONG_ANCHOR_LENGTH, PatternNotCompiled, ProgramMalformed, ProgramPlace,
-    ProgramView, SHORT_ANCHOR_LENGTH, Segment, encode,
+    Anchor, AnchorCase, Displacement, LONG_ANCHOR_LENGTH, PatternNotCompiled, ProgramHeader,
+    ProgramMalformed, ProgramPlace, ProgramView, SHORT_ANCHOR_LENGTH, Segment, encode,
 };
+use crate::selection_filters::GroupAnchors;
 
 const FOUR_GRAM_SPREAD: u32 = 0x9e37_79b1;
 const FILTER_SLOTS_PER_ANCHOR_LOG: u32 = 5;
@@ -15,41 +17,62 @@ const SMALLEST_FILTER_BITS: u32 = 10;
 const LARGEST_FILTER_BITS: u32 = 30;
 const SMALLEST_BUCKET_BITS: u32 = 4;
 const SHORT_FILTER_BYTES: usize = 1 << 13;
-const PART_COUNT: usize = 10;
+const TABLE_PART_COUNT: usize = 9;
+const PART_COUNT: usize = 2 * TABLE_PART_COUNT + 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Part {
+enum TablePart {
     LongFilter,
     LongBuckets,
     LongAnchors,
+    FoldedFilter,
+    FoldedBuckets,
+    FoldedAnchors,
     ShortFilter,
     ShortAnchors,
     Everywhere,
+}
+
+const TABLE_PARTS_IN_ORDER: [TablePart; TABLE_PART_COUNT] = [
+    TablePart::LongFilter,
+    TablePart::LongBuckets,
+    TablePart::LongAnchors,
+    TablePart::FoldedFilter,
+    TablePart::FoldedBuckets,
+    TablePart::FoldedAnchors,
+    TablePart::ShortFilter,
+    TablePart::ShortAnchors,
+    TablePart::Everywhere,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Table(MatchingPass, TablePart),
     Positional,
     Signatures,
     ProgramStarts,
     Programs,
 }
 
-const PARTS_IN_ORDER: [Part; PART_COUNT] = [
-    Part::LongFilter,
-    Part::LongBuckets,
-    Part::LongAnchors,
-    Part::ShortFilter,
-    Part::ShortAnchors,
-    Part::Everywhere,
-    Part::Positional,
-    Part::Signatures,
-    Part::ProgramStarts,
-    Part::Programs,
-];
-
 impl Part {
     fn index(self) -> usize {
-        PARTS_IN_ORDER
-            .iter()
-            .position(|part| *part == self)
-            .unwrap_or(0)
+        let table_index = |table: TablePart| {
+            TABLE_PARTS_IN_ORDER
+                .iter()
+                .position(|part| *part == table)
+                .unwrap_or(0)
+        };
+        let tables_end = 2 * TABLE_PART_COUNT;
+        match self {
+            Self::Table(MatchingPass::Main, table) => table_index(table),
+            Self::Table(MatchingPass::Second, table) => {
+                TABLE_PART_COUNT.saturating_add(table_index(table))
+            }
+            Self::Positional => tables_end,
+            Self::Signatures => tables_end.saturating_add(1),
+            Self::ProgramStarts => tables_end.saturating_add(2),
+            Self::Programs => tables_end.saturating_add(3),
+        }
     }
 }
 
@@ -63,8 +86,8 @@ struct PartExtent {
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct GroupHeader {
-    long_filter_bits: U32,
-    long_bucket_bits: U32,
+    long_filter_bits: [U32; 4],
+    long_bucket_bits: [U32; 4],
     lookback: U32,
     report_window: U32,
     report_overlap: U32,
@@ -100,7 +123,7 @@ struct SignatureEntry {
     category: u8,
     placement: u8,
     report_rank: u8,
-    reserved: U16,
+    subsignature: U16,
     distance: U32,
     shift: U32,
     section: U32,
@@ -123,6 +146,7 @@ const CATEGORY_MALWARE: u8 = 1;
 const CATEGORY_POTENTIALLY_UNWANTED: u8 = 2;
 const OUTCOME_DETECTION: u8 = 1;
 const OUTCOME_TYPE_FOUND: u8 = 2;
+const OUTCOME_SUBSIGNATURE: u8 = 3;
 const ANY_REQUIRED_KIND: u16 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -135,6 +159,10 @@ pub struct ProgramId(pub u32);
 pub enum RecordedOutcome {
     Detection(NameId),
     TypeFound(TypeFinding),
+    Subsignature {
+        logical: LogicalSignatureId,
+        index: u16,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +186,7 @@ pub struct PendingPatternSignature {
     pub category: Category,
     pub placement: Placement,
     pub report_rank: u8,
+    pub pass: MatchingPass,
     pub segments: Vec<Segment>,
 }
 
@@ -170,6 +199,7 @@ pub enum GroupNotBuilt {
 pub struct BuiltGroup {
     pub bytes: Vec<u8>,
     pub signature_count: usize,
+    pub main_anchors: GroupAnchors,
 }
 
 #[must_use]
@@ -181,10 +211,77 @@ pub fn four_gram_hash(window: u32, bits: u32) -> u32 {
 }
 
 #[derive(Default)]
-struct PlacedPrograms {
+struct PendingTables {
     long_anchors: Vec<LongAnchorEntry>,
+    folded_anchors: Vec<LongAnchorEntry>,
     short_anchors: Vec<ShortAnchorEntry>,
     everywhere: Vec<U32>,
+}
+
+struct BuiltTables {
+    filter_bits: [u32; 2],
+    bucket_bits: [u32; 2],
+    parts: [Vec<u8>; TABLE_PART_COUNT],
+}
+
+impl PendingTables {
+    fn built(self) -> Result<BuiltTables, GroupNotBuilt> {
+        let Self {
+            long_anchors,
+            folded_anchors,
+            mut short_anchors,
+            everywhere,
+        } = self;
+        let (long_filter_bits, long_bucket_bits) = long_geometry(&long_anchors);
+        let (long_filter, long_buckets, long_anchors) =
+            long_anchor_table(long_anchors, long_filter_bits, long_bucket_bits)?;
+        let (folded_filter_bits, folded_bucket_bits) = long_geometry(&folded_anchors);
+        let (folded_filter, folded_buckets, folded_anchors) =
+            long_anchor_table(folded_anchors, folded_filter_bits, folded_bucket_bits)?;
+        short_anchors.sort_by_key(|entry| (entry.anchor, entry.program.get()));
+        let short_filter = short_anchor_filter(&short_anchors);
+        Ok(BuiltTables {
+            filter_bits: [long_filter_bits, folded_filter_bits],
+            bucket_bits: [long_bucket_bits, folded_bucket_bits],
+            parts: [
+                long_filter,
+                long_buckets.as_bytes().to_vec(),
+                long_anchors.as_bytes().to_vec(),
+                folded_filter,
+                folded_buckets.as_bytes().to_vec(),
+                folded_anchors.as_bytes().to_vec(),
+                short_filter,
+                short_anchors.as_bytes().to_vec(),
+                everywhere.as_bytes().to_vec(),
+            ],
+        })
+    }
+}
+
+fn case_variants(bytes: [u8; SHORT_ANCHOR_LENGTH]) -> Vec<[u8; SHORT_ANCHOR_LENGTH]> {
+    let mut variants = vec![bytes];
+    for index in 0..SHORT_ANCHOR_LENGTH {
+        let mut more = Vec::new();
+        for variant in &variants {
+            if let Some(byte) = variant.get(index)
+                && byte.is_ascii_alphabetic()
+            {
+                let mut flipped = *variant;
+                if let Some(slot) = flipped.get_mut(index) {
+                    *slot ^= 0x20;
+                }
+                more.push(flipped);
+            }
+        }
+        variants.extend(more);
+    }
+    variants
+}
+
+#[derive(Default)]
+struct PlacedPrograms {
+    main: PendingTables,
+    second: PendingTables,
     positional: Vec<U32>,
     entries: Vec<SignatureEntry>,
     program_starts: Vec<U32>,
@@ -203,9 +300,8 @@ pub fn build(
         placed.add_signature(signature_index, signature)?;
     }
     let PlacedPrograms {
-        long_anchors,
-        mut short_anchors,
-        everywhere,
+        main,
+        second,
         positional,
         entries,
         mut program_starts,
@@ -216,14 +312,34 @@ pub fn build(
     program_starts.push(U32::new(
         u32::try_from(programs.len()).map_err(|_| GroupNotBuilt::TooLarge)?,
     ));
-    let (long_filter_bits, long_bucket_bits) = long_geometry(&long_anchors);
-    let (long_filter, long_buckets, long_anchors) =
-        long_anchor_table(long_anchors, long_filter_bits, long_bucket_bits)?;
-    short_anchors.sort_by_key(|entry| (entry.anchor, entry.program.get()));
-    let short_filter = short_anchor_filter(&short_anchors);
+    let main_anchors = GroupAnchors {
+        exact: main.long_anchors.iter().map(|entry| entry.anchor).collect(),
+        folded: main
+            .folded_anchors
+            .iter()
+            .map(|entry| entry.anchor)
+            .collect(),
+        short: main
+            .short_anchors
+            .iter()
+            .map(|entry| entry.anchor)
+            .collect(),
+    };
+    let main = main.built()?;
+    let second = second.built()?;
     let header = GroupHeader {
-        long_filter_bits: U32::new(long_filter_bits),
-        long_bucket_bits: U32::new(long_bucket_bits),
+        long_filter_bits: [
+            U32::new(main.filter_bits[0]),
+            U32::new(main.filter_bits[1]),
+            U32::new(second.filter_bits[0]),
+            U32::new(second.filter_bits[1]),
+        ],
+        long_bucket_bits: [
+            U32::new(main.bucket_bits[0]),
+            U32::new(main.bucket_bits[1]),
+            U32::new(second.bucket_bits[0]),
+            U32::new(second.bucket_bits[1]),
+        ],
         lookback: U32::new(lookback),
         report_window: U32::new(windows.map_or(0, |windows| windows.length)),
         report_overlap: U32::new(windows.map_or(0, |windows| windows.overlap)),
@@ -237,21 +353,23 @@ pub fn build(
             length: U32::new(0),
         }; PART_COUNT],
     };
-    let parts: [Vec<u8>; PART_COUNT] = [
-        long_filter,
-        long_buckets.as_bytes().to_vec(),
-        long_anchors.as_bytes().to_vec(),
-        short_filter,
-        short_anchors.as_bytes().to_vec(),
-        everywhere.as_bytes().to_vec(),
+    let mut parts: Vec<Vec<u8>> = Vec::with_capacity(PART_COUNT);
+    parts.extend(main.parts);
+    parts.extend(second.parts);
+    parts.extend([
         positional.as_bytes().to_vec(),
         entries.as_bytes().to_vec(),
         program_starts.as_bytes().to_vec(),
         programs,
-    ];
+    ]);
+    let parts: [Vec<u8>; PART_COUNT] = parts.try_into().map_err(|_| GroupNotBuilt::TooLarge)?;
     Ok(BuiltGroup {
         bytes: assemble(header, parts)?,
-        signature_count: signatures.len(),
+        signature_count: signatures
+            .iter()
+            .filter(|signature| !matches!(signature.outcome, RecordedOutcome::Subsignature { .. }))
+            .count(),
+        main_anchors,
     })
 }
 
@@ -292,7 +410,8 @@ impl PlacedPrograms {
         if fields.in_executable {
             self.executable_placements = true;
         }
-        let (outcome, outcome_value, required_kind) = outcome_fields(signature.outcome);
+        let (outcome, outcome_value, required_kind, subsignature) =
+            outcome_fields(signature.outcome);
         self.entries.push(SignatureEntry {
             outcome_value: U32::new(outcome_value),
             required_kind: U16::new(required_kind),
@@ -300,7 +419,7 @@ impl PlacedPrograms {
             category: category_code(signature.category),
             placement,
             report_rank: signature.report_rank,
-            reserved: U16::new(0),
+            subsignature: U16::new(subsignature),
             distance: U32::new(fields.distance),
             shift: U32::new(fields.shift),
             section: U32::new(fields.section),
@@ -314,7 +433,7 @@ impl PlacedPrograms {
                 segment_count,
             };
             let placed_by_offset = place.segment == 0 && placement != PLACEMENT_ANYWHERE;
-            self.add_program(segment, &place, placed_by_offset)?;
+            self.add_program(segment, &place, placed_by_offset, signature.pass)?;
         }
         Ok(())
     }
@@ -324,6 +443,7 @@ impl PlacedPrograms {
         segment: &Segment,
         place: &ProgramPlace,
         placed_by_offset: bool,
+        pass: MatchingPass,
     ) -> Result<(), GroupNotBuilt> {
         let too_large = |_| GroupNotBuilt::TooLarge;
         let program = U32::new(u32::try_from(self.program_starts.len()).map_err(too_large)?);
@@ -333,35 +453,57 @@ impl PlacedPrograms {
         self.programs
             .extend(encode(segment, place).map_err(GroupNotBuilt::Program)?);
         self.lookback = self.lookback.max(segment.context_reach_before());
+        if segment.is_armed_by_predecessor(place.segment) {
+            if let Anchor::Short { displacement, .. } = segment.anchor {
+                self.lookback = self.lookback.max(reach_before(segment, displacement));
+            }
+            return Ok(());
+        }
         if placed_by_offset {
             return Ok(());
         }
+        let tables = match pass {
+            MatchingPass::Main => &mut self.main,
+            MatchingPass::Second => &mut self.second,
+        };
         match segment.anchor {
             Anchor::Long {
                 bytes,
+                case,
                 displacement,
             } => {
                 self.lookback = self.lookback.max(reach_before(segment, displacement));
-                self.long_anchors.push(LongAnchorEntry {
+                let entry = LongAnchorEntry {
                     anchor: bytes,
                     program,
                     nearest: U32::new(displacement.nearest),
                     farthest: U32::new(displacement.farthest),
-                });
+                };
+                match case {
+                    AnchorCase::Exact => tables.long_anchors.push(entry),
+                    AnchorCase::Folded => tables.folded_anchors.push(entry),
+                }
             }
             Anchor::Short {
                 bytes,
+                case,
                 displacement,
             } => {
                 self.lookback = self.lookback.max(reach_before(segment, displacement));
-                self.short_anchors.push(ShortAnchorEntry {
-                    anchor: bytes,
-                    program,
-                    nearest: U32::new(displacement.nearest),
-                    farthest: U32::new(displacement.farthest),
-                });
+                let variants = match case {
+                    AnchorCase::Exact => vec![bytes],
+                    AnchorCase::Folded => case_variants(bytes),
+                };
+                for anchor in variants {
+                    tables.short_anchors.push(ShortAnchorEntry {
+                        anchor,
+                        program,
+                        nearest: U32::new(displacement.nearest),
+                        farthest: U32::new(displacement.farthest),
+                    });
+                }
             }
-            Anchor::Everywhere => self.everywhere.push(program),
+            Anchor::Everywhere => tables.everywhere.push(program),
         }
         Ok(())
     }
@@ -469,20 +611,33 @@ fn placement_of(code: u8, distance: u32, shift: u32, section: u32) -> Option<Pla
     }
 }
 
-fn outcome_fields(outcome: RecordedOutcome) -> (u8, u32, u16) {
+fn outcome_fields(outcome: RecordedOutcome) -> (u8, u32, u16, u16) {
     match outcome {
-        RecordedOutcome::Detection(name) => (OUTCOME_DETECTION, name.0, ANY_REQUIRED_KIND),
+        RecordedOutcome::Detection(name) => (OUTCOME_DETECTION, name.0, ANY_REQUIRED_KIND, 0),
         RecordedOutcome::TypeFound(finding) => (
             OUTCOME_TYPE_FOUND,
             u32::from(finding.found.code()),
             finding.required.map_or(ANY_REQUIRED_KIND, ObjectKind::code),
+            0,
         ),
+        RecordedOutcome::Subsignature { logical, index } => {
+            (OUTCOME_SUBSIGNATURE, logical.0, ANY_REQUIRED_KIND, index)
+        }
     }
 }
 
-fn outcome_of(code: u8, value: u32, required_kind: u16) -> Option<RecordedOutcome> {
+fn outcome_of(
+    code: u8,
+    value: u32,
+    required_kind: u16,
+    subsignature: u16,
+) -> Option<RecordedOutcome> {
     match code {
         OUTCOME_DETECTION => Some(RecordedOutcome::Detection(NameId(value))),
+        OUTCOME_SUBSIGNATURE => Some(RecordedOutcome::Subsignature {
+            logical: LogicalSignatureId(value),
+            index: subsignature,
+        }),
         OUTCOME_TYPE_FOUND => {
             let found = ObjectKind::from_code(u16::try_from(value).ok()?)?;
             let required = if required_kind == ANY_REQUIRED_KIND {
@@ -624,18 +779,191 @@ impl ShortAnchorFilter<'_> {
 }
 
 #[derive(Clone, Copy)]
+pub struct LongAnchorTable<'m> {
+    filter: LongAnchorFilter<'m>,
+    bucket_shift: u32,
+    buckets: &'m [U32],
+    anchors: &'m [LongAnchorEntry],
+}
+
+impl<'m> LongAnchorTable<'m> {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.anchors.is_empty()
+    }
+
+    #[must_use]
+    pub fn filter(&self) -> LongAnchorFilter<'m> {
+        self.filter
+    }
+
+    pub fn anchored(
+        &self,
+        window: [u8; LONG_ANCHOR_LENGTH],
+    ) -> impl Iterator<Item = AnchoredProgram> + 'm {
+        let hash = four_gram_hash(u32::from_le_bytes(window), self.filter.filter_bits);
+        let bucket = usize::try_from(hash >> self.bucket_shift).unwrap_or(usize::MAX);
+        let start = self.buckets.get(bucket).map_or(0, |start| start.get());
+        let end = bucket
+            .checked_add(1)
+            .and_then(|next| self.buckets.get(next))
+            .map_or(0, |end| end.get());
+        let range = usize::try_from(start).unwrap_or(0)..usize::try_from(end).unwrap_or(0);
+        self.anchors
+            .get(range)
+            .unwrap_or_default()
+            .iter()
+            .filter(move |entry| entry.anchor == window)
+            .map(|entry| AnchoredProgram {
+                program: ProgramId(entry.program.get()),
+                displacement: Displacement {
+                    nearest: entry.nearest.get(),
+                    farthest: entry.farthest.get(),
+                },
+            })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct AnchorTables<'m> {
+    exact: LongAnchorTable<'m>,
+    folded: LongAnchorTable<'m>,
+    short_filter: ShortAnchorFilter<'m>,
+    short_anchors: &'m [ShortAnchorEntry],
+    everywhere: &'m [U32],
+}
+
+impl<'m> AnchorTables<'m> {
+    fn read(
+        header: &GroupHeader,
+        pass: MatchingPass,
+        part: &dyn Fn(Part) -> Result<&'m [u8], GroupMalformed>,
+    ) -> Result<Self, GroupMalformed> {
+        fn layout<E>(_: E) -> GroupMalformed {
+            GroupMalformed::Layout
+        }
+        let table = |table: TablePart| part(Part::Table(pass, table));
+        let first_slot = match pass {
+            MatchingPass::Main => 0,
+            MatchingPass::Second => 2,
+        };
+        let long_table = |slot: usize,
+                          filter: TablePart,
+                          buckets: TablePart,
+                          anchors: TablePart|
+         -> Result<LongAnchorTable<'m>, GroupMalformed> {
+            let filter_bits = header
+                .long_filter_bits
+                .get(slot)
+                .ok_or(GroupMalformed::Layout)?
+                .get();
+            let bucket_bits = header
+                .long_bucket_bits
+                .get(slot)
+                .ok_or(GroupMalformed::Layout)?
+                .get();
+            if filter_bits > LARGEST_FILTER_BITS || bucket_bits > filter_bits {
+                return Err(GroupMalformed::Layout);
+            }
+            let bits = table(filter)?;
+            if Some(bits.len()) != 1usize.checked_shl(filter_bits).map(|bits| bits / 8) {
+                return Err(GroupMalformed::Layout);
+            }
+            Ok(LongAnchorTable {
+                filter: LongAnchorFilter { bits, filter_bits },
+                bucket_shift: filter_bits.saturating_sub(bucket_bits),
+                buckets: <[U32]>::ref_from_bytes(table(buckets)?).map_err(layout)?,
+                anchors: <[LongAnchorEntry]>::ref_from_bytes(table(anchors)?).map_err(layout)?,
+            })
+        };
+        let short_filter = table(TablePart::ShortFilter)?;
+        if short_filter.len() != SHORT_FILTER_BYTES {
+            return Err(GroupMalformed::Layout);
+        }
+        Ok(Self {
+            exact: long_table(
+                first_slot,
+                TablePart::LongFilter,
+                TablePart::LongBuckets,
+                TablePart::LongAnchors,
+            )?,
+            folded: long_table(
+                first_slot.saturating_add(1),
+                TablePart::FoldedFilter,
+                TablePart::FoldedBuckets,
+                TablePart::FoldedAnchors,
+            )?,
+            short_filter: ShortAnchorFilter { bits: short_filter },
+            short_anchors: <[ShortAnchorEntry]>::ref_from_bytes(table(TablePart::ShortAnchors)?)
+                .map_err(layout)?,
+            everywhere: <[U32]>::ref_from_bytes(table(TablePart::Everywhere)?).map_err(layout)?,
+        })
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.exact.is_empty()
+            && self.folded.is_empty()
+            && self.short_anchors.is_empty()
+            && self.everywhere.is_empty()
+    }
+
+    #[must_use]
+    pub fn exact_long(&self) -> LongAnchorTable<'m> {
+        self.exact
+    }
+
+    #[must_use]
+    pub fn folded_long(&self) -> LongAnchorTable<'m> {
+        self.folded
+    }
+
+    #[must_use]
+    pub fn short_anchor_filter(&self) -> ShortAnchorFilter<'m> {
+        self.short_filter
+    }
+
+    #[must_use]
+    pub fn has_short_anchors(&self) -> bool {
+        !self.short_anchors.is_empty()
+    }
+
+    pub fn short_anchored(
+        &self,
+        window: [u8; SHORT_ANCHOR_LENGTH],
+    ) -> impl Iterator<Item = AnchoredProgram> + 'm {
+        let first = self
+            .short_anchors
+            .partition_point(|entry| entry.anchor < window);
+        self.short_anchors
+            .get(first..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(move |entry| entry.anchor == window)
+            .map(|entry| AnchoredProgram {
+                program: ProgramId(entry.program.get()),
+                displacement: Displacement {
+                    nearest: entry.nearest.get(),
+                    farthest: entry.farthest.get(),
+                },
+            })
+    }
+
+    pub fn everywhere(&self) -> impl Iterator<Item = ProgramId> + 'm {
+        self.everywhere
+            .iter()
+            .map(|program| ProgramId(program.get()))
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct PatternGroup<'m> {
     lookback: u32,
     executable_placements: bool,
     part_memory: PartMemory,
     report_windows: Option<ReportWindows>,
-    long_filter: LongAnchorFilter<'m>,
-    bucket_shift: u32,
-    long_buckets: &'m [U32],
-    long_anchors: &'m [LongAnchorEntry],
-    short_filter: ShortAnchorFilter<'m>,
-    short_anchors: &'m [ShortAnchorEntry],
-    everywhere: &'m [U32],
+    main: AnchorTables<'m>,
+    second: AnchorTables<'m>,
     positional: &'m [U32],
     signatures: &'m [SignatureEntry],
     program_starts: &'m [U32],
@@ -661,19 +989,6 @@ impl<'m> PatternGroup<'m> {
         let records = |part_bytes: &'m [u8]| -> Result<&'m [U32], GroupMalformed> {
             <[U32]>::ref_from_bytes(part_bytes).map_err(|_| GroupMalformed::Layout)
         };
-        let filter_bits = header.long_filter_bits.get();
-        let bucket_bits = header.long_bucket_bits.get();
-        if filter_bits > LARGEST_FILTER_BITS || bucket_bits > filter_bits {
-            return Err(GroupMalformed::Layout);
-        }
-        let long_filter = part(Part::LongFilter)?;
-        if Some(long_filter.len()) != 1usize.checked_shl(filter_bits).map(|bits| bits / 8) {
-            return Err(GroupMalformed::Layout);
-        }
-        let short_filter = part(Part::ShortFilter)?;
-        if short_filter.len() != SHORT_FILTER_BYTES {
-            return Err(GroupMalformed::Layout);
-        }
         let report_windows =
             (header.report_window.get() > header.report_overlap.get()).then(|| ReportWindows {
                 length: header.report_window.get(),
@@ -687,18 +1002,8 @@ impl<'m> PatternGroup<'m> {
                 latest => PartMemory::FirstAndLatestEnds { latest },
             },
             report_windows,
-            long_filter: LongAnchorFilter {
-                bits: long_filter,
-                filter_bits,
-            },
-            bucket_shift: filter_bits.saturating_sub(bucket_bits),
-            long_buckets: records(part(Part::LongBuckets)?)?,
-            long_anchors: <[LongAnchorEntry]>::ref_from_bytes(part(Part::LongAnchors)?)
-                .map_err(|_| GroupMalformed::Layout)?,
-            short_filter: ShortAnchorFilter { bits: short_filter },
-            short_anchors: <[ShortAnchorEntry]>::ref_from_bytes(part(Part::ShortAnchors)?)
-                .map_err(|_| GroupMalformed::Layout)?,
-            everywhere: records(part(Part::Everywhere)?)?,
+            main: AnchorTables::read(header, MatchingPass::Main, &part)?,
+            second: AnchorTables::read(header, MatchingPass::Second, &part)?,
             positional: records(part(Part::Positional)?)?,
             signatures: <[SignatureEntry]>::ref_from_bytes(part(Part::Signatures)?)
                 .map_err(|_| GroupMalformed::Layout)?,
@@ -728,71 +1033,11 @@ impl<'m> PatternGroup<'m> {
     }
 
     #[must_use]
-    pub fn long_anchor_filter(&self) -> LongAnchorFilter<'m> {
-        self.long_filter
-    }
-
-    #[must_use]
-    pub fn short_anchor_filter(&self) -> ShortAnchorFilter<'m> {
-        self.short_filter
-    }
-
-    #[must_use]
-    pub fn has_short_anchors(&self) -> bool {
-        !self.short_anchors.is_empty()
-    }
-
-    pub fn long_anchored(
-        &self,
-        window: [u8; LONG_ANCHOR_LENGTH],
-    ) -> impl Iterator<Item = AnchoredProgram> + 'm {
-        let hash = four_gram_hash(u32::from_le_bytes(window), self.long_filter.filter_bits);
-        let bucket = usize::try_from(hash >> self.bucket_shift).unwrap_or(usize::MAX);
-        let start = self.long_buckets.get(bucket).map_or(0, |start| start.get());
-        let end = bucket
-            .checked_add(1)
-            .and_then(|next| self.long_buckets.get(next))
-            .map_or(0, |end| end.get());
-        let range = usize::try_from(start).unwrap_or(0)..usize::try_from(end).unwrap_or(0);
-        self.long_anchors
-            .get(range)
-            .unwrap_or_default()
-            .iter()
-            .filter(move |entry| entry.anchor == window)
-            .map(|entry| AnchoredProgram {
-                program: ProgramId(entry.program.get()),
-                displacement: Displacement {
-                    nearest: entry.nearest.get(),
-                    farthest: entry.farthest.get(),
-                },
-            })
-    }
-
-    pub fn short_anchored(
-        &self,
-        window: [u8; SHORT_ANCHOR_LENGTH],
-    ) -> impl Iterator<Item = AnchoredProgram> + 'm {
-        let first = self
-            .short_anchors
-            .partition_point(|entry| entry.anchor < window);
-        self.short_anchors
-            .get(first..)
-            .unwrap_or_default()
-            .iter()
-            .take_while(move |entry| entry.anchor == window)
-            .map(|entry| AnchoredProgram {
-                program: ProgramId(entry.program.get()),
-                displacement: Displacement {
-                    nearest: entry.nearest.get(),
-                    farthest: entry.farthest.get(),
-                },
-            })
-    }
-
-    pub fn everywhere(&self) -> impl Iterator<Item = ProgramId> + 'm {
-        self.everywhere
-            .iter()
-            .map(|program| ProgramId(program.get()))
+    pub fn anchor_tables(&self, pass: MatchingPass) -> AnchorTables<'m> {
+        match pass {
+            MatchingPass::Main => self.main,
+            MatchingPass::Second => self.second,
+        }
     }
 
     pub fn positional(&self) -> impl Iterator<Item = PatternSignatureId> + 'm {
@@ -831,6 +1076,7 @@ impl<'m> PatternGroup<'m> {
             entry.outcome,
             entry.outcome_value.get(),
             entry.required_kind.get(),
+            entry.subsignature.get(),
         )
         .ok_or(malformed)?;
         Ok(PatternSignatureRecord {
@@ -841,6 +1087,22 @@ impl<'m> PatternGroup<'m> {
             first_program: ProgramId(entry.first_program.get()),
             segment_count: entry.segment_count.get(),
         })
+    }
+
+    pub fn program_header(&self, id: ProgramId) -> Result<&'m ProgramHeader, GroupMalformed> {
+        let index = usize::try_from(id.0).map_err(|_| GroupMalformed::UnknownProgram(id))?;
+        let start = self
+            .program_starts
+            .get(index)
+            .ok_or(GroupMalformed::UnknownProgram(id))?
+            .get();
+        let bytes = usize::try_from(start)
+            .ok()
+            .and_then(|start| self.programs.get(start..))
+            .ok_or(GroupMalformed::Program(id))?;
+        ProgramHeader::ref_from_prefix(bytes)
+            .map(|(header, _)| header)
+            .map_err(|_| GroupMalformed::Program(id))
     }
 
     pub fn program(&self, id: ProgramId) -> Result<ProgramView<'m>, GroupMalformed> {

@@ -5,22 +5,34 @@ use sha2::{Digest as _, Sha256};
 use zerocopy::IntoBytes;
 use zerocopy::little_endian::{U32, U64};
 
+use crate::byte_rarity::rarity_of;
 use crate::hash_partition::{self, PartitionKey, PartitionNotBuilt, PendingEntry};
 use crate::layout::{
     BYTE_ORDER_MARK, CHECKSUM_LENGTH, DATABASE_NAME_LENGTH, DatabaseEntry, DirectoryEntry, Header,
     LAYOUT_VERSION, MAGIC, SECTION_ALIGNMENT, SectionKind,
 };
+use crate::logical_expression::{
+    ExpressionNotCompiled, count_ceilings, gate_of, holds_with_no_matches, postfix_steps,
+};
+use crate::logical_group::{
+    self, LogicalGroupNotBuilt, LogicalSignatureId, MatchingPass, PendingLogicalSignature,
+    PendingSubsignature,
+};
 use crate::model::{
-    Category, DatabaseRecord, Digest, HashSignature, HashedSize, Indicator, PartMemory,
-    PatternOutcome, PatternSignature, Placement, Provenance, ReportWindows, SignatureGroup,
-    TypeFinding,
+    Category, DatabaseRecord, Digest, HashSignature, HashedSize, Indicator, LogicalConditions,
+    LogicalSignature, PartMemory, PatternOutcome, PatternSignature, Placement, Provenance,
+    ReportWindows, SignatureGroup, TypeFinding, UnwantedCategory,
 };
 use crate::names::{self, NameId};
 use crate::object_kind::ObjectKind;
 use crate::object_kinds::{self, KindDescription, KindsNotBuilt, TypingRules};
-use crate::pattern_group::{self, GroupNotBuilt, PendingPatternSignature, RecordedOutcome};
-use crate::pattern_program::{PatternNotCompiled, Segment, segments_of};
+use crate::pattern_group::{
+    self, GroupNotBuilt, PatternSignatureId, PendingPatternSignature, RecordedOutcome,
+};
+use crate::pattern_program::{Anchor, PatternNotCompiled, Segment, segments_of};
+use crate::selection_filters::{self, GroupAnchors};
 use crate::type_magic::{self, MagicTable, PendingMagic};
+use crate::unwanted_categories;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum BuildError {
@@ -43,8 +55,18 @@ pub enum BuildError {
         group: SignatureGroup,
         reason: GroupNotBuilt,
     },
+    Expression {
+        name: String,
+        reason: ExpressionNotCompiled,
+    },
+    LogicalGroup {
+        group: SignatureGroup,
+        reason: LogicalGroupNotBuilt,
+    },
     ObjectKinds(KindsNotBuilt),
     TypeMagicTooLarge,
+    UnwantedCategories,
+    SelectionFilters,
     Names,
     TooManySections,
 }
@@ -78,6 +100,15 @@ impl fmt::Display for BuildError {
                 "cannot build the pattern signatures of group {}: {reason:?}",
                 group.0
             ),
+            Self::Expression { name, reason } => write!(
+                formatter,
+                "cannot compile the logical expression of {name:?}: {reason:?}"
+            ),
+            Self::LogicalGroup { group, reason } => write!(
+                formatter,
+                "cannot build the logical signatures of group {}: {reason:?}",
+                group.0
+            ),
             Self::ObjectKinds(reason) => {
                 write!(formatter, "cannot build the object kinds: {reason:?}")
             }
@@ -87,11 +118,15 @@ impl fmt::Display for BuildError {
                     "the type magic is larger than the image can hold"
                 )
             }
-            Self::Names => write!(formatter, "cannot build the names section"),
-            Self::TooManySections => write!(
+            Self::UnwantedCategories => write!(
                 formatter,
-                "more sections than the image's first page can list"
+                "cannot build the categories of potentially unwanted signatures"
             ),
+            Self::SelectionFilters => {
+                write!(formatter, "cannot build the filters of the selected groups")
+            }
+            Self::Names => write!(formatter, "cannot build the names section"),
+            Self::TooManySections => write!(formatter, "more sections than an image can number"),
         }
     }
 }
@@ -127,10 +162,12 @@ pub struct ImageBuilder {
     kinds: BTreeMap<ObjectKind, KindDescription>,
     typing: Option<TypingRules>,
     magic: Vec<PendingMagic>,
+    unwanted_categories: BTreeMap<String, Option<String>>,
 }
 
 struct PendingGroup {
     patterns: Vec<PendingPattern>,
+    logical: Vec<PendingLogical>,
     report_windows: Option<ReportWindows>,
     part_memory: PartMemory,
 }
@@ -139,6 +176,7 @@ impl Default for PendingGroup {
     fn default() -> Self {
         Self {
             patterns: Vec::new(),
+            logical: Vec::new(),
             report_windows: None,
             part_memory: PartMemory::EarliestEnd,
         }
@@ -148,6 +186,10 @@ impl Default for PendingGroup {
 enum PendingOutcome {
     Detection(u32),
     TypeFound(TypeFinding),
+    Subsignature {
+        logical: LogicalSignatureId,
+        index: u16,
+    },
 }
 
 struct PendingPattern {
@@ -155,7 +197,40 @@ struct PendingPattern {
     category: Category,
     placement: Placement,
     report_rank: u8,
+    pass: MatchingPass,
     segments: Vec<Segment>,
+}
+
+struct PendingLogical {
+    name: u32,
+    category: Category,
+    steps: Vec<crate::logical_expression::ExpressionStep>,
+    subsignatures: Vec<PendingSubsignature>,
+    conditions: LogicalConditions,
+    holds_with_no_matches: bool,
+}
+
+const HITS_SCALE_BITS: u32 = 48;
+const SIXTEENTHS_PER_BIT: u32 = 16;
+
+fn expected_hits_of_anchor(anchor: &Anchor) -> u64 {
+    let rarity_bits = match anchor {
+        Anchor::Long { bytes, .. } => rarity_of(bytes),
+        Anchor::Short { bytes, .. } => rarity_of(bytes),
+        Anchor::Everywhere => 0,
+    } / SIXTEENTHS_PER_BIT;
+    1u64.checked_shl(HITS_SCALE_BITS.saturating_sub(rarity_bits.min(HITS_SCALE_BITS)))
+        .unwrap_or(u64::MAX)
+}
+
+fn expected_hits(placement: Placement, segments: &[Segment]) -> u64 {
+    segments
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index > 0 || placement == Placement::Anywhere)
+        .fold(0u64, |hits, (_, segment)| {
+            hits.saturating_add(expected_hits_of_anchor(&segment.anchor))
+        })
 }
 
 struct NameSpan {
@@ -225,9 +300,111 @@ impl ImageBuilder {
                 category: signature.category,
                 placement: signature.placement,
                 report_rank: signature.report_rank,
+                pass: MatchingPass::Main,
                 segments,
             });
         Ok(())
+    }
+
+    pub fn add_logical_signature(
+        &mut self,
+        signature: &LogicalSignature<'_>,
+    ) -> Result<(), BuildError> {
+        let described = || signature.name.to_owned();
+        let subsignature_count = signature.subsignatures.len();
+        let steps = postfix_steps(signature.expression, subsignature_count).map_err(|reason| {
+            BuildError::Expression {
+                name: described(),
+                reason,
+            }
+        })?;
+        let mut segmented: Vec<Vec<Vec<Segment>>> = Vec::with_capacity(subsignature_count);
+        for subsignature in signature.subsignatures {
+            let mut patterns = Vec::with_capacity(subsignature.patterns.len());
+            for pattern in &subsignature.patterns {
+                patterns.push(segments_of(pattern).map_err(|reason| BuildError::Pattern {
+                    name: described(),
+                    reason,
+                })?);
+            }
+            segmented.push(patterns);
+        }
+        let hits: Vec<u64> = signature
+            .subsignatures
+            .iter()
+            .zip(&segmented)
+            .map(|(subsignature, patterns)| {
+                patterns.iter().fold(0u64, |hits, segments| {
+                    hits.saturating_add(expected_hits(subsignature.placement, segments))
+                })
+            })
+            .collect();
+        let holds_without_matches = holds_with_no_matches(&steps);
+        let gate = if holds_without_matches {
+            None
+        } else {
+            gate_of(signature.expression, &|index| {
+                hits.get(usize::from(index)).copied().unwrap_or(u64::MAX)
+            })
+        };
+        let ceilings = count_ceilings(signature.expression, subsignature_count);
+        let name = self.add_name(signature.name, signature.indicator)?;
+        let group = self.groups.entry(signature.group).or_default();
+        let logical = LogicalSignatureId(
+            u32::try_from(group.logical.len()).map_err(|_| BuildError::TooManySignatures)?,
+        );
+        let mut subsignatures = Vec::with_capacity(subsignature_count);
+        for (index, (subsignature, patterns)) in
+            signature.subsignatures.iter().zip(segmented).enumerate()
+        {
+            let index = u16::try_from(index).map_err(|_| BuildError::TooManySignatures)?;
+            let in_gate = gate.as_ref().is_none_or(|gate| gate.contains(&index));
+            let pass = if in_gate || subsignature.placement != Placement::Anywhere {
+                MatchingPass::Main
+            } else {
+                MatchingPass::Second
+            };
+            let pattern = PatternSignatureId(
+                u32::try_from(group.patterns.len()).map_err(|_| BuildError::TooManySignatures)?,
+            );
+            let pattern_count =
+                u8::try_from(patterns.len()).map_err(|_| BuildError::TooManySignatures)?;
+            for segments in patterns {
+                group.patterns.push(PendingPattern {
+                    outcome: PendingOutcome::Subsignature { logical, index },
+                    category: signature.category,
+                    placement: subsignature.placement,
+                    report_rank: 0,
+                    pass,
+                    segments,
+                });
+            }
+            subsignatures.push(PendingSubsignature {
+                pattern: Some(pattern),
+                pattern_count,
+                ceiling: ceilings.get(usize::from(index)).copied().unwrap_or(1),
+                pass,
+            });
+        }
+        group.logical.push(PendingLogical {
+            name,
+            category: signature.category,
+            steps,
+            subsignatures,
+            conditions: signature.conditions.clone(),
+            holds_with_no_matches: holds_without_matches,
+        });
+        Ok(())
+    }
+
+    pub fn set_unwanted_category(&mut self, name: &str, category: UnwantedCategory<'_>) {
+        self.unwanted_categories.insert(
+            name.to_owned(),
+            match category {
+                UnwantedCategory::Named(text) => Some(text.to_owned()),
+                UnwantedCategory::Unnamed => None,
+            },
+        );
     }
 
     pub fn set_report_windows(&mut self, group: SignatureGroup, windows: ReportWindows) {
@@ -318,6 +495,57 @@ impl ImageBuilder {
         buckets
     }
 
+    #[must_use]
+    pub fn hash_buckets_shared_with_unwanted(&self) -> Vec<(HashBucket, Vec<HashEntryId>)> {
+        let mut buckets = Vec::new();
+        for (key, unwanted) in &self.partitions {
+            if key.category != Category::PotentiallyUnwanted {
+                continue;
+            }
+            let malware_key = PartitionKey {
+                category: Category::Malware,
+                ..*key
+            };
+            let Some(malware) = self.partitions.get(&malware_key) else {
+                continue;
+            };
+            let unwanted_keys: BTreeSet<(HashedSize, Digest)> = unwanted
+                .iter()
+                .map(|hash| (hash.size, hash.digest))
+                .collect();
+            let mut shared_sizes: Vec<HashedSize> = malware
+                .iter()
+                .filter(|hash| unwanted_keys.contains(&(hash.size, hash.digest)))
+                .map(|hash| hash.size)
+                .collect();
+            shared_sizes.sort();
+            shared_sizes.dedup();
+            for size in shared_sizes {
+                let mut entries: Vec<(HashEntryId, Digest)> = malware
+                    .iter()
+                    .chain(unwanted)
+                    .filter(|hash| hash.size == size)
+                    .map(|hash| (hash.id, hash.digest))
+                    .collect();
+                entries.sort_by_key(|(id, _)| *id);
+                let unwanted_ids = unwanted
+                    .iter()
+                    .filter(|hash| hash.size == size)
+                    .map(|hash| hash.id)
+                    .collect();
+                buckets.push((
+                    HashBucket {
+                        key: *key,
+                        size,
+                        entries_in_load_order: entries,
+                    },
+                    unwanted_ids,
+                ));
+            }
+        }
+        buckets
+    }
+
     pub fn withdraw_hash_signatures(&mut self, ids: impl IntoIterator<Item = HashEntryId>) {
         self.withdrawn_hashes.extend(ids);
     }
@@ -334,10 +562,13 @@ impl ImageBuilder {
             kinds,
             typing,
             magic,
+            unwanted_categories,
         } = self;
         let (sorted_names, name_ids) = distinct_sorted_names(&name_text, &name_spans)?;
+        let categories_section = categories_section(&unwanted_categories, &sorted_names)?;
         let hash_sections = hash_sections(partitions, &withdrawn_hashes, &name_ids)?;
-        let pattern_sections = pattern_sections(groups, &name_ids)?;
+        let (pattern_sections, logical_sections, anchors) = pattern_sections(groups, &name_ids)?;
+        let selections_section = selections_section(&kinds, typing, &anchors)?;
         let mut sections = vec![databases_section(&databases)?];
         if !kinds.is_empty() || typing.is_some() {
             sections.push(Section {
@@ -356,7 +587,10 @@ impl ImageBuilder {
                 bytes: type_magic::build(&magic).map_err(|_| BuildError::TypeMagicTooLarge)?,
             });
         }
+        sections.extend(selections_section);
         sections.extend(pattern_sections);
+        sections.extend(logical_sections);
+        sections.extend(categories_section);
         sections.extend(hash_sections);
         sections.push(Section {
             kind: SectionKind::Names,
@@ -366,6 +600,30 @@ impl ImageBuilder {
         });
         assemble(&sections)
     }
+}
+
+fn categories_section(
+    categories: &BTreeMap<String, Option<String>>,
+    sorted_names: &[(&str, Indicator)],
+) -> Result<Option<Section>, BuildError> {
+    if categories.is_empty() {
+        return Ok(None);
+    }
+    let mut entries = Vec::with_capacity(categories.len());
+    for (name, category) in categories {
+        let Ok(position) = sorted_names.binary_search_by(|(sorted, _)| (*sorted).cmp(name)) else {
+            continue;
+        };
+        let id = NameId(u32::try_from(position).map_err(|_| BuildError::UnwantedCategories)?);
+        entries.push((id, category.as_deref()));
+    }
+    entries.sort_by_key(|(id, _)| *id);
+    Ok(Some(Section {
+        kind: SectionKind::UnwantedCategories,
+        qualifier: 0,
+        item_count: u64::try_from(entries.len()).map_err(|_| BuildError::UnwantedCategories)?,
+        bytes: unwanted_categories::build(&entries).map_err(|_| BuildError::UnwantedCategories)?,
+    }))
 }
 
 fn name_id(name_ids: &[NameId], pending: u32) -> Result<NameId, BuildError> {
@@ -428,9 +686,14 @@ fn hash_sections(
 fn pattern_sections(
     groups: BTreeMap<SignatureGroup, PendingGroup>,
     name_ids: &[NameId],
-) -> Result<Vec<Section>, BuildError> {
+) -> Result<PatternSections, BuildError> {
     let mut sections = Vec::with_capacity(groups.len());
+    let mut logical_sections = Vec::new();
+    let mut anchors = BTreeMap::new();
     for (group, pending_group) in groups {
+        if !pending_group.logical.is_empty() {
+            logical_sections.push(logical_section(group, pending_group.logical, name_ids)?);
+        }
         if pending_group.patterns.is_empty() {
             continue;
         }
@@ -444,10 +707,14 @@ fn pattern_sections(
                             RecordedOutcome::Detection(name_id(name_ids, name)?)
                         }
                         PendingOutcome::TypeFound(finding) => RecordedOutcome::TypeFound(finding),
+                        PendingOutcome::Subsignature { logical, index } => {
+                            RecordedOutcome::Subsignature { logical, index }
+                        }
                     },
                     category: pattern.category,
                     placement: pattern.placement,
                     report_rank: pattern.report_rank,
+                    pass: pattern.pass,
                     segments: pattern.segments,
                 })
             })
@@ -458,6 +725,7 @@ fn pattern_sections(
             pending_group.part_memory,
         )
         .map_err(|reason| BuildError::PatternGroup { group, reason })?;
+        anchors.insert(group, built.main_anchors);
         sections.push(Section {
             kind: SectionKind::PatternGroup,
             qualifier: group.0,
@@ -466,7 +734,81 @@ fn pattern_sections(
             bytes: built.bytes,
         });
     }
-    Ok(sections)
+    Ok((sections, logical_sections, anchors))
+}
+
+type PatternSections = (
+    Vec<Section>,
+    Vec<Section>,
+    BTreeMap<SignatureGroup, GroupAnchors>,
+);
+
+fn selections_section(
+    kinds: &BTreeMap<ObjectKind, KindDescription>,
+    typing: Option<TypingRules>,
+    anchors: &BTreeMap<SignatureGroup, GroupAnchors>,
+) -> Result<Option<Section>, BuildError> {
+    let present = |groups: &[SignatureGroup]| -> Vec<SignatureGroup> {
+        groups
+            .iter()
+            .copied()
+            .filter(|group| anchors.contains_key(group))
+            .collect()
+    };
+    let recognition = typing.and_then(|typing| typing.recognition_group);
+    let mut selections: BTreeSet<Vec<SignatureGroup>> = BTreeSet::new();
+    for description in kinds.values() {
+        selections.insert(present(&description.groups));
+        if let Some(recognition) = recognition {
+            let mut with_recognition = description.groups.clone();
+            with_recognition.push(recognition);
+            selections.insert(present(&with_recognition));
+        }
+    }
+    if let Some(recognition) = recognition {
+        selections.insert(present(&[recognition]));
+    }
+    selections.remove(&Vec::new());
+    if selections.is_empty() {
+        return Ok(None);
+    }
+    let selections: Vec<Vec<SignatureGroup>> = selections.into_iter().collect();
+    Ok(Some(Section {
+        kind: SectionKind::SelectionFilters,
+        qualifier: 0,
+        item_count: u64::try_from(selections.len()).map_err(|_| BuildError::TooManySections)?,
+        bytes: selection_filters::build(&selections, &|group| anchors.get(&group))
+            .map_err(|_| BuildError::SelectionFilters)?,
+    }))
+}
+
+fn logical_section(
+    group: SignatureGroup,
+    pending: Vec<PendingLogical>,
+    name_ids: &[NameId],
+) -> Result<Section, BuildError> {
+    let signatures = pending
+        .into_iter()
+        .map(|logical| {
+            Ok(PendingLogicalSignature {
+                name: name_id(name_ids, logical.name)?,
+                category: logical.category,
+                steps: logical.steps,
+                subsignatures: logical.subsignatures,
+                conditions: logical.conditions,
+                holds_with_no_matches: logical.holds_with_no_matches,
+            })
+        })
+        .collect::<Result<Vec<_>, BuildError>>()?;
+    let built = logical_group::build(&signatures)
+        .map_err(|reason| BuildError::LogicalGroup { group, reason })?;
+    Ok(Section {
+        kind: SectionKind::LogicalGroup,
+        qualifier: group.0,
+        item_count: u64::try_from(built.signature_count)
+            .map_err(|_| BuildError::TooManySignatures)?,
+        bytes: built.bytes,
+    })
 }
 
 type DistinctNames<'a> = (Vec<(&'a str, Indicator)>, Vec<NameId>);
@@ -543,16 +885,13 @@ pub(crate) const fn provenance_code(provenance: Provenance) -> u32 {
 fn assemble(sections: &[Section]) -> Result<Vec<u8>, BuildError> {
     let header_length = std::mem::size_of::<Header>();
     let entry_length = std::mem::size_of::<DirectoryEntry>();
-    let first_page_needed = sections
+    let head_length = sections
         .len()
         .checked_mul(entry_length)
         .and_then(|directory| directory.checked_add(header_length))
         .and_then(|used| used.checked_add(CHECKSUM_LENGTH))
         .ok_or(BuildError::TooManySections)?;
-    if first_page_needed > SECTION_ALIGNMENT {
-        return Err(BuildError::TooManySections);
-    }
-    let mut image = vec![0u8; SECTION_ALIGNMENT];
+    let mut image = vec![0u8; head_length.next_multiple_of(SECTION_ALIGNMENT)];
     let mut directory = Vec::with_capacity(sections.len());
     for section in sections {
         let offset = image.len();
@@ -580,13 +919,13 @@ fn assemble(sections: &[Section]) -> Result<Vec<u8>, BuildError> {
         ),
         reserved: U32::new(0),
     };
-    let mut first_page = header.as_bytes().to_vec();
-    first_page.extend_from_slice(directory.as_bytes());
-    let checksum: [u8; CHECKSUM_LENGTH] = Sha256::digest(&first_page).into();
-    first_page.extend_from_slice(&checksum);
+    let mut head = header.as_bytes().to_vec();
+    head.extend_from_slice(directory.as_bytes());
+    let checksum: [u8; CHECKSUM_LENGTH] = Sha256::digest(&head).into();
+    head.extend_from_slice(&checksum);
     image
-        .get_mut(..first_page.len())
+        .get_mut(..head.len())
         .ok_or(BuildError::TooManySections)?
-        .copy_from_slice(&first_page);
+        .copy_from_slice(&head);
     Ok(image)
 }

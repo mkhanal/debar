@@ -67,3 +67,24 @@ path = "../crates/matching/fuzz_targets/pattern_scan.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "logical_signatures"
+path = "../crates/clamav-signatures/fuzz_targets/logical_signatures.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "logical_expressions"
+path = "../crates/clamav-signatures/fuzz_targets/logical_expressions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "logical_evaluation"
+path = "../crates/matching/fuzz_targets/logical_evaluation.rs"
+test = false
+doc = false
+bench = false

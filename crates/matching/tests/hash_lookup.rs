@@ -4,9 +4,9 @@ use debar_image::{
     Category, Digest, HashPurpose, HashSignature, HashedSize, Image, ImageBuilder, Indicator,
 };
 use debar_matching::{
-    DigestNeed, HashSettings, ObjectDigests, Trust, executable_section_detections,
-    executable_section_digest_need, whole_object_detections, whole_object_digest_need,
-    whole_object_trust,
+    DigestNeed, HashSettings, ObjectDigests, Trust, UnwantedCategories,
+    executable_section_detections, executable_section_digest_need, whole_object_detections,
+    whole_object_digest_need, whole_object_trust,
 };
 use md5::{Digest as _, Md5};
 use sha1::Sha1;
@@ -198,7 +198,8 @@ fn potentially_unwanted_entries_count_only_when_asked_for() {
         names(
             &image,
             HashSettings {
-                potentially_unwanted: true
+                potentially_unwanted: true,
+                unwanted_categories: UnwantedCategories::Every,
             }
         ),
         ["PUA.Thing"]

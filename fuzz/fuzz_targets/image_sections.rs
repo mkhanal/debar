@@ -7,7 +7,7 @@ use debar_image::{
     PatternSignature, Placement, RecognitionRank, SignatureGroup, TypeFinding, TypingRules,
     WideTextRetry,
 };
-use debar_matching::{
+use debar_matching::{ObjectContext, UnwantedCategories, 
     ExecutableLayout, ExecutableSection, GroupSelection, PatternRequest, PatternScan,
     PatternSettings,
 };
@@ -210,12 +210,14 @@ fuzz_target!(|data: &[u8]| {
     }
     let settings = PatternSettings {
         potentially_unwanted: true,
+        unwanted_categories: UnwantedCategories::Every,
         every_match: true,
     };
     let request = PatternRequest {
         selection: GroupSelection::ForKindRecognisingTypes(ObjectKind::WindowsExecutable),
         settings,
         object_length: OBJECT.len() as u64,
+        context: ObjectContext::TOP_LEVEL,
     };
     let layout = || {
         Some(ExecutableLayout {

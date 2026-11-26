@@ -155,7 +155,7 @@ pub fn read_line<'a>(
     let name = std::str::from_utf8(without_trailer(name_field))
         .map_err(|_| MalformedExtendedLine::NameNotText)?;
     let offset = read_offset(offset_field, target)?;
-    let body = read_body(body_field).map_err(MalformedExtendedLine::Body)?;
+    let body = read_body(body_field, target).map_err(MalformedExtendedLine::Body)?;
     let (pattern, plain_bytes, longest_part) = match body {
         ReadBody::Pattern {
             pattern,
@@ -369,7 +369,7 @@ fn is_executable_offset(field: &[u8]) -> bool {
             .any(|prefix| field.starts_with(prefix))
 }
 
-fn without_trailer(name: &[u8]) -> &[u8] {
+pub fn without_trailer(name: &[u8]) -> &[u8] {
     name.windows(NAME_TRAILER.len())
         .position(|window| window == NAME_TRAILER)
         .and_then(|position| name.get(..position))
