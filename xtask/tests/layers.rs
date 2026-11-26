@@ -167,6 +167,7 @@ deny = [
     assert!(findings.contains(&LayerFinding::DenyWrappersDisagree {
         crate_name: "debar-image".to_owned(),
         expected: vec![
+            "debar-clamav-signatures".to_owned(),
             "debar-compiler".to_owned(),
             "debar-formats".to_owned(),
             "debar-interfaces".to_owned(),
@@ -183,8 +184,67 @@ fn a_layer_crate_missing_from_the_cargo_deny_bans_is_reported() {
     let findings = deny_wrapper_findings("[bans]\ndeny = []\n").unwrap();
 
     assert!(findings.contains(&LayerFinding::DenyWrappersDisagree {
-        crate_name: "debar-interfaces".to_owned(),
-        expected: vec![],
+        crate_name: "debar-scan".to_owned(),
+        expected: vec!["debar-interfaces".to_owned()],
         found: None,
     }));
+}
+
+#[test]
+fn a_crate_no_other_crate_may_use_is_left_out_of_the_cargo_deny_bans() {
+    let findings = deny_wrapper_findings("[bans]\ndeny = []\n").unwrap();
+
+    assert!(!findings.iter().any(|finding| matches!(
+        finding,
+        LayerFinding::DenyWrappersDisagree { crate_name, .. } if crate_name == "debar-interfaces"
+    )));
+}
+
+#[test]
+fn a_cargo_deny_ban_on_a_crate_no_other_crate_may_use_is_reported() {
+    let deny = "[bans]\ndeny = [{ crate = \"debar-interfaces\", wrappers = [] }]\n";
+
+    assert!(
+        deny_wrapper_findings(deny)
+            .unwrap()
+            .contains(&LayerFinding::DenyWrappersDisagree {
+                crate_name: "debar-interfaces".to_owned(),
+                expected: vec![],
+                found: Some(vec![]),
+            })
+    );
+}
+
+#[test]
+fn the_signature_compiler_may_use_a_signature_format_part() {
+    let part = xtask::layers::SIGNATURE_FORMAT_PARTS[0].name;
+    let workspace = workspace(vec![
+        member("debar-compiler", &[(part, DependencyKind::Normal)]),
+        member(part, &[("debar-image", DependencyKind::Normal)]),
+        member("debar-image", &[]),
+    ]);
+
+    assert_eq!(layer_findings(&workspace), vec![]);
+}
+
+#[test]
+fn a_signature_format_part_using_the_platform_is_reported() {
+    let part = xtask::layers::SIGNATURE_FORMAT_PARTS[0].name;
+    let workspace = workspace(vec![
+        member(part, &[("debar-platform", DependencyKind::Normal)]),
+        member("debar-platform", &[]),
+    ]);
+
+    assert_eq!(layer_findings(&workspace).len(), 1);
+}
+
+#[test]
+fn a_layer_using_a_signature_format_part_is_reported() {
+    let part = xtask::layers::SIGNATURE_FORMAT_PARTS[0].name;
+    let workspace = workspace(vec![
+        member("debar-matching", &[(part, DependencyKind::Normal)]),
+        member(part, &[]),
+    ]);
+
+    assert_eq!(layer_findings(&workspace).len(), 1);
 }

@@ -18,6 +18,9 @@ const WORKSPACE_MANIFEST: &str = "Cargo.toml";
 const DENY_CONFIGURATION: &str = "deny.toml";
 const WORKFLOWS: &str = ".github/workflows";
 const MIRI_CRATES: [&str; 1] = ["debar-platform"];
+const MIRI_FLAGS_FOR_THE_FILESYSTEM_GATE: &str = "-Zmiri-disable-isolation";
+const FUZZ_DIRECTORY: &str = "fuzz";
+const FUZZ_SECONDS_PER_TARGET: u32 = 60;
 
 #[derive(Clone, Copy)]
 enum Check {
@@ -103,6 +106,11 @@ fn main() -> ExitCode {
     let outcome = repository_root().and_then(|root| match arguments.as_slice() {
         [task] if task == "check" => run_every_change_check(&root),
         [task] if task == "miri" => run_miri(&root),
+        [task] if task == "fuzz" => run_fuzz_targets(&root, FUZZ_SECONDS_PER_TARGET),
+        [task, seconds] if task == "fuzz" => seconds
+            .parse()
+            .map_err(|_| usage())
+            .and_then(|seconds| run_fuzz_targets(&root, seconds)),
         [task] if task == "release-check" => check_release(&root),
         [task] => match EVERY_CHANGE.iter().find(|check| check.name() == task) {
             Some(check) => check.run(&root),
@@ -122,7 +130,7 @@ fn main() -> ExitCode {
 fn usage() -> Failure {
     let checks: Vec<&str> = EVERY_CHANGE.iter().map(|check| check.name()).collect();
     Failure(format!(
-        "usage: cargo xtask <task>\n  check          run every check below\n  {}\n  miri           run the platform crate's tests under Miri\n  release-check  fail while architecture-overview/ROADMAP.md lists a borrowed piece",
+        "usage: cargo xtask <task>\n  check          run every check below\n  {}\n  miri           run the platform crate's tests under Miri\n  fuzz [SECONDS] run every fuzz target for SECONDS each (default {FUZZ_SECONDS_PER_TARGET})\n  release-check  fail while architecture-overview/ROADMAP.md lists a borrowed piece",
         checks.join("\n  ")
     ))
 }
@@ -156,7 +164,52 @@ fn run_miri(root: &Path) -> Result<(), Failure> {
     for crate_name in MIRI_CRATES {
         arguments.extend(["--package", crate_name]);
     }
-    run_command(root, "cargo", &arguments)
+    run_command_with_environment(
+        root,
+        "cargo",
+        &arguments,
+        &[("MIRIFLAGS", MIRI_FLAGS_FOR_THE_FILESYSTEM_GATE)],
+    )
+}
+
+fn run_fuzz_targets(root: &Path, seconds: u32) -> Result<(), Failure> {
+    let nightly = read_text(root, NIGHTLY_TOOLCHAIN_FILE)?;
+    let toolchain = format!("+{}", nightly.trim());
+    let fuzz = root.join(FUZZ_DIRECTORY);
+    run_command(
+        &fuzz,
+        "cargo",
+        &[&toolchain, "metadata", "--locked", "--format-version", "1"],
+    )
+    .map_err(|Failure(reason)| {
+        Failure(format!(
+            "{FUZZ_DIRECTORY}/Cargo.lock is out of date: {reason}"
+        ))
+    })?;
+    let listing = command_output(&fuzz, "cargo", &[&toolchain, "fuzz", "list"])?;
+    let time_limit = format!("-max_total_time={seconds}");
+    let failed: Vec<&str> = listing
+        .lines()
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+        .filter(|target| {
+            eprintln!("==> fuzz {target} for {seconds} s");
+            run_command(
+                &fuzz,
+                "cargo",
+                &[&toolchain, "fuzz", "run", target, "--", &time_limit],
+            )
+            .is_err()
+        })
+        .collect();
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(Failure(format!(
+            "fuzz targets failed: {}",
+            failed.join(", ")
+        )))
+    }
 }
 
 fn check_release(root: &Path) -> Result<(), Failure> {
@@ -279,8 +332,18 @@ fn read_file(path: &Path) -> Result<String, Failure> {
 }
 
 fn run_command(root: &Path, program: &str, arguments: &[&str]) -> Result<(), Failure> {
+    run_command_with_environment(root, program, arguments, &[])
+}
+
+fn run_command_with_environment(
+    root: &Path,
+    program: &str,
+    arguments: &[&str],
+    environment: &[(&str, &str)],
+) -> Result<(), Failure> {
     let status = Command::new(program)
         .args(arguments)
+        .envs(environment.iter().copied())
         .current_dir(root)
         .status()
         .map_err(|error| Failure(format!("cannot run {program}: {error}")))?;

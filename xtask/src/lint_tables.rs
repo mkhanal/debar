@@ -24,7 +24,7 @@ pub const FORBIDDEN_OUTSIDE_THE_EXEMPTIONS: [(&str, &str); 3] = [
     ("clippy", "disallowed_types"),
 ];
 
-pub const LINT_EXEMPTIONS: [LintExemption; 2] = [
+pub const LINT_EXEMPTIONS: [LintExemption; 3] = [
     LintExemption {
         member: "debar-platform",
         lints: &[
@@ -47,18 +47,24 @@ pub const LINT_EXEMPTIONS: [LintExemption; 2] = [
     },
     LintExemption {
         member: "xtask",
-        lints: &[
-            ExemptLint {
-                tool: "clippy",
-                lint: "disallowed_methods",
-                level: "allow",
-            },
-            ExemptLint {
-                tool: "clippy",
-                lint: "disallowed_types",
-                level: "allow",
-            },
-        ],
+        lints: OUTSIDE_THE_PRODUCT_EXEMPTIONS,
+    },
+    LintExemption {
+        member: "acceptance",
+        lints: OUTSIDE_THE_PRODUCT_EXEMPTIONS,
+    },
+];
+
+const OUTSIDE_THE_PRODUCT_EXEMPTIONS: &[ExemptLint] = &[
+    ExemptLint {
+        tool: "clippy",
+        lint: "disallowed_methods",
+        level: "allow",
+    },
+    ExemptLint {
+        tool: "clippy",
+        lint: "disallowed_types",
+        level: "allow",
     },
 ];
 

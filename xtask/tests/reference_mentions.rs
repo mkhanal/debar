@@ -92,3 +92,25 @@ fn a_binary_file_naming_the_reference_scanner_is_reported() {
 
     assert_eq!(mentions("crates/image/tests/sample.bin", &content).len(), 1);
 }
+
+#[test]
+fn naming_the_part_that_supports_the_format_is_not_a_mention() {
+    let part = format!("{}-signatures", REFERENCE_SCANNER_NAMES[0]);
+    let lines = [
+        format!("members = [\"crates/{part}\"]"),
+        format!("{{ crate = \"debar-{part}\", wrappers = [] }}"),
+        format!("use debar_{}::read;", part.replace('-', "_")),
+    ];
+
+    for line in lines {
+        assert_eq!(mentions("Cargo.toml", line.as_bytes()), vec![], "{line}");
+    }
+}
+
+#[test]
+fn a_mention_beside_the_part_name_is_still_reported() {
+    let name = REFERENCE_SCANNER_NAMES[0];
+    let line = format!("debar-{name}-signatures reads what {name} reads");
+
+    assert_eq!(mentions("Cargo.toml", line.as_bytes()).len(), 1);
+}

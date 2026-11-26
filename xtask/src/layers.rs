@@ -25,11 +25,21 @@ pub const TOOLS_BESIDE_THE_LAYERS: [ToolBesideTheLayers; 2] = [
     },
     ToolBesideTheLayers {
         name: "debar-compiler",
-        may_use: &["debar-image", "debar-platform"],
+        may_use: &["debar-image", "debar-platform", "debar-clamav-signatures"],
     },
 ];
 
-pub const OUTSIDE_THE_PRODUCT: [&str; 1] = ["xtask"];
+pub struct SignatureFormatPart {
+    pub name: &'static str,
+    pub may_use: &'static [&'static str],
+}
+
+pub const SIGNATURE_FORMAT_PARTS: [SignatureFormatPart; 1] = [SignatureFormatPart {
+    name: "debar-clamav-signatures",
+    may_use: &["debar-image"],
+}];
+
+pub const OUTSIDE_THE_PRODUCT: [&str; 2] = ["xtask", "acceptance"];
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LayerFinding {
@@ -64,7 +74,7 @@ impl fmt::Display for LayerFinding {
                 found,
             } => write!(
                 formatter,
-                "deny.toml must ban {crate_name} with wrappers = {expected:?}, the crates the layer table in xtask/src/layers.rs lets use it; it has {}",
+                "deny.toml must ban {crate_name} with wrappers = {expected:?}, the crates the layer table in xtask/src/layers.rs lets use it, or not ban it at all when that list is empty, since cargo-deny would then ban the crate itself; it has {}",
                 found
                     .as_ref()
                     .map_or_else(|| "no ban".to_owned(), |wrappers| format!("{wrappers:?}"))
@@ -85,6 +95,7 @@ impl fmt::Display for DenyConfigurationNotToml {
 enum Placement {
     Layer { depth_from_top: usize },
     Tool { may_use: &'static [&'static str] },
+    Part { may_use: &'static [&'static str] },
     OutsideTheProduct,
 }
 
@@ -122,7 +133,12 @@ pub fn deny_wrapper_findings(
                 .iter()
                 .find(|ban| ban.get("crate").and_then(Value::as_str) == Some(crate_name))
                 .map(wrappers_of);
-            (found.as_ref() != Some(&expected)).then(|| LayerFinding::DenyWrappersDisagree {
+            let agrees = if expected.is_empty() {
+                found.is_none()
+            } else {
+                found.as_ref() == Some(&expected)
+            };
+            (!agrees).then(|| LayerFinding::DenyWrappersDisagree {
                 crate_name: crate_name.to_owned(),
                 expected,
                 found,
@@ -135,6 +151,7 @@ fn product_crates() -> impl Iterator<Item = &'static str> {
     LAYERS_TOP_DOWN
         .into_iter()
         .chain(TOOLS_BESIDE_THE_LAYERS.iter().map(|tool| tool.name))
+        .chain(SIGNATURE_FORMAT_PARTS.iter().map(|part| part.name))
 }
 
 fn permitted_dependents(crate_name: &str) -> Vec<String> {
@@ -187,7 +204,7 @@ fn may_use(dependent: &str, dependency: &str) -> bool {
             to,
             Placement::Layer { depth_from_top: used_depth } if used_depth > depth_from_top
         ),
-        Placement::Tool { may_use } => may_use.contains(&dependency),
+        Placement::Tool { may_use } | Placement::Part { may_use } => may_use.contains(&dependency),
         Placement::OutsideTheProduct => false,
     }
 }
@@ -205,6 +222,14 @@ fn placement(crate_name: &str) -> Option<Placement> {
     {
         return Some(Placement::Tool {
             may_use: tool.may_use,
+        });
+    }
+    if let Some(part) = SIGNATURE_FORMAT_PARTS
+        .iter()
+        .find(|part| part.name == crate_name)
+    {
+        return Some(Placement::Part {
+            may_use: part.may_use,
         });
     }
     OUTSIDE_THE_PRODUCT
