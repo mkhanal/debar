@@ -7,18 +7,19 @@ The pieces Debar is built from, their order, and what exists today. Each piece g
 - The governing documents in this repository.
 - The study folder for the first signature format, with its reference scanner and databases pinned and a first set of notes.
 - The toolchain image (`toolchain.Dockerfile`) and `./in-toolchain`, which runs any command in it, locally as in CI.
-- A Cargo workspace on Rust 1.100.0 with the `xtask` crate and slice 1 of pieces 3 and 4, hash signatures end to end:
+- A Cargo workspace on Rust 1.100.0 with the `xtask` crate and slices 1 and 2 of pieces 3 and 4, hash signatures and generic extended signatures end to end:
   - `debar-platform`: `MappedFile` (the only `unsafe`), the filesystem gate's directory listing, reads and atomic writes, reading a scanned file, the command line, and a stopwatch.
-  - `debar-image`: the format-neutral model for hash signatures and the image: header, section directory and checksums, front-coded names, and one hash table per purpose, category and algorithm with its size directory and a binary fuse filter probed in place.
-  - `debar-clamav-signatures`, the first signature-format part: containers, hash files and ignore lists, with an account of every line of every database file; every other kind of file is accounted as not yet compiled.
+  - `debar-image`: the format-neutral model for hash and pattern signatures and the image: header, section directory and checksums, front-coded names, one hash table per purpose, category and algorithm with its size directory and a binary fuse filter probed in place, and a pattern section holding a hashed four-byte anchor filter, a two-byte filter, anchor tables, placed signatures and verification programs, all read in place.
+  - `debar-clamav-signatures`, the first signature-format part: containers, hash files, ignore lists and extended signature files, with an account of every line of every database file. Extended lines for any file type are compiled; other targets, and offsets in an executable, are accounted as not yet compiled.
   - `debar-compiler`, which compiles a folder of databases into an image and an account report.
-  - `debar-matching`: which digests an object needs, whole-file and section lookups, and false-positive trust.
-  - `debar-interfaces` with `debar comparison-report`, which writes the comparison harness's report for one top-level object.
+  - `debar-matching`: which digests an object needs, whole-file and section lookups, false-positive trust, and a streaming pattern scan (`feed` and `finish`) with look-back, ordering detections as the reference reports them.
+  - `debar-interfaces` with `debar comparison-report`, which writes the comparison harness's report for one top-level object, with its hash and pattern detections.
   - `acceptance`, outside the product, whose tests prove the requirements in `specs/` by running Debar's commands as a user would.
-  - `fuzz/`, a cargo-fuzz workspace with a target for every part parser and for opening and reading a damaged image.
+  - `fuzz/`, a cargo-fuzz workspace with a target for every part parser, for opening and reading a damaged image, and for the pattern scan.
+- The comparison with the reference scanner on every push and pull request (`.github/workflows/comparison.yml`), through the harness's reusable workflow: its fixtures, and an input built from every buildable generic extended signature plus 6,000 inputs across a 128 KiB boundary, judged by the harness's ratchet for Debar.
 - `cargo xtask check`, run on every push and pull request on amd64 and arm64: formatting, lints (including the gates), tests, dependencies (exact versions, licences, sources, advisories, and bans that keep outside resources in the platform crate and layers in order), the lint tables that confine `unsafe` to the platform crate, the layer table, mentions of a reference scanner, requirements married to tests, and the workflows. Miri runs on the platform crate on every change.
 - `cargo xtask release-check`, which fails while "Borrowed pieces" lists anything.
-- Requirements in `specs/` for hash detection, the accounting of the pinned databases, an image identical across runs and architectures, readiness within 50 ms and private memory within 64 MiB, each passing on every change. On the pinned databases: 3,213,878 hash signatures compiled into a 90 MB image in 5.4 s; start, readiness and a small scan in 420,212 instructions; 64 KiB of the image resident and 140 KiB private memory once ready.
+- Requirements in `specs/` for hash and pattern detection, the accounting of the pinned databases, an image identical across runs and architectures, readiness within 50 ms and private memory within 64 MiB, each passing on every change. On the pinned databases: 3,213,878 hash and 34,049 pattern signatures compiled into a 98 MB image in 5.6 s; start, readiness and a small scan in 887,355 instructions; 64 KiB of the image resident and 124 KiB private memory once ready.
 
 ## The pieces, in order
 

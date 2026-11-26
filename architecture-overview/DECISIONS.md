@@ -221,3 +221,31 @@ Each becomes a requirement in `specs/` with its married test in the piece that f
 | Hash lookups, need and lookup without the digest | about 2.0 million whole-file and 2.9 million section lookups per second |
 
 **Not yet settled.** Calling the comparison harness's reusable workflow from CI: that workflow file would name the reference scanner, so it needs a place in the reference-mentions allow-list first.
+
+### 2026-11-27 — Generic extended signatures end to end, as built
+
+**Decision.** Slice 2 of the image and the matching engine is in place, with these settled where the design left them open:
+
+- **The pattern model** is format-neutral: masked bytes, one byte from a set, gaps, choices of strings, a string of a width equal to none of a set, tests of the bytes before and after a match, and a placement (anywhere, from the start, before the end, each with a shift). The part reads the format's text into it and decides which file types, offsets and quirks apply; the engine knows none of them.
+- **A pattern is split only at unbounded gaps.** Each piece is one verification program, checked over sets of positions, so bounded gaps up to 1 MiB stay inside it. Pieces chain: each must start at or after the earliest end of a valid chain through the one before. Nested alternatives are expanded into strings when the image is built, at most 4,096.
+- **One pattern section per signature group**, holding its parts in one section: a four-byte anchor filter of 32 bits per distinct anchor (128 KiB for the generic group), its bucketed anchor table, a two-byte filter and table for pieces with no four-byte run, a list of pieces with no anchor, the placed signatures, the signatures and the programs. Anchors are chosen by rarity from a table of byte costs measured on the benchmark corpus.
+- **The scan is one stream.** The object's length is given up front, so end-relative placements resolve before the first byte. Candidates are verified first in, first out by anchor position, so chains and the order of detections do not depend on how the object is cut into chunks.
+- **Each signature is reported at most once per object**, in the reference's order: by report window, then a rank the part writes (bodies of plain bytes first), then position. The windows' length and overlap are image data written by the part. Without every-match, the scan stops once the window of the first strong detection is complete.
+- **A malformed extended line fails the compile**, as it fails the reference's load. The account gains outcomes for a target the format does not load, an offset that never reports, and an offset that needs executable facts.
+- **Property tests use a small deterministic generator of their own.** proptest would bring `rand` into the workspace, which the bans keep inside the platform crate.
+- **The comparison workflow** is `.github/workflows/comparison.yml`, the one workflow allowed to name the reference scanner, because it names the harness it calls. The harness gained a ratchet per scanner under test, rules covering a kind of difference on every input, a difference for a detection reported a different number of times, and a mode that scans an input built from every buildable signature of a target type.
+
+**Why.** Each keeps the format in the part and the engine format-neutral (Constitution §11), keeps the scan's memory bounded by the image rather than the input (§8), and makes the result independent of chunking and scheduling (§16).
+
+**Measured** on the pinned databases, in the toolchain image on an Apple Silicon Mac (aarch64 Linux VM):
+
+| Figure | Value |
+| --- | --- |
+| Pattern signatures compiled | 34,049: 34,007 generic `.ndb` lines and 42 `.ndu` lines |
+| Image | 98 MB, of which the pattern section is 7.9 MB; compile 5.6 s |
+| Start, readiness and one small scan | 887,355 instructions; 2.4 ms wall-clock median, recorded and not gated |
+| Once ready | 64 KiB of the image resident, 124 KiB private |
+| Generic pattern scan, the two benchmark tars as raw objects | 138 MiB/s, against about 68 MiB/s for the reference's raw scan with the same 34,019 lines loaded (study folder) |
+| Comparison, 40,001 built inputs | Every input detected under the signature it was built for, by both scanners; the remaining differences are in the harness's ratchet for Debar |
+
+**Not yet settled.** How many times a signature is reported, and through which passes and normalised views, which come with the scan core and format modules; the window overlap, which the reference takes from a signature not compiled yet; and the reference's windowing quirks, each recorded in the study folder for a person to decide. The throughput budget is written with logical signatures (slice 4).
