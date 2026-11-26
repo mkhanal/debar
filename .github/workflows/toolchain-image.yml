@@ -1,0 +1,79 @@
+name: Toolchain image
+
+on:
+  push:
+    paths:
+      - toolchain.Dockerfile
+      - rust-toolchain-nightly
+      - .github/workflows/toolchain-image.yml
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/debar-toolchain
+
+jobs:
+  build:
+    name: build (${{ matrix.architecture }})
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write # pushes this architecture's image and build cache to ghcr.io
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Log in to the GitHub container registry
+        run: echo "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+      - name: Build and push linux/${{ matrix.architecture }}
+        run: |
+          docker buildx create --use
+          docker buildx build \
+            --file toolchain.Dockerfile \
+            --platform "linux/$ARCHITECTURE" \
+            --cache-from "type=registry,ref=$IMAGE:cache-$ARCHITECTURE" \
+            --cache-to "type=registry,ref=$IMAGE:cache-$ARCHITECTURE,mode=max" \
+            --tag "$IMAGE:$GITHUB_SHA-$ARCHITECTURE" \
+            --provenance false \
+            --push \
+            .
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+
+  publish:
+    name: publish the multi-architecture image
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write # pushes the multi-architecture index to ghcr.io
+    steps:
+      - name: Log in to the GitHub container registry
+        run: echo "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+      - name: Join both architectures under one digest
+        run: |
+          docker buildx imagetools create \
+            --tag "$IMAGE:$GITHUB_SHA" \
+            "$IMAGE:$GITHUB_SHA-amd64" \
+            "$IMAGE:$GITHUB_SHA-arm64"
+          digest="$(docker buildx imagetools inspect "$IMAGE:$GITHUB_SHA" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          {
+            echo "Commit this line to \`toolchain-image\`:"
+            echo
+            echo "    $IMAGE@$digest"
+          } >> "$GITHUB_STEP_SUMMARY"
