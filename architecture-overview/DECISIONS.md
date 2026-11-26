@@ -83,3 +83,9 @@ Compatibility is not copying: it is stated as the surface a user sees (commands,
 - Open core, with closed paid add-ons: not open source as a whole, and deters contributors.
 
 **Replaces** "GPL version 2 only" of 2026-11-26.
+
+### 2026-11-27 — Databases come from our own mirror
+
+**Decision.** Debar's updater fetches databases from a mirror Debar's operators run, never from the format publisher's own servers. The mirror is filled with the publisher's supported mirroring tool.
+
+**Why.** A publisher may rate-limit or block clients it does not recognise. A mirror filled the supported way keeps Debar's supply within the publisher's rules, and lets a hosted service compile once and hand images to every scanner. The reasoning that names the publisher is in the format's study folder.
