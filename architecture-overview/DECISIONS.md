@@ -249,3 +249,32 @@ Each becomes a requirement in `specs/` with its married test in the piece that f
 | Comparison, 40,001 built inputs | Every input detected under the signature it was built for, by both scanners; the remaining differences are in the harness's ratchet for Debar |
 
 **Not yet settled.** How many times a signature is reported, and through which passes and normalised views, which come with the scan core and format modules; the window overlap, which the reference takes from a signature not compiled yet; and the reference's windowing quirks, each recorded in the study folder for a person to decide. The throughput budget is written with logical signatures (slice 4).
+
+### 2026-11-27 — Every extended-signature target and file typing, as built
+
+**Decision.** Slice 3 of the image and the matching engine is in place, with these settled where the design left them open:
+
+- **Object kinds are Debar's own.** `ObjectKind` in `debar-image` lists every kind of object the signature format can name. The part maps the format's type names onto it and writes an object-kinds section: for each kind, its name in the format, its signature groups in the order they run (its target's group, then the generic group), its rank when a type is recognised, how a full scan matches its own bytes (not at all, as itself, or as another kind) and which kinds it re-types when a full scan finds it, and whether it is an executable. The engine runs what the table lists and knows no target number (Constitution §11).
+- **One pattern section per group.** Each target compiles into its own group; type recognition is a group of its own whose outcome is a type found at an offset, never a detection.
+- **Executable placements** (entry point, section start, last section, whole section, version information, and end-relative placements in an executable) are resolved per object, in 32-bit arithmetic modulo 2^32 as the reference resolves them, against an `ExecutableLayout` the caller supplies. It is asked for only when the object's kind is an executable; without one, those placements and every end-relative placement in that scan match nothing, as when the reference cannot parse the header. They are tested with synthetic layouts until the executable format modules (piece 6) parse real ones.
+- **Typing** is the scan core's first job, in a new `debar-scan` crate: magic from the first bytes, then text, wide text or binary data from bytes the part lists as never in text, then type recognition over the first bytes with the ranks the part writes, then the wide-text retry. After a full scan, a recognised kind re-types the object where the part says it does. `debar comparison-report` uses it to type the top-level object, skip the raw scan and hash lookup for kinds whose own bytes are never matched, and report the kind's name. The scan core's recursion is not built.
+- **Parts are split where the reference splits them**, at every `*` and every gap the format does not rewrite into wildcards, and each part remembers its first end and its latest eight, overwritten in turn: the reference's memory, which can lose a match when a part recurs. A program no longer holds a bounded gap between parts.
+- **The window overlap is the reference's longest pattern part per group**, counted from every body it loads, logical subsignatures included though they are not compiled yet. That reproduces the reference's 8,000 bytes for the generic group and every target group's value.
+- **A hash key listed more than once** is stored once, under the name the reference reports, which the part computes from the reference's documented ordering of a size bucket and its lookup; the other lines are accounted as shadowed. The rule was checked against the study folder's model of it on 400 keys.
+- **Not reproduced, reproduced if observed:** a right-edge class passing at every window end, a variable body accepted past a window end, a lone bracket byte lost at a window start, bodies equal but for bracket distances checked once, a part occurrence in a window overlap recorded twice, and the exchange of a part's first and found ends. None can change a detection on the pinned databases as far as the study folder shows; each is recorded there. A crash of the reference (a leading negated class, `SL+n` with no sections) is never reproduced.
+- **Not yet built, recorded as gaps:** the second wide-text retry (its conversion is not studied), the tar and archive refinements of typing, and the reference's built-in type table, used only when no file-type database is loaded.
+
+**Why.** Each keeps the format in the part, makes the result independent of how the object is cut into chunks (Constitution §16), and reproduces what a signature can observe (Constitution §2) wherever the pinned databases can observe it.
+
+**Measured** on the pinned databases, in the toolchain image on an Apple Silicon Mac (aarch64 Linux VM):
+
+| Figure | Value |
+| --- | --- |
+| Compiled | 3,212,354 hash signatures (1,524 shadowed), 105,901 pattern signatures in 12 target groups, 256 file-type lines (189 magic, 67 recognition) |
+| Image | 123 MB, of which the PE group is 20.9 MB and the generic group 8.4 MB; compile 7.8 s |
+| Start, readiness and one small scan | 1,278,024 instructions; 1.9 ms wall-clock median, recorded and not gated |
+| Once ready | 64 KiB of the image resident, 128 KiB private |
+| Generic pattern scan, the two benchmark tars as raw objects | 98 MiB/s, against 133 MiB/s before parts were split where the reference splits them and about 68 MiB/s for the reference |
+| Comparison | Inputs built for targets 0 (40,001, with the boundary inputs) and 4 (1,064): every one detected by both scanners under its signature. Targets 3 (3,958) and 7 (1,565): detected by the reference only, through normalisation not built yet, judged by their own ratchets. The top-level type agrees on every input and fixture, which closes the rule for untyped objects; no other known difference changed |
+
+**Not yet settled.** Recovering the throughput the reference's part split costs (anchoring a bounded part from its predecessor instead of the filter is the first candidate), with the throughput budget in slice 4.
