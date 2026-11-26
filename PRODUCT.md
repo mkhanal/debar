@@ -21,6 +21,9 @@ A compatible interface is also a part. It covers what a user of that scanner see
 1. **A drop-in replacement.** For each supported format, Debar works with every signature and handles every case the format's own scanner handles.
 2. **A much smaller footprint.** It uses far less memory and other system resources than that scanner.
 3. **Near-instant start.** It is ready to scan almost as soon as it starts.
+4. **Faster scanning.** It scans the same files faster than that scanner.
+
+The second, third and fourth aims are budgets every change is tested against (Constitution §12), not hopes.
 
 ## What drop-in means
 
@@ -34,6 +37,13 @@ A compatible interface is also a part. It covers what a user of that scanner see
 
 - **Compatibility mode** behaves at its interface as the scanner being replaced does, for people switching.
 - **Native mode** offers the same functions through Debar's own contract, free to be clearer and faster. Scanning a file streamed over HTTP is part of it.
+
+Native mode also tells a caller what a file holds, not only whether it is known malware:
+
+- **Findings beside the verdict.** Macros, scripts and programs, encrypted content, PDF scripts and launch actions, links to outside content, and content that disagrees with the file's name, each reported as a finding. They come from facts Debar's parsers produce anyway, and cost nothing when not asked for. Which files to accept stays the caller's rule.
+- **Hostile files answered plainly.** Archive bombs, nesting too deep, expansion past a limit and scans over their time budget are refused with a finding naming what was exceeded, and never exhaust the scanner.
+- **The whole file reached.** Parts other scanners can miss, such as entries stored in ZIP64 form and files attached inside a PDF, are scanned too. Compatibility mode does not do this, so its detections stay those of the scanner being replaced.
+- **A confined scanner.** Scanning runs where it cannot reach the network or start programs, keeps nothing after answering, asks a caller to retry when saturated, refuses a sender that stalls, and continues the caller's trace.
 
 Both are faces of one engine.
 

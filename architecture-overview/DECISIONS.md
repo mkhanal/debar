@@ -133,3 +133,26 @@ Compatibility is not copying: it is stated as the surface a user sees (commands,
 - **Clippy reads a separate `clippy.toml` per crate.** It takes the nearest one to the crate and does not merge it with the root's, so a crate with its own file silently drops every gate. `cargo xtask lint-tables` therefore rejects any `clippy.toml` but the root's.
 - **rust-lld is the default linker on amd64 Linux but not on arm64 Linux.** With Rust 1.100.0, `cargo rustc -- --print link-args` shows `-fuse-ld=lld` on `x86_64-unknown-linux-gnu` and the system linker through `cc` on `aarch64-unknown-linux-gnu`.
 - **cargo-deny's `wrappers` expresses every rule between crates that exist and are named in `deny.toml`,** for normal, build and dev dependencies between workspace crates alike. It cannot reject a crate missing from the table, which `cargo xtask layers` does, and it does not know the table, so `cargo xtask layers` also checks that `deny.toml`'s wrappers match it.
+
+### 2026-11-27 — Speed and footprint are hard, tested budgets
+
+**Decision.** Start time, scan speed and memory are requirements with budgets, tested on every change (Constitution §12). The budgets, on the pinned databases and default settings, against the reference scanner measured on the same machine:
+
+- **Ready to scan within 50 ms** with every official database loaded, from a compiled image. The reference takes about 5.8 s.
+- **At most 64 MiB of private memory** once ready, the image itself being a shared, file-backed mapping. The reference peaks at about 972 MiB.
+- **At least twice the reference scanner's throughput** on the standard benchmark corpus.
+- **No growth past the memory budget while switching to a new image.** The reference builds a second engine beside the first.
+
+Each becomes a requirement in `specs/` with its married test in the piece that first makes it measurable: start time and memory with the signature compiler (piece 3), throughput with the matching engine (piece 4), the switch with the updater (piece 8). CI gates on instruction counts, allocation counts and proportional and private memory, calibrated against these figures; wall-clock figures are checked as medians on the same runner class.
+
+**Why.** The owner set speed and load speed as hard requirements. A budget nothing enforces erodes one reasonable change at a time. The numbers turn "near-instant" and "much smaller" into something a test can fail.
+
+**Not yet settled.** The reference's throughput on the standard corpus is being measured; the corpus is defined in the study folder. A budget that proves unreachable is changed only by a person's decision, recorded here with the measurement.
+
+### 2026-11-27 — Native mode screens, as well as scans
+
+**Decision.** Native mode reports findings beside the malware verdict (macros, scripts and programs, encrypted content, PDF scripts and launch actions, links to outside content, content that disagrees with the file's name); refuses archive bombs, nesting too deep, expansion past a limit and scans over their time budget with a finding naming the limit; scans parts other scanners can miss, such as ZIP64 entries and files attached inside a PDF; and runs confined, with no network and no programs started, keeping nothing after answering, with back-pressure for a saturated scanner and refusal of a stalled sender. Compatibility mode does none of this beyond what the scanner it replaces does.
+
+**Why.** A caller deciding whether to accept a file needs to know what it holds, not only whether it is known malware. Debar's format modules produce these facts while parsing, and facts are computed only when asked for, so the findings cost nothing when unused. One process then replaces a scanner plus a separate screening service in front of it. Extra detections in compatibility mode would be differences a signature can observe (Constitution §2), so they stay in native mode. Which file types to accept remains the caller's rule.
+
+**Consequence.** Format modules (piece 6) record these facts; native mode (piece 9) reports them.

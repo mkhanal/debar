@@ -59,9 +59,13 @@ The layers are named in [architecture-overview/ARCHITECTURE.md](./architecture-o
 
 The engine knows nothing of any one signature format or any one scanner's interface. A signature format is a part that turns its database files into the engine's own compiled form. A compatibility interface is a part that translates one scanner's commands, protocol, parameters and configuration onto Debar's native interface, and holds no scanning logic. Adding a format or an interface adds a part and changes no layer beneath it.
 
-## 12. Resource Claims Are Measured
+## 12. Speed And Footprint Are Budgeted And Tested
 
-A statement about start time, memory or speed comes with a measurement anyone can repeat. Once a requirement states a budget, a change that exceeds it fails.
+Start time, scan speed and memory are hard requirements, not aims. Each has a budget, written as a requirement and proved by a test that runs on every change from the piece that first makes it measurable. A change that exceeds a budget fails, like any other failing test.
+
+- A budget is measured the same way on every run: on counts that do not depend on a shared machine's load, calibrated against the wall-clock and memory figures the budget promises.
+- A budget is only raised by a person's decision, recorded with the measurement that forced it.
+- Any other statement about start time, memory or speed comes with a measurement anyone can repeat.
 
 ## 13. No Borrowed Code In A Release
 

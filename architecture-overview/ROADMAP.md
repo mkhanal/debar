@@ -17,13 +17,13 @@ The pieces Debar is built from, their order, and what exists today. Each piece g
 | --- | --- | --- |
 | 1 | **Foundation** | The reference is pinned, the study notes hold an inventory of everything the reference scanner does, and the workspace builds, lints and tests an empty crate with every check below in place |
 | 2 | **Comparison harness** | One command runs the reference scanner and Debar on the same input and reports any difference in what each extracted and what each detected. It can build a matching input from a signature |
-| 3 | **Signature compiler** | Every database file of the format compiles into an image, and every signature in the pinned databases is accounted for in it |
-| 4 | **Matching engine** | Given raw bytes, it reports the same signatures the reference scanner does, and start time and memory on the pinned databases are measured against the baseline |
-| 5 | **Scan core** | A file of a kind needing no format module is scanned end to end with the reference scanner's limits and verdicts |
-| 6 | **Format modules** | Each module matches the reference scanner on its own inputs in the harness. Built one at a time, the most common formats first |
+| 3 | **Signature compiler** | Every database file of the format compiles into an image, every signature in the pinned databases is accounted for in it, and the start-time and memory budgets are requirements whose tests pass on every change |
+| 4 | **Matching engine** | Given raw bytes, it reports the same signatures the reference scanner does, and the scan-speed budget is a requirement whose test passes on every change |
+| 5 | **Scan core** | A file of a kind needing no format module is scanned end to end with the reference scanner's limits and verdicts, within every budget |
+| 6 | **Format modules** | Each module matches the reference scanner on its own inputs in the harness, within every budget, and records the facts native mode reports as findings. Built one at a time, the most common formats first |
 | 7 | **Signature programs** | Signatures that are programs run and produce the reference scanner's detections |
-| 8 | **Updater and live update** | Published databases are fetched, verified and compiled, and a running scanner switches image with no scan lost |
-| 9 | **Interfaces** | Native mode is complete, and compatibility mode passes for every command, protocol message and configuration option of the scanner being replaced |
+| 8 | **Updater and live update** | Published databases are fetched, verified and compiled, and a running scanner switches image with no scan lost and within the memory budget |
+| 9 | **Interfaces** | Native mode is complete, with its findings, refusals, whole-file reach and confinement, and compatibility mode passes for every command, protocol message and configuration option of the scanner being replaced |
 
 Pieces 1 and 2 come first whatever else changes: every later piece is checked against the notes and the harness.
 
