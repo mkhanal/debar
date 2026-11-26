@@ -16,7 +16,7 @@ The pieces Debar is built from, their order, and what exists today. Each piece g
 | # | Piece | It is done when |
 | --- | --- | --- |
 | 1 | **Foundation** | The reference is pinned, the study notes hold an inventory of everything the reference scanner does, and the workspace builds, lints and tests an empty crate with every check below in place |
-| 2 | **Comparison harness** | One command runs the reference scanner and Debar on the same input and reports any difference in what each extracted and what each detected. It can build a matching input from a signature |
+| 2 | **Comparison harness** | One command runs the reference scanner and Debar on the same input and reports any difference in what each extracted and what each detected, failing only on differences not already known. It can build a matching input from a signature, proved against the reference scanner. Until Debar can scan, its side is proved against a stand-in |
 | 3 | **Signature compiler** | Every database file of the format compiles into an image, every signature in the pinned databases is accounted for in it, and the start-time and memory budgets are requirements whose tests pass on every change |
 | 4 | **Matching engine** | Given raw bytes, it reports the same signatures the reference scanner does, and the scan-speed budget is a requirement whose test passes on every change |
 | 5 | **Scan core** | A file of a kind needing no format module is scanned end to end with the reference scanner's limits and verdicts, within every budget |

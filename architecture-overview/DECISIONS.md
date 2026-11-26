@@ -156,3 +156,17 @@ Each becomes a requirement in `specs/` with its married test in the piece that f
 **Why.** A caller deciding whether to accept a file needs to know what it holds, not only whether it is known malware. Debar's format modules produce these facts while parsing, and facts are computed only when asked for, so the findings cost nothing when unused. One process then replaces a scanner plus a separate screening service in front of it. Extra detections in compatibility mode would be differences a signature can observe (Constitution §2), so they stay in native mode. Which file types to accept remains the caller's rule.
 
 **Consequence.** Format modules (piece 6) record these facts; native mode (piece 9) reports them.
+
+### 2026-11-27 — The comparison harness, designed
+
+**Decision.** Piece 2 is built in its own public repository for the first signature format, under MPL 2.0, from these parts:
+
+- **An observer for the reference scanner.** A small program linked to the pinned reference scanner's library through its public interface. It scans one input with every detection reported, and writes one record per object the scanner reaches: its depth, its parent, its type, its size, a hash of its bytes, and the detections raised on it. It runs in an image built from the pinned reference, published by the harness's own CI.
+- **A report schema** both sides write: JSON lines, one object per line, versioned in the harness repository. Debar writes the same schema from a command of its own when it can scan (piece 4 onwards); until then the harness proves its Debar side against a stand-in.
+- **A comparer** that lines up the two reports object by object and names each difference: an object one side reached and the other did not, a type, size or content hash that differs, a detection one side raised and the other did not.
+- **An input builder** that turns each pattern signature into bytes it must match, and checks each built input against the reference scanner itself, so the builder is proved before it judges Debar. Hash signatures are checked by lookup instead.
+- **A ratchet.** The harness keeps the list of differences already known. A run fails on any difference not on the list, and the list only shrinks as pieces land. Debar's CI calls the harness as a reusable workflow pinned to a commit.
+
+**Why.** Object-by-object records show where two scanners part, not only that their verdicts differ, which is what every later piece needs to be checked against. Proving the input builder against the reference first means a failure always points at Debar. The ratchet lets the harness run on every change from the start, while most detections are still to be built, without hiding a regression among known gaps.
+
+**Not yet settled.** Inputs that need a built executable around them (entry-point and section offsets) and logical signatures with conditions the builder cannot yet satisfy are reported as not built, counted, and taken up as the format modules arrive.
