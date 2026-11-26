@@ -189,3 +189,35 @@ Each becomes a requirement in `specs/` with its married test in the piece that f
 **Budget definition.** Private memory is counted as anonymous plus privately dirtied memory, excluding the image mapping, because the kernel reports a file page mapped by one process as private even though it is shared and reclaimable.
 
 **Not yet settled,** measured as the slices land: start cost and image size; the reference scanner's windowing and detection order; per-scan state under hostile input times threads; whether a regex engine that never gives up may stand where the reference's gives up after a step limit (a difference for a person to decide, recorded in the study folder). The full design, with figures and the reference-specific reasoning, is kept in the study folder.
+
+### 2026-11-27 — Hash signatures end to end, as built
+
+**Decision.** Slice 1 of the image and the matching engine is in place, with these settled where the design left them open:
+
+- **The first signature-format part** is `debar-clamav-signatures`, in `crates/clamav-signatures/`. The layer table gains a placement for signature-format parts: a part may use only `debar-image`, and only `debar-compiler` may use a part. The reference-mentions check treats a part's crate and path names as a statement that Debar supports its format, so `Cargo.toml`, `deny.toml` and the layer table may name it.
+- **Requirements are proved from outside.** The `acceptance` crate sits outside the product, like `xtask`, and is exempt from the gates. Its tests build the release binaries and run `debar-compiler` and `debar` as a user would. They run one at a time.
+- **The pinned databases for tests and CI** come from the comparison harness's published image, never from the publisher. The image's digest and each file's SHA-256 are committed beside the part, with the script that copies them out. CI runs that script on the runner before `cargo xtask check`.
+- **cargo-deny bans only crates that something may use.** A crate nothing may depend on, such as `debar-interfaces`, cannot be banned with an empty wrapper list, because cargo-deny then bans the workspace member itself. `cargo xtask layers` still rejects any dependency on it. `cpufeatures`, which asks the kernel only which processor features exist, may depend on `libc`.
+- **Miri** runs the platform crate's tests with isolation off, so the filesystem gate is checked. Miri cannot map a file, so the mapping tests are ignored there. The one `unsafe` call, the mapping itself, is covered by the native tests.
+- **The start budget's gate** is the instruction count, under callgrind, of starting, becoming ready and scanning one small file. It must be at most 50,000,000, which is the 50 ms budget at one instruction per nanosecond. That rate is well below what the runners sustain, which leaves room for system calls and page faults the count does not see. The gate also requires at most 512 KiB of the image resident once ready.
+- **The memory budget's gate** reads `/proc/<pid>/smaps` while Debar waits to read its input from a named pipe, that is, once ready. For each mapping other than the image, it counts the larger of `Anonymous` and `Private_Dirty`, since the two overlap.
+- **A duplicated hash key reports the entry loaded last.** The reference's choice depends on its own sort; the difference is recorded in the study folder for a person to decide.
+- **A malformed hash line fails the compile**, as it fails the reference's load. Every line ends with one outcome: compiled, outside the functionality level, ignored, a comment, not a signature, or not yet compiled.
+- **The image** keeps its accounting totals in the compiler's account report, not in its header. Its size directory samples every 64th size instead of indexing the top 16 bits, because most sizes are small. The fuse filter's parameters are computed in integers.
+- **`debar comparison-report`** writes the harness's report for one top-level object. It is named for comparison runs and is not native mode's interface.
+- **The toolchain image** carries `g++`, which libFuzzer needs.
+
+**Why.** Each is the smallest arrangement that lets the slice's requirements run on every change, deterministically, without naming the reference scanner outside the paths allowed to.
+
+**Measured** on the pinned databases, in the toolchain image on an Apple Silicon Mac (aarch64 Linux VM, 12 cores):
+
+| Figure | Value |
+| --- | --- |
+| Hash signatures compiled | 3,213,878, with 7 removed by an ignore list |
+| Compile time | 5.4 s median of 5 (`hyperfine`), 700 MiB peak resident |
+| Image | 90 MB: names 20.1 MB, section hash entries 53.4 MB, whole-file hash entries 10.8 MB, filters 3.6 MB, size directories 2.0 MB |
+| Start, readiness and one small scan | 420,212 instructions; 2.1 ms wall-clock median of 300 (`hyperfine -N`), recorded and not gated |
+| Once ready | 64 KiB of the image resident, 140 KiB private |
+| Hash lookups, need and lookup without the digest | about 2.0 million whole-file and 2.9 million section lookups per second |
+
+**Not yet settled.** Calling the comparison harness's reusable workflow from CI: that workflow file would name the reference scanner, so it needs a place in the reference-mentions allow-list first.

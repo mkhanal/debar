@@ -7,9 +7,18 @@ The pieces Debar is built from, their order, and what exists today. Each piece g
 - The governing documents in this repository.
 - The study folder for the first signature format, with its reference scanner and databases pinned and a first set of notes.
 - The toolchain image (`toolchain.Dockerfile`) and `./in-toolchain`, which runs any command in it, locally as in CI.
-- A Cargo workspace on Rust 1.100.0 with one crate, the platform layer's `debar-platform`, which holds no code yet, and the `xtask` crate.
+- A Cargo workspace on Rust 1.100.0 with the `xtask` crate and slice 1 of pieces 3 and 4, hash signatures end to end:
+  - `debar-platform`: `MappedFile` (the only `unsafe`), the filesystem gate's directory listing, reads and atomic writes, reading a scanned file, the command line, and a stopwatch.
+  - `debar-image`: the format-neutral model for hash signatures and the image: header, section directory and checksums, front-coded names, and one hash table per purpose, category and algorithm with its size directory and a binary fuse filter probed in place.
+  - `debar-clamav-signatures`, the first signature-format part: containers, hash files and ignore lists, with an account of every line of every database file; every other kind of file is accounted as not yet compiled.
+  - `debar-compiler`, which compiles a folder of databases into an image and an account report.
+  - `debar-matching`: which digests an object needs, whole-file and section lookups, and false-positive trust.
+  - `debar-interfaces` with `debar comparison-report`, which writes the comparison harness's report for one top-level object.
+  - `acceptance`, outside the product, whose tests prove the requirements in `specs/` by running Debar's commands as a user would.
+  - `fuzz/`, a cargo-fuzz workspace with a target for every part parser and for opening and reading a damaged image.
 - `cargo xtask check`, run on every push and pull request on amd64 and arm64: formatting, lints (including the gates), tests, dependencies (exact versions, licences, sources, advisories, and bans that keep outside resources in the platform crate and layers in order), the lint tables that confine `unsafe` to the platform crate, the layer table, mentions of a reference scanner, requirements married to tests, and the workflows. Miri runs on the platform crate on every change.
 - `cargo xtask release-check`, which fails while "Borrowed pieces" lists anything.
+- Requirements in `specs/` for hash detection, the accounting of the pinned databases, an image identical across runs and architectures, readiness within 50 ms and private memory within 64 MiB, each passing on every change. On the pinned databases: 3,213,878 hash signatures compiled into a 90 MB image in 5.4 s; start, readiness and a small scan in 420,212 instructions; 64 KiB of the image resident and 140 KiB private memory once ready.
 
 ## The pieces, in order
 
@@ -63,8 +72,8 @@ Ideas for inside the layers. None is decided; each is settled in the design of i
 
 Rules that are written down but not yet enforced by a machine. Each is removed from this list when it runs on every change.
 
-- Every format module is fuzzed (Constitution §8). ClusterFuzzLite arrives with the first format module, on every change, with longer runs weekly.
+- Every format module is fuzzed (Constitution §8). `cargo xtask fuzz` runs every fuzz target for 30 seconds on every change; ClusterFuzzLite, with longer runs weekly, arrives with the first format module.
 - Audits of every dependency with cargo-vet. The tool is in the toolchain image; the audit set is started with the first dependency linked into a release.
 - Mutation testing with cargo-mutants and coverage with cargo-llvm-cov, weekly. Both tools are in the toolchain image.
-- Resource budgets (Constitution §12), gated on instruction counts, allocations and proportional set size, once a requirement states one.
+- Resource budgets (Constitution §12) gated on allocation counts and proportional set size. Start time is gated on instruction counts and memory on private and resident bytes read from `/proc`; the throughput budget arrives with logical signatures.
 - No release while "Borrowed pieces" has an entry (Constitution §13): `cargo xtask release-check` exists and runs in the release workflow, which comes with the first release.
