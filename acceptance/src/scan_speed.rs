@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -94,6 +95,8 @@ pub struct KindMeasured {
 }
 
 pub fn measured_scan_speed(image: &Path) -> Outcome<Vec<KindMeasured>> {
+    static MEASURING: Mutex<()> = Mutex::new(());
+    let _one_at_a_time = MEASURING.lock().unwrap_or_else(PoisonError::into_inner);
     let directory = target_directory().join("acceptance").join("scan-speed");
     let record = directory.join(format!("measured-{}.json", measurement_key(image)?));
     if let Ok(text) = fs::read(&record) {
