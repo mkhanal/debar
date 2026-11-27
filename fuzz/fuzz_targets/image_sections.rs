@@ -231,12 +231,14 @@ fn valid_image() -> Vec<u8> {
                 recognising_types: true,
             },
             matched_again_as: None,
+            found_at_an_offset: None,
             found_in_full_scan_retypes: vec![ObjectKind::Text],
             executable: true,
         },
     );
     builder.set_typing(TypingRules {
         prefix_length: 1024,
+        most_found_at_offsets: 10,
         recognition_group: Some(RECOGNITION),
         text_bytes: ByteSet::of(0x20..=0x7e),
         wide_text_retry: Some(WideTextRetry {
