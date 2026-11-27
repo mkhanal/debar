@@ -1,7 +1,8 @@
 use std::ops::Range;
 
 use debar_image::{
-    ContextView, MaskedRun, ProgramMalformed, ProgramView, StepView, set_in_sequence_contains,
+    AnchorBytes, AnchorCase, ContextView, MaskedRun, ProgramHeader, ProgramMalformed, ProgramView,
+    StepView, set_in_sequence_contains,
 };
 
 pub struct RetainedBytes<'b> {
@@ -24,7 +25,8 @@ impl RetainedBytes<'_> {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PositionSet {
-    ranges: Vec<Range<u64>>,
+    first: Option<Range<u64>>,
+    later: Vec<Range<u64>>,
 }
 
 impl PositionSet {
@@ -39,40 +41,43 @@ impl PositionSet {
 
     #[must_use]
     pub fn of_ranges(ranges: impl IntoIterator<Item = (u64, u64)>) -> Self {
-        let mut set = Self::default();
-        for (first, last) in ranges {
-            if first <= last
-                && let Some(end) = last.checked_add(1)
-            {
-                set.ranges.push(first..end);
-            }
-        }
-        set.normalised()
+        Self::of_unordered(
+            ranges
+                .into_iter()
+                .filter(|(first, last)| first <= last)
+                .filter_map(|(first, last)| Some(first..last.checked_add(1)?))
+                .collect(),
+        )
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.ranges.is_empty()
+        self.first.is_none()
     }
 
     #[must_use]
     pub fn first(&self) -> Option<u64> {
-        self.ranges.first().map(|range| range.start)
+        self.first.as_ref().map(|range| range.start)
     }
 
     pub(crate) fn positions(&self) -> impl Iterator<Item = u64> + '_ {
-        self.ranges.iter().flat_map(Clone::clone)
+        self.ranges().flat_map(Clone::clone)
+    }
+
+    fn ranges(&self) -> impl Iterator<Item = &Range<u64>> {
+        self.first.iter().chain(&self.later)
     }
 
     fn add(&mut self, range: Range<u64>) {
         if range.is_empty() {
             return;
         }
-        match self.ranges.last_mut() {
+        match self.later.last_mut().or(self.first.as_mut()) {
             Some(last) if last.end >= range.start && last.start <= range.start => {
                 last.end = last.end.max(range.end);
             }
-            _ => self.ranges.push(range),
+            Some(_) => self.later.push(range),
+            None => self.first = Some(range),
         }
     }
 
@@ -82,14 +87,173 @@ impl PositionSet {
         }
     }
 
-    fn normalised(mut self) -> Self {
-        self.ranges.sort_by_key(|range| range.start);
+    fn of_unordered(mut ranges: Vec<Range<u64>>) -> Self {
+        ranges.sort_by_key(|range| range.start);
         let mut merged = Self::default();
-        for range in self.ranges {
+        for range in ranges {
             merged.add(range);
         }
         merged
     }
+}
+
+pub fn anchor_rules_out(
+    program: &ProgramHeader,
+    first_start: u64,
+    last_start: u64,
+    bytes: &RetainedBytes<'_>,
+) -> bool {
+    let anchor = program.anchor();
+    let displacement = anchor.displacement;
+    if first_start != last_start
+        || displacement.nearest != displacement.farthest
+        || first_start < bytes.first_position
+    {
+        return false;
+    }
+    let Some(at) = first_start.checked_add(u64::from(displacement.nearest)) else {
+        return false;
+    };
+    let expected: &[u8] = match &anchor.bytes {
+        AnchorBytes::Long(expected) => expected,
+        AnchorBytes::Short(expected) => expected,
+        AnchorBytes::None => return false,
+    };
+    bytes.slice(at, expected.len()).is_some_and(|found| {
+        found.iter().zip(expected).any(|(byte, anchored)| {
+            let seen = match anchor.case {
+                AnchorCase::Exact => *byte,
+                AnchorCase::Folded => byte.to_ascii_lowercase(),
+            };
+            seen != *anchored
+        })
+    })
+}
+
+pub fn earliest_end(
+    program: &ProgramView<'_>,
+    bytes: &RetainedBytes<'_>,
+    starts: &PositionSet,
+) -> Result<Option<u64>, ProgramMalformed> {
+    match program.only_run() {
+        Some(run) => earliest_run_end(run, bytes, starts),
+        None => Ok(match_ends(program, bytes, starts)?.first()),
+    }
+}
+
+fn earliest_run_end(
+    run: MaskedRun<'_>,
+    bytes: &RetainedBytes<'_>,
+    starts: &PositionSet,
+) -> Result<Option<u64>, ProgramMalformed> {
+    let length = u64::try_from(run.len()).map_err(|_| ProgramMalformed)?;
+    let mut earliest = None;
+    for range in starts.ranges() {
+        let found = find_run_starts(run, bytes, range, |start| {
+            earliest = Some(start);
+            Search::Stop
+        });
+        if found == Search::Stop {
+            break;
+        }
+    }
+    Ok(earliest.and_then(|start| start.checked_add(length)))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Search {
+    Continue,
+    Stop,
+}
+
+fn find_run_starts(
+    run: MaskedRun<'_>,
+    bytes: &RetainedBytes<'_>,
+    starts: &Range<u64>,
+    mut found: impl FnMut(u64) -> Search,
+) -> Search {
+    let first = starts.start.max(bytes.first_position);
+    let Some(retained) = first
+        .checked_sub(bytes.first_position)
+        .and_then(|offset| usize::try_from(offset).ok())
+        .and_then(|offset| bytes.bytes.get(offset..))
+    else {
+        return Search::Continue;
+    };
+    let Some(fitting) = retained.len().checked_sub(run.len()) else {
+        return Search::Continue;
+    };
+    let count = usize::try_from(starts.end.saturating_sub(first)).unwrap_or(usize::MAX);
+    let fitting = fitting.saturating_add(1).min(count);
+    let mut report = |offset: usize| {
+        let matched = retained
+            .get(offset..offset.saturating_add(run.len()))
+            .is_some_and(|window| run.matches(window));
+        match u64::try_from(offset)
+            .ok()
+            .and_then(|offset| first.checked_add(offset))
+        {
+            Some(start) if matched => found(start),
+            _ => Search::Continue,
+        }
+    };
+    let exact_byte = run.masks.iter().position(|mask| *mask == u8::MAX);
+    match (exact_byte, run.values.first(), run.masks.first()) {
+        (Some(at), _, _) => {
+            let (Some(value), Some(searched)) = (
+                run.values.get(at),
+                retained.get(at..at.saturating_add(fitting)),
+            ) else {
+                return Search::Continue;
+            };
+            return each_offset_of(*value, searched, report);
+        }
+        (None, Some(&value), Some(&mask)) => {
+            let searched = retained.get(..fitting).unwrap_or_default();
+            for (offset, byte) in searched.iter().enumerate() {
+                if byte & mask == value && report(offset) == Search::Stop {
+                    return Search::Stop;
+                }
+            }
+        }
+        (None, _, _) => {
+            for offset in 0..fitting {
+                if report(offset) == Search::Stop {
+                    return Search::Stop;
+                }
+            }
+        }
+    }
+    Search::Continue
+}
+
+const BYTES_PER_WORD: usize = 8;
+const EVERY_BYTE_LOW_BIT: u64 = 0x0101_0101_0101_0101;
+const EVERY_BYTE_HIGH_BIT: u64 = 0x8080_8080_8080_8080;
+
+fn each_offset_of(value: u8, haystack: &[u8], mut found: impl FnMut(usize) -> Search) -> Search {
+    let repeated = EVERY_BYTE_LOW_BIT.wrapping_mul(u64::from(value));
+    let (words, rest) = haystack.as_chunks::<BYTES_PER_WORD>();
+    let mut word_start = 0usize;
+    for word in words {
+        let differences = u64::from_le_bytes(*word) ^ repeated;
+        let may_hold =
+            differences.wrapping_sub(EVERY_BYTE_LOW_BIT) & !differences & EVERY_BYTE_HIGH_BIT;
+        if may_hold != 0 {
+            for (index, byte) in word.iter().enumerate() {
+                if *byte == value && found(word_start.saturating_add(index)) == Search::Stop {
+                    return Search::Stop;
+                }
+            }
+        }
+        word_start = word_start.saturating_add(BYTES_PER_WORD);
+    }
+    for (index, byte) in rest.iter().enumerate() {
+        if *byte == value && found(word_start.saturating_add(index)) == Search::Stop {
+            return Search::Stop;
+        }
+    }
+    Search::Continue
 }
 
 pub fn match_ends(
@@ -128,14 +292,13 @@ fn run_ends(
 ) -> Result<PositionSet, ProgramMalformed> {
     let length = u64::try_from(run.len()).map_err(|_| ProgramMalformed)?;
     let mut ends = PositionSet::default();
-    for start in starts.positions() {
-        if bytes
-            .slice(start, run.len())
-            .is_some_and(|window| run.matches(window))
-            && let Some(end) = start.checked_add(length)
-        {
-            ends.add_position(end);
-        }
+    for range in starts.ranges() {
+        find_run_starts(run, bytes, range, |start| {
+            if let Some(end) = start.checked_add(length) {
+                ends.add_position(end);
+            }
+            Search::Continue
+        });
     }
     Ok(ends)
 }
@@ -164,7 +327,7 @@ fn apply_step(
             if maximum < minimum {
                 return Ok(next);
             }
-            for range in &positions.ranges {
+            for range in positions.ranges() {
                 let start = range.start.saturating_add(u64::from(minimum));
                 let end = range
                     .end
@@ -175,13 +338,11 @@ fn apply_step(
             Ok(next)
         }
         StepView::Choice(alternatives) => {
-            let mut next = PositionSet::default();
+            let mut next = Vec::new();
             for alternative in alternatives.iter() {
-                for range in run_ends(alternative?, bytes, positions)?.ranges {
-                    next.ranges.push(range);
-                }
+                next.extend(run_ends(alternative?, bytes, positions)?.ranges().cloned());
             }
-            Ok(next.normalised())
+            Ok(PositionSet::of_unordered(next))
         }
         StepView::NoneOf { width, excluded } => {
             let width_in_bytes = usize::try_from(width).map_err(|_| ProgramMalformed)?;

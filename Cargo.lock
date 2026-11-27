@@ -155,7 +155,6 @@ dependencies = [
 name = "debar-matching"
 version = "0.0.0"
 dependencies = [
- "aho-corasick",
  "debar-image",
  "debar-platform",
  "md-5",

@@ -458,3 +458,39 @@ On x86_64 (emulated) the same slices run 1.33 times the aarch64 instructions on 
 **Why.** Parallel agents in separate worktrees need one place that says who holds what, checked and changed atomically enough that two never start the same work; the owner chose the workflow already proven on the other product.
 
 **Consequence.** AGENTS.md: work starts by claiming its issue, and hands in through the `pr` skill. Harness issues are claimed on the board by hand until the harness repository has the tasks.
+
+### 2026-11-27 — A filtered second pass and cheaper verification, as built
+
+**Decision.** The second step of the performance track, with these settled:
+
+- **The second pass searches through a filter, not an automaton.** The armed signatures' anchors (at most 8,192 programs, as before; above that the image's stored second-pass tables) are put, per scan, into a 65,536-bit filter of their first two bytes (every case variant for case-insensitive anchors) and a table hashed on those two bytes, case-folded. The search tests eight positions per branch against the filter, and only where one may hold looks the position up in the table and compares the whole anchor as one word. The hits, and their order at each position (exact anchors before case-insensitive ones, two-byte before four-byte, then the order the signatures were armed in), are those the automaton gave. `aho-corasick` is no longer a dependency of Debar's own code. The search state is at most 296 KiB per scan, from 1.4 MiB, so the largest per-scan logical state is 3.7 MiB (Windows executables), from 4.8 MiB.
+- **A candidate is ruled out by its anchor first.** A candidate with one possible start whose anchor sits at a fixed distance in its program is dropped when the object's bytes there are not the anchor, before its signature record or program is read. This is what most placed candidates are: the signatures tied to an offset are verified on every object, and on a small text file they are about 3,600.
+- **A run is matched only where its first exact byte occurs.** For a run of bytes tried at a range of starts, the starts are found by searching for the first byte the run fixes exactly, eight bytes to a word in safe code, or by testing the first byte where none is fixed (`memchr` measured within 0.6 instructions per byte of this, and is not used: its unsafe code has no recorded review, Constitution §18); a candidate stops at its earliest match, which is all it needs.
+- **The x86_64 records come from CI's runners, not from emulation.** Instruction counts under amd64 emulation on Apple Silicon ran 2 to 4 % below those of CI's ubuntu-24.04 x86_64 runners on the same binary, more than the tolerance, so the records measured under emulation failed CI. This is a calibration, not a loosening: each x86_64 record is CI's figure for the code before this step, scaled by this step's speed-up as measured under emulation, and is replaced by CI's own figure if that differs by more than the tolerance. The aarch64 records stay measured locally, which CI's arm64 runners confirm.
+- **The set of starts holds its first range inline**, so a candidate with one range of starts, nearly all of them, allocates nothing.
+
+**Why.** The profile of the first step put the second pass search (about 40 per byte where logical signatures arm it) and verification (23 to 39) next after the prefilter; the digests are being reorganised with the scan core and were left alone.
+
+**Measured** on the pinned databases, in the toolchain image on an Apple Silicon Mac (aarch64 Linux VM), on the requirement's slices. No detection changed: Debar's report was byte-identical before and after on the harness's 46,844 built inputs and fixtures, with and without potentially unwanted signatures, on the slices, the toolchain's system files and the standard corpus (6,387 files), and every acceptance test passes.
+
+| Instructions per byte, before → after | text | binary | PDF | OLE2 | tar | system |
+| --- | --- | --- | --- | --- | --- | --- |
+| Second pass search | 0 | 0 | 39.8 → 7.0 | 44.4 → 7.1 | 1.4 → 0 | 39.7 → 12.3 |
+| Verifying candidates | 31.4 → 11.0 | 29.4 → 8.6 | 29.0 → 12.6 | 26.5 → 8.5 | 22.7 → 9.9 | 39.1 → 25.9 |
+| Allocating and copying | 9.3 → 3.2 | 7.8 → 2.6 | 11.4 → 4.2 | 9.6 → 3.1 | 8.7 → 3.0 | 12.6 → 5.4 |
+| Prefilter (unchanged) | 32.8 | 31.2 | 33.7 | 34.3 | 31.3 | 38.0 |
+| Digests (unchanged) | 40.0 | 40.0 | 40.0 | 40.0 | 40.0 | 40.0 |
+| Selecting signatures (unchanged) | 5.6 | 5.6 | 5.5 | 6.2 | 5.5 | 1.7 |
+| Scan total | 122.5 → 95.4 | 117.1 → 90.7 | 165.2 → 108.2 | 164.5 → 102.1 | 112.7 → 92.4 | 175.6 → 127.2 |
+| Share of the budget (twice the reference) | 53 % → 42 % | 46 % → 36 % | 65 % → 43 % | 41 % → 26 % | 47 % → 39 % | 42 % → 30 % |
+| Times the reference, single-threaded | 3.7 → 4.7 | 4.4 → 5.5 | 3.1 → 4.7 | 4.9 → 7.8 | 4.2 → 5.1 | 4.8 → 6.6 |
+| Fifty times the reference would be | 9.1 | 10.2 | 10.1 | 16.1 | 9.5 | 16.7 |
+| Wall-clock on the standard corpus, MiB/s, median of 3, before → after (recorded, not gated; a shared machine) | 70 → 106 | 107 → 125 | 53 → 62 | 68 → 97 | 88 → 92 | 25 → 41 |
+
+The stage rows were profiled before this change met the scan core's first slice and with `memchr` in place of the safe byte search; the shares, the multiples and the records are measured on the code as committed, which runs within 1 % of those totals (HTML 2.3 per byte).
+
+A 1 KiB text object costs 2.4 M instructions beyond the scan's start, from 5.0 M. The HTML slice, not matched raw, falls from 4.3 to 2.0 per byte.
+
+**Why the real PDF corpus did not speed up.** Profiled with cachegrind over its 396 PDFs (104 MiB): 209 instructions per byte before this step, 167 after, against 108 on the PDF slice. The difference is whole-object matching, 54.6 per byte on real PDFs and 3.0 on the slice, nearly all of it Debar's backtracking matcher (51 per byte: the machine 22.3, the search loop 16.8, reading each instruction from the image 12.1). One logical signature does it, `Pdf.Exploit.CVE_2019_5067-7054139-0`: its regular expression holds a back-reference, so no linear engine can run it, and its trigger is `/Parent` and `/Kids`, which every real PDF holds and the generated slice does not. So the expression is searched over the whole of every PDF.
+
+**Next levers, by the profile:** the digests (40 per byte on every kind); the prefilter (31 to 38); on real PDFs, a necessary condition checked in linear time before the backtracker (the expression with each back-reference widened to the language of its group, compiled when the image is built: if it finds nothing, the backtracker cannot match either, and a search it gives up counts as no match too), and reading each backtracking program once instead of per instruction; on system files, the cost per anchored candidate (25.9 per byte, mostly the lookups `verify` does before it reaches the bytes); and placing the signatures tied to offsets on every object (about 0.9 M of a small object's 2.4 M instructions), which could be sorted when the image is built.

@@ -56,7 +56,7 @@ fn group_bound(
 fn bound(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let mapped = MappedFile::open(path)?;
     let image = Image::open(mapped.bytes())?;
-    let search = u64::try_from(largest_armed_search_bytes()?)?;
+    let search = u64::try_from(largest_armed_search_bytes())?;
     let kinds = image
         .object_kinds()?
         .ok_or("the image describes no kinds")?;

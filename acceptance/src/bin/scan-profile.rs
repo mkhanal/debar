@@ -54,7 +54,7 @@ const STAGES: [Stage; 12] = [
     },
     Stage {
         name: "second pass search",
-        functions_naming: &["aho_corasick::", "second_pass_search::"],
+        functions_naming: &["second_pass_search::"],
     },
     Stage {
         name: "whole-object matching",

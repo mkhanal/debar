@@ -17,7 +17,7 @@ use crate::logical_state::{
 use crate::part_ends::RememberedEnds;
 use crate::plug_in_matching::{PlugInRequest, match_plug_ins};
 use crate::second_pass_search::{ArmedGroup, SecondPassSearch};
-use crate::verification::{PositionSet, RetainedBytes, match_ends};
+use crate::verification::{PositionSet, RetainedBytes, anchor_rules_out, earliest_end};
 
 const POSITIONS_PER_PASS: u64 = 4096;
 const CHUNK_LENGTH: usize = 128 * 1024;
@@ -88,7 +88,6 @@ pub enum PatternScanError {
     RetainedBytesLost { position: u64 },
     SecondPassNotRun,
     WholeObjectNotGiven,
-    ArmedSearchNotBuilt,
 }
 
 impl fmt::Display for PatternScanError {
@@ -119,10 +118,6 @@ impl fmt::Display for PatternScanError {
             Self::RetainedBytesLost { position } => write!(
                 formatter,
                 "the bytes at {position} were released before a candidate there was verified"
-            ),
-            Self::ArmedSearchNotBuilt => write!(
-                formatter,
-                "the search for the armed logical signatures could not be built"
             ),
             Self::WholeObjectNotGiven => write!(
                 formatter,
@@ -1381,6 +1376,19 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             return Ok(());
         };
         let view = group.view;
+        let bytes = RetainedBytes {
+            bytes: &self.retained,
+            first_position: self.first_retained,
+            object_length: self.object_length,
+        };
+        if anchor_rules_out(
+            view.program_header(candidate.program)?,
+            candidate.first_start,
+            candidate.last_start,
+            &bytes,
+        ) {
+            return Ok(());
+        }
         let program = view.program(candidate.program)?;
         let signature = program.header.signature.get();
         if group.detected.contains(signature) {
@@ -1414,14 +1422,9 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
                 position: first_start,
             });
         }
-        let bytes = RetainedBytes {
-            bytes: &self.retained,
-            first_position: self.first_retained,
-            object_length: self.object_length,
-        };
-        let ends = match_ends(&program, &bytes, &starts)
-            .map_err(|_| GroupMalformed::Program(candidate.program))?;
-        let Some(earliest_end) = ends.first() else {
+        let Some(earliest_end) = earliest_end(&program, &bytes, &starts)
+            .map_err(|_| GroupMalformed::Program(candidate.program))?
+        else {
             return Ok(());
         };
         if segment.saturating_add(1) < record.segment_count {
@@ -1697,7 +1700,7 @@ fn counted_matches(
     }
     let mut matching = Vec::new();
     for start in starts.positions() {
-        if !match_ends(program, bytes, &PositionSet::between(start, start))?.is_empty() {
+        if earliest_end(program, bytes, &PositionSet::between(start, start))?.is_some() {
             matching.push(start);
         }
     }
