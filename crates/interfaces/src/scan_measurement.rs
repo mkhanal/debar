@@ -2,24 +2,21 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use debar_platform::filesystem::{FilesystemError, regular_files_under};
-use debar_platform::input::{UnreadableObject, read_scanned_file};
+use debar_platform::input::{InputError, ScannedFile};
 use debar_platform::mapped_file::{MappedFile, MappingError};
 use debar_platform::stopwatch::Stopwatch;
+use debar_scan::{Completion, ScanFailure, ScanSettings, Unobserved, scan};
 use serde_json::{Value, json};
 
 use crate::comparison_report::{ReadyImageError, ready_image};
-use crate::object_scan::{ObjectScanError, ScanSettings, scan_top_level_object};
 
 #[derive(Debug)]
 pub enum ScanMeasurementError {
     Mapping(MappingError),
     Image(ReadyImageError),
     Listing(FilesystemError),
-    Input(UnreadableObject),
-    Scan {
-        path: PathBuf,
-        error: ObjectScanError,
-    },
+    Input(InputError),
+    Scan { path: PathBuf, error: ScanFailure },
 }
 
 impl fmt::Display for ScanMeasurementError {
@@ -43,25 +40,24 @@ pub fn measure_scan(image_path: &Path, inputs: &[PathBuf]) -> Result<Value, Scan
     for input in inputs {
         files.extend(regular_files_under(input).map_err(ScanMeasurementError::Listing)?);
     }
+    let settings = ScanSettings::default();
     let mut scanned_bytes: u64 = 0;
     let mut detections: usize = 0;
-    let mut reading = std::time::Duration::ZERO;
     let stopwatch = Stopwatch::start();
     for path in &files {
-        let read = Stopwatch::start();
-        let object = read_scanned_file(path).map_err(ScanMeasurementError::Input)?;
-        reading = reading.saturating_add(read.elapsed());
-        let outcome =
-            scan_top_level_object(&image, &object, ScanSettings::default()).map_err(|error| {
-                ScanMeasurementError::Scan {
-                    path: path.clone(),
-                    error,
-                }
-            })?;
-        detections = detections.saturating_add(outcome.detections.len());
-        scanned_bytes = scanned_bytes.saturating_add(u64::try_from(object.len()).unwrap_or(0));
+        let file = ScannedFile::open(path, settings.read_allowance())
+            .map_err(ScanMeasurementError::Input)?;
+        let report = scan(&image, &file, &settings, &mut Unobserved);
+        if let Completion::Incomplete(error) = report.completion {
+            return Err(ScanMeasurementError::Scan {
+                path: path.clone(),
+                error,
+            });
+        }
+        detections = detections.saturating_add(report.reported.len());
+        scanned_bytes = scanned_bytes.saturating_add(file.length());
     }
-    let scanning = stopwatch.elapsed().saturating_sub(reading).as_secs_f64();
+    let scanning = stopwatch.elapsed().as_secs_f64();
     let mebibytes = f64::from(u32::try_from(scanned_bytes / 1024).unwrap_or(u32::MAX)) / 1024.0;
     Ok(json!({
         "files": files.len(),

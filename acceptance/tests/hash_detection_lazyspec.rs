@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use acceptance::{
-    CompiledImage, comparison_report, compile, detections, lowercase_hex, official_image,
+    CompiledImage, comparison_report_with, compile, detections, lowercase_hex, official_image,
     scratch_directory, write_file,
 };
 use md5::Md5;
@@ -21,7 +21,7 @@ fn scan(directory: &Path, image: &Path, contents: &[u8]) -> Scan {
     let input = directory.join("input");
     write_file(&input, contents).unwrap();
     Scan {
-        report: comparison_report(image, &input, directory).unwrap(),
+        report: comparison_report_with(image, &["--every-match"], &input, directory).unwrap(),
     }
 }
 

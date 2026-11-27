@@ -2,15 +2,16 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use debar_interfaces::{
-    DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS, ScanSettings, UnwantedCategories, measure_scan,
-    write_comparison_report,
-};
+use debar_interfaces::{measure_scan, write_comparison_report};
+use debar_matching::UnwantedCategories;
 use debar_platform::command_line::arguments;
+use debar_scan::{DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS, Matching, ScanSettings};
 
-const USAGE: &str = "usage: debar comparison-report --image IMAGE [LIMIT] [UNWANTED] INPUT REPORT\n\
+const USAGE: &str = "usage: debar comparison-report --image IMAGE [--every-match] [--heuristic-precedence] [LIMIT] [UNWANTED] INPUT REPORT\n\
   Scans INPUT as one top-level object with the compiled IMAGE and writes REPORT in the\n\
   comparison harness's report schema, version 1. It is for comparison runs, not for users.\n\
+  The scan stops at its first strong detection unless --every-match is given.\n\
+  --heuristic-precedence records a potentially unwanted detection as a strong one.\n\
   UNWANTED is --potentially-unwanted, which also reports potentially unwanted signatures,\n\
   optionally followed by --unwanted-category-containing TEXT or\n\
   --unwanted-category-not-containing TEXT to keep only those whose category does or does not\n\
@@ -28,7 +29,12 @@ enum Unwanted {
 }
 
 impl Unwanted {
-    fn settings(&self, largest_object_for_regular_expressions: Option<u64>) -> ScanSettings<'_> {
+    fn settings(
+        &self,
+        matching: Matching,
+        heuristic_precedence: bool,
+        largest_object_for_regular_expressions: Option<u64>,
+    ) -> ScanSettings<'_> {
         let (potentially_unwanted, unwanted_categories) = match self {
             Self::Off => (false, UnwantedCategories::Every),
             Self::Every => (true, UnwantedCategories::Every),
@@ -36,9 +42,12 @@ impl Unwanted {
             Self::NotContaining(text) => (true, UnwantedCategories::NotContaining(text)),
         };
         ScanSettings {
+            matching,
+            heuristic_precedence,
             potentially_unwanted,
             unwanted_categories,
             largest_object_for_regular_expressions,
+            ..ScanSettings::default()
         }
     }
 }
@@ -46,6 +55,8 @@ impl Unwanted {
 enum Request {
     ComparisonReport {
         image: PathBuf,
+        matching: Matching,
+        heuristic_precedence: bool,
         largest_object_for_regular_expressions: Option<u64>,
         unwanted: Unwanted,
         input: PathBuf,
@@ -66,6 +77,8 @@ fn main() -> ExitCode {
     let outcome = match request {
         Request::ComparisonReport {
             image,
+            matching,
+            heuristic_precedence,
             largest_object_for_regular_expressions,
             unwanted,
             input,
@@ -74,7 +87,11 @@ fn main() -> ExitCode {
             &image,
             &input,
             &report,
-            unwanted.settings(largest_object_for_regular_expressions),
+            &unwanted.settings(
+                matching,
+                heuristic_precedence,
+                largest_object_for_regular_expressions,
+            ),
         )
         .map_err(|error| error.to_string()),
         Request::MeasureScan { image, inputs } => measure_scan(&image, &inputs)
@@ -95,9 +112,13 @@ fn request_from(arguments: &[OsString]) -> Option<Request> {
         [command, flag, image, rest @ .., input, report]
             if command == "comparison-report" && flag == "--image" =>
         {
+            let (matching, rest) = matching_from(rest);
+            let (heuristic_precedence, rest) = heuristic_precedence_from(rest);
             let (largest_object_for_regular_expressions, rest) = regular_expression_limit(rest)?;
             Some(Request::ComparisonReport {
                 image: PathBuf::from(image),
+                matching,
+                heuristic_precedence,
                 largest_object_for_regular_expressions,
                 unwanted: unwanted_from(rest)?,
                 input: PathBuf::from(input),
@@ -113,6 +134,20 @@ fn request_from(arguments: &[OsString]) -> Option<Request> {
             })
         }
         _ => None,
+    }
+}
+
+fn matching_from(options: &[OsString]) -> (Matching, &[OsString]) {
+    match options {
+        [flag, rest @ ..] if flag == "--every-match" => (Matching::EveryMatch, rest),
+        _ => (Matching::FirstMatch, options),
+    }
+}
+
+fn heuristic_precedence_from(options: &[OsString]) -> (bool, &[OsString]) {
+    match options {
+        [flag, rest @ ..] if flag == "--heuristic-precedence" => (true, rest),
+        _ => (false, options),
     }
 }
 

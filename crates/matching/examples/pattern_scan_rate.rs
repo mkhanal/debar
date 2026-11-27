@@ -7,7 +7,7 @@ use debar_matching::{
     GroupSelection, ObjectContext, PatternRequest, PatternSettings, UnwantedCategories, scan_object,
 };
 use debar_platform::command_line::arguments;
-use debar_platform::input::read_scanned_file;
+use debar_platform::input::ScannedFile;
 use debar_platform::mapped_file::MappedFile;
 use debar_platform::stopwatch::Stopwatch;
 
@@ -45,8 +45,10 @@ fn measure(image_path: &Path, files: &[PathBuf]) -> Result<String, Box<dyn std::
     let mut detections = 0usize;
     let mut scanning = Duration::ZERO;
     for path in files {
-        let object = read_scanned_file(path)?;
-        let length = u64::try_from(object.len())?;
+        let file = ScannedFile::open(path, u64::MAX)?;
+        let length = file.length();
+        let mut object = vec![0; usize::try_from(length)?];
+        file.read_at(0, &mut object)?;
         let stopwatch = Stopwatch::start();
         let request = PatternRequest {
             selection: GroupSelection::ForKind(ObjectKind::BinaryData),

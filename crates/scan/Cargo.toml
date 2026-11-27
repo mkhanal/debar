@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 debar-image.workspace = true
 debar-matching.workspace = true
+debar-platform.workspace = true
 
 [lints]
 workspace = true

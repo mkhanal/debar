@@ -834,7 +834,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         Ok(self.progress())
     }
 
-    fn skip(&mut self, length: usize) -> Result<(), PatternScanError> {
+    pub fn skip(&mut self, length: usize) -> Result<(), PatternScanError> {
         if !self.is_done() && !self.groups.is_empty() {
             return Err(PatternScanError::FewerBytesThanDeclared {
                 declared: self.object_length,
@@ -1462,7 +1462,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             window: report_window(self.report_windows, earliest_end),
             group: candidate.group,
             rank: record.report_rank,
-            position: candidate.anchor,
+            position: first_start,
         };
         self.matched(candidate, signature, &record, order)
     }

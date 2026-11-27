@@ -418,3 +418,20 @@ Each becomes a requirement in `specs/` with its married test in the piece that f
 On x86_64 (emulated) the same slices run 1.33 times the aarch64 instructions on text and binary and 1.27 to 1.35 on PDF, OLE2 and tar; system files differ by architecture. The real PDF corpus did not speed up: its time goes to stages the slices barely exercise, which the profile should be pointed at next.
 
 **Next levers, by the profile:** the digests (40 per byte on every kind: SHA-256 in hardware behind a safe primitive, A13), the second pass search (about 40 per byte where it runs: the armed anchors through the same call-free filter instead of an automaton built per scan), verification (23 to 39), and the copy of every chunk into the retained buffer.
+
+### 2026-11-27 — The scan core's first slice: the top-level object
+
+**Decision.** Build steps 0 and 1 of the scan core are built to the agreed design, with these choices at this scale:
+
+- **The input gate** is `debar_platform::input::ScannedFile`: the length is fixed when the file is opened, every read is positional, bounded by that length and counted against an allowance, and a read that ends early is `ChangedWhileScanned`. The allowance is eight times the scan-size limit, so a scan may read each byte it counts a fixed number of times; with the limit off there is none. A file that is not a regular file (a pipe) is read once and held in memory up to 16 MiB, until streamed input is designed with piece 9. No page pool yet: the top-level object is read sequentially, pass by pass, in 128 KiB chunks, and the whole-object digests are taken on the first pass when it reads to the end.
+- **An object that needs its regular expressions, byte comparisons or image fuzzy hash matched** is held whole only up to 16 MiB; above it the scan ends `Incomplete`, with what was found standing. With the pinned databases every object needs it, so for now a file over 16 MiB is not scanned to the end. The cap goes when the matcher reads through a random-access reader.
+- **The layer stack** always holds the top level, so there is always a current layer; nested layers are pushed by the next slice. Weak indicators are dropped until the clean cache needs them.
+- **False-positive trust** needs its own digest need (`whole_object_trust_digest_need` in matching), since a database may list false positives without any hash signature.
+- **A first-match scan stops at the first strong alert that survives trust**; matching stops the pass at the same window boundary, and the scan core skips the hashes, the logical outcomes and the re-typing after it, as the reference does.
+- **Reports within one window are ordered by where the match starts**, not by Debar's anchor, which can lie anywhere in the body. This is what first-match makes observable: a body that is a later part of a longer one is reported after it.
+- **The top-level `MaxFileSize` case** reports nothing found and records the limit; the alert for an exceeded limit arrives with the limit alerts in the next slice.
+- **`comparison-report` stops at the first strong detection by default**, as the reference does; `--every-match` and `--heuristic-precedence` select the other settings. An incomplete scan fails the command, since the harness's report cannot say so. `measure-scan` scans with the default settings.
+
+**Why.** Each is the smallest form of the agreed design that the top-level object needs, and leaves the stack, the ledger and the report shaped for children, modules, the work budget and the cache.
+
+**Consequence.** The comparison runs without every match as well as with it. Without it the reference and Debar disagree on which name to report on 74 of the 40,001 target-0 built inputs, where two plain bodies start at the same byte, recorded in the harness's first-match ratchet until the reference's order for them is known.

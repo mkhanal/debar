@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use acceptance::{
-    CompiledImage, comparison_report, compile, detections, scratch_directory, write_file,
+    CompiledImage, comparison_report_with, compile, detections, scratch_directory, write_file,
 };
 
 fn loose_databases(test: &str, ndb: &str) -> (PathBuf, CompiledImage) {
@@ -22,7 +22,7 @@ fn loose_databases(test: &str, ndb: &str) -> (PathBuf, CompiledImage) {
 fn detected(directory: &Path, image: &Path, contents: &[u8]) -> Vec<String> {
     let input = directory.join("input");
     write_file(&input, contents).unwrap();
-    detections(&comparison_report(image, &input, directory).unwrap())
+    detections(&comparison_report_with(image, &["--every-match"], &input, directory).unwrap())
 }
 
 fn file_with(length: usize, at: usize, body: &[u8]) -> Vec<u8> {
@@ -99,7 +99,7 @@ fn a_file_holding_an_extended_signatures_body_where_its_offset_allows_is_detecte
     let input = directory.join("input");
     write_file(&input, &file_with(100, 57, b"ABCDEF")).unwrap();
     assert_eq!(
-        comparison_report(image, &input, &directory).unwrap()["verdict"],
+        comparison_report_with(image, &[], &input, &directory).unwrap()["verdict"],
         "strong_indicator",
         "{REQUIREMENT}"
     );

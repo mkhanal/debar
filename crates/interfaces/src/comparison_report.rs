@@ -3,24 +3,26 @@ use std::path::Path;
 
 use debar_image::{Image, ImageError, ObjectKind};
 use debar_platform::filesystem::{FilesystemError, write_file_atomically};
-use debar_platform::input::{UnreadableObject, read_scanned_file};
+use debar_platform::input::{InputError, ScannedFile};
 use debar_platform::mapped_file::{ExpectedAccess, MappedFile, MappingError};
+use debar_scan::{
+    Completion, FinishedObject, LayerId, ObjectBytes, ObjectObserver, ScanFailure, ScanReport,
+    ScanSettings, Verdict, scan,
+};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
-use crate::object_scan::{ObjectScanError, ScanSettings, Verdict, scan_top_level_object};
-
 const REPORT_SCHEMA_VERSION: u32 = 1;
 const SCANNER_NAME: &str = "Debar";
+const HASHED_CHUNK_LENGTH: usize = 128 * 1024;
 
 #[derive(Debug)]
 pub enum ComparisonReportError {
     Mapping(MappingError),
     Image(ImageError),
-    Scan(ObjectScanError),
+    Scan(ScanFailure),
     KindNotDescribed(ObjectKind),
-    Input(UnreadableObject),
-    InputTooLarge,
+    Input(InputError),
     Report(FilesystemError),
 }
 
@@ -29,12 +31,11 @@ impl fmt::Display for ComparisonReportError {
         match self {
             Self::Mapping(error) => write!(formatter, "cannot map the image: {error}"),
             Self::Image(error) => write!(formatter, "cannot use the image: {error}"),
-            Self::Scan(error) => write!(formatter, "{error}"),
+            Self::Scan(error) => write!(formatter, "the scan could not finish: {error}"),
             Self::KindNotDescribed(kind) => {
                 write!(formatter, "the image does not describe the kind {kind:?}")
             }
             Self::Input(error) => write!(formatter, "{error}"),
-            Self::InputTooLarge => write!(formatter, "the input is larger than 2^64 bytes"),
             Self::Report(error) => write!(formatter, "cannot write the report: {error}"),
         }
     }
@@ -46,17 +47,22 @@ pub fn write_comparison_report(
     image_path: &Path,
     input: &Path,
     report: &Path,
-    settings: ScanSettings<'_>,
+    settings: &ScanSettings<'_>,
 ) -> Result<(), ComparisonReportError> {
     let mapped = MappedFile::open(image_path).map_err(ComparisonReportError::Mapping)?;
     let image = ready_image(&mapped).map_err(|error| match error {
         ReadyImageError::Mapping(error) => ComparisonReportError::Mapping(error),
         ReadyImageError::Image(error) => ComparisonReportError::Image(error),
     })?;
-    let object = read_scanned_file(input).map_err(ComparisonReportError::Input)?;
-    let record = top_level_record(&image, &object, settings)?;
-    write_file_atomically(report, format!("{record}\n").as_bytes())
-        .map_err(ComparisonReportError::Report)
+    let file = ScannedFile::open(input, settings.read_allowance())
+        .map_err(ComparisonReportError::Input)?;
+    let mut records = ObjectRecords::default();
+    let scanned = scan(&image, &file, settings, &mut records);
+    if let Completion::Incomplete(failure) = scanned.completion {
+        return Err(ComparisonReportError::Scan(failure));
+    }
+    let lines = report_lines(&image, records, &scanned)?;
+    write_file_atomically(report, lines.as_bytes()).map_err(ComparisonReportError::Report)
 }
 
 #[derive(Debug)]
@@ -72,35 +78,100 @@ pub fn ready_image(mapped: &MappedFile) -> Result<Image<'_>, ReadyImageError> {
     Image::open(mapped.bytes()).map_err(ReadyImageError::Image)
 }
 
-fn top_level_record(
+struct ObjectRecord {
+    layer: LayerId,
+    parent: Option<LayerId>,
+    depth: u32,
+    kind: Option<ObjectKind>,
+    size: u64,
+    sha256: Result<String, InputError>,
+}
+
+#[derive(Default)]
+struct ObjectRecords(Vec<ObjectRecord>);
+
+impl ObjectObserver for ObjectRecords {
+    fn object_finished(&mut self, object: &FinishedObject<'_>) {
+        self.0.push(ObjectRecord {
+            layer: object.layer,
+            parent: object.parent,
+            depth: object.depth,
+            kind: object.kind,
+            size: object.bytes.length(),
+            sha256: sha256_of(object.bytes),
+        });
+    }
+}
+
+fn sha256_of(bytes: &dyn ObjectBytes) -> Result<String, InputError> {
+    let mut digest = Sha256::new();
+    let mut chunk = vec![0u8; HASHED_CHUNK_LENGTH];
+    let mut offset = 0u64;
+    while offset < bytes.length() {
+        let wanted = bytes
+            .length()
+            .saturating_sub(offset)
+            .min(u64::try_from(HASHED_CHUNK_LENGTH).unwrap_or(u64::MAX));
+        let filled = chunk
+            .get_mut(..usize::try_from(wanted).unwrap_or(HASHED_CHUNK_LENGTH))
+            .unwrap_or_default();
+        bytes.read_at(offset, filled)?;
+        digest.update(&*filled);
+        offset = offset.saturating_add(wanted);
+    }
+    Ok(lowercase_hex(&digest.finalize()))
+}
+
+fn report_lines(
     image: &Image<'_>,
-    object: &[u8],
-    settings: ScanSettings<'_>,
-) -> Result<Value, ComparisonReportError> {
-    let size = u64::try_from(object.len()).map_err(|_| ComparisonReportError::InputTooLarge)?;
-    let scanned =
-        scan_top_level_object(image, object, settings).map_err(ComparisonReportError::Scan)?;
-    let type_name = scanned
-        .kind
-        .map(|kind| format_name(image, kind))
-        .transpose()?;
-    Ok(json!({
-        "schema": REPORT_SCHEMA_VERSION,
-        "id": 0,
-        "parent": null,
-        "depth": 0,
-        "type": type_name,
-        "size": size,
-        "sha256": lowercase_hex(&Sha256::digest(object)),
-        "detections": scanned.detections,
-        "verdict": match scanned.verdict {
-            Verdict::NothingFound => "nothing_found",
-            Verdict::Trusted => "trusted",
-            Verdict::StrongIndicator => "strong_indicator",
-            Verdict::PotentiallyUnwanted => "potentially_unwanted",
-        },
-        "scanner": scanner(image).map_err(ComparisonReportError::Image)?,
-    }))
+    mut records: ObjectRecords,
+    scanned: &ScanReport,
+) -> Result<String, ComparisonReportError> {
+    records.0.sort_by_key(|record| record.layer);
+    let mut lines = String::new();
+    for record in records.0 {
+        let detections: Vec<&str> = scanned
+            .reported
+            .iter()
+            .filter(|reported| reported.layer == record.layer)
+            .map(|reported| reported.name.as_str())
+            .collect();
+        let type_name = record
+            .kind
+            .map(|kind| format_name(image, kind))
+            .transpose()?;
+        let mut line = json!({
+            "schema": REPORT_SCHEMA_VERSION,
+            "id": record.layer.0,
+            "parent": record.parent.map(|parent| parent.0),
+            "depth": record.depth,
+            "type": type_name,
+            "size": record.size,
+            "sha256": record.sha256.map_err(ComparisonReportError::Input)?,
+            "detections": detections,
+        });
+        if record.parent.is_none()
+            && let Some(fields) = line.as_object_mut()
+        {
+            fields.insert("verdict".to_owned(), verdict_name(scanned.verdict).into());
+            fields.insert(
+                "scanner".to_owned(),
+                scanner(image).map_err(ComparisonReportError::Image)?,
+            );
+        }
+        lines.push_str(&line.to_string());
+        lines.push('\n');
+    }
+    Ok(lines)
+}
+
+fn verdict_name(verdict: Verdict) -> &'static str {
+    match verdict {
+        Verdict::NothingFound => "nothing_found",
+        Verdict::Trusted => "trusted",
+        Verdict::StrongIndicator => "strong_indicator",
+        Verdict::PotentiallyUnwanted => "potentially_unwanted",
+    }
 }
 
 fn format_name(image: &Image<'_>, kind: ObjectKind) -> Result<String, ComparisonReportError> {

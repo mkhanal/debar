@@ -15,12 +15,12 @@ mod verification;
 
 pub use backtracking_search::{BacktrackingBounds, BacktrackingSearch, backtracking_search};
 pub use container_entries::{ContainerEntry, ContainerEntryError, container_entry_detections};
-pub use digests::{DigestNeed, ObjectDigests};
+pub use digests::{DigestNeed, DigestsInProgress, ObjectDigests};
 pub use executable_layout::{ExecutableLayout, ExecutableSection};
 pub use hash_lookup::{
     HashDetection, HashSettings, Trust, executable_section_detections,
     executable_section_digest_need, whole_object_detections, whole_object_digest_need,
-    whole_object_trust,
+    whole_object_trust, whole_object_trust_digest_need,
 };
 pub use logical_state::{LogicalFindings, ObjectContext, UnwantedCategories};
 pub use pattern_scan::{

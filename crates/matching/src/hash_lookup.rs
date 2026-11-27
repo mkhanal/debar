@@ -38,6 +38,18 @@ pub fn whole_object_digest_need(
     Ok(need_at(size, detection.iter().chain(&trust)))
 }
 
+pub fn whole_object_trust_digest_need(
+    image: &Image<'_>,
+    size: u64,
+) -> Result<DigestNeed, ImageError> {
+    let trust = partitions(
+        image,
+        HashPurpose::WholeObjectTrust,
+        HashSettings::default(),
+    )?;
+    Ok(need_at(size, trust.iter()))
+}
+
 pub fn executable_section_digest_need(
     image: &Image<'_>,
     size: u64,

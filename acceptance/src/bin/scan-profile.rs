@@ -20,7 +20,7 @@ const STAGES: [Stage; 12] = [
     Stage {
         name: "reading",
         functions_naming: &[
-            "read_scanned_file",
+            "ScannedFile>::read_at",
             "std::fs::",
             "std::sys::fs::",
             "filesystem::",

@@ -231,7 +231,10 @@ fn a_potentially_unwanted_signature_is_reported_only_when_potentially_unwanted_d
 fn scanned(directory: &Path, image: &Path, options: &[&str], contents: &[u8]) -> Vec<String> {
     let input = directory.join("input");
     write_file(&input, contents).unwrap();
-    detections(&comparison_report_with(image, options, &input, directory).unwrap())
+    let every_match: Vec<&str> = std::iter::once("--every-match")
+        .chain(options.iter().copied())
+        .collect();
+    detections(&comparison_report_with(image, &every_match, &input, directory).unwrap())
 }
 
 const REGULAR_EXPRESSIONS: &str = "\
