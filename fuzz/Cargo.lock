@@ -152,7 +152,6 @@ dependencies = [
 name = "debar-matching"
 version = "0.0.0"
 dependencies = [
- "aho-corasick",
  "debar-image",
  "md-5",
  "regex-automata",
