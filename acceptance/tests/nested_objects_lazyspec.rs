@@ -69,9 +69,13 @@ fn holding(start: &[u8], parts: &[&[u8]]) -> Vec<u8> {
 }
 
 fn objects(directory: &Path, image: &Path, contents: &[u8]) -> Vec<Value> {
+    objects_with(directory, image, &["--every-match"], contents)
+}
+
+fn objects_with(directory: &Path, image: &Path, options: &[&str], contents: &[u8]) -> Vec<Value> {
     let input = directory.join("input");
     write_file(&input, contents).unwrap();
-    comparison_report_objects(image, &["--every-match"], &input, directory).unwrap()
+    comparison_report_objects(image, options, &input, directory).unwrap()
 }
 
 fn offset_of(contents: &[u8], mark: &[u8], from: usize) -> usize {
@@ -186,6 +190,39 @@ fn a_handler_type_scans_the_file_again_as_that_kind() {
         detections(again),
         ["Test.Rescanned.UNOFFICIAL"],
         "{REQUIREMENT}"
+    );
+}
+
+#[test]
+fn a_raw_only_scan_finds_no_object_inside_another_yet_a_handler_type_still_scans_the_file_again() {
+    const REQUIREMENT: &str = "A Raw-Only Scan Finds No Object Inside Another, Yet A Handler Type Still Scans The File Again";
+    let pdf_only = format!("Test.PdfOnly:10:*:{}\n", lowercase_hex(RESCAN_BODY));
+    let (directory, compiled) = databases("raw-only-objects", &[("pdf.ndb", pdf_only)]);
+    let raw_only = ["--every-match", "--raw-only"];
+    let embedded = binary_with(&[ARCHIVE_MARK, EMBEDDED_BODY]);
+    let rescanned = text_with(&[RESCAN_BODY]);
+
+    let found = objects_with(&directory, &compiled.image, &raw_only, &embedded);
+    let again = objects_with(&directory, &compiled.image, &raw_only, &rescanned);
+    let again_in_full = objects(&directory, &compiled.image, &rescanned);
+
+    assert_eq!(found.len(), 1, "{REQUIREMENT}");
+    assert_eq!(
+        detections(&found[0]),
+        ["Test.Embedded.UNOFFICIAL"],
+        "{REQUIREMENT}"
+    );
+    assert_eq!(again.len(), 2, "{REQUIREMENT}: handler type");
+    assert_eq!(again[1]["type"], "CL_TYPE_PDF", "{REQUIREMENT}");
+    assert_eq!(
+        detections(&again[1]),
+        ["Test.Rescanned.UNOFFICIAL"],
+        "{REQUIREMENT}: raw-only again"
+    );
+    assert_eq!(
+        detections(&again_in_full[1]),
+        ["Test.PdfOnly.UNOFFICIAL", "Test.Rescanned.UNOFFICIAL"],
+        "{REQUIREMENT}: in a full scan"
     );
 }
 

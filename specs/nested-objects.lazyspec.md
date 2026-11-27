@@ -24,6 +24,11 @@ Which objects a scan finds inside a file, or makes of it again as another kind, 
 - A logical signature with a handler type that holds makes the file an object again, one level deeper, of that kind, with the same bytes.
 - The signature is reported on that object, not on the file.
 
+## A Raw-Only Scan Finds No Object Inside Another, Yet A Handler Type Still Scans The File Again
+
+- Asked for a raw-only scan, an archive found after the start of a file is not an object.
+- A logical signature with a handler type that holds still makes the file an object again, of that kind, and that object is scanned raw-only too.
+
 ## A Container Condition Is Tested Against The Object Holding It
 
 - A logical signature whose container is a kind is reported on an object held by an object of that kind, and not on the top-level file.

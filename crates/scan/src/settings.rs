@@ -24,6 +24,13 @@ pub enum Facts {
     Gathered,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ObjectSteps {
+    #[default]
+    Every,
+    RawOnly,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     pub longest_scan: Option<ScanTime>,
@@ -55,6 +62,7 @@ pub struct ScanSettings<'s> {
     pub limits: Limits,
     pub alert_on_limits: bool,
     pub facts: Facts,
+    pub object_steps: ObjectSteps,
 }
 
 impl<'s> ScanSettings<'s> {

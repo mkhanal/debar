@@ -15,24 +15,25 @@ jobs:
     name: the harness's fixtures
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0269aa5ee4e574a196586b2f0b788d3e22b7b863
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
     with:
-      harness-ref: 0269aa5ee4e574a196586b2f0b788d3e22b7b863
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
       known-differences: debar-known-differences.jsonl
       build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
       debar-command: >-
         { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
         --image debar.image --account debar-account.json; }
         && debar/target/release/debar comparison-report --image debar.image
-        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) "$HARNESS_INPUT" "$HARNESS_REPORT"
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
 
   built-inputs:
     name: inputs built from every generic extended signature, and across window boundaries
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0269aa5ee4e574a196586b2f0b788d3e22b7b863
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
     with:
-      harness-ref: 0269aa5ee4e574a196586b2f0b788d3e22b7b863
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
       known-differences: debar-known-differences.jsonl
       built-target: "0"
       boundary-sample: "2000"
@@ -41,15 +42,16 @@ jobs:
         { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
         --image debar.image --account debar-account.json; }
         && debar/target/release/debar comparison-report --image debar.image
-        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) "$HARNESS_INPUT" "$HARNESS_REPORT"
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
 
   built-inputs-3:
     name: inputs built from every extended signature for web pages
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0269aa5ee4e574a196586b2f0b788d3e22b7b863
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
     with:
-      harness-ref: 0269aa5ee4e574a196586b2f0b788d3e22b7b863
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
       known-differences: debar-known-differences-web-pages.jsonl
       built-target: "3"
       boundary-sample: "0"
@@ -58,15 +60,16 @@ jobs:
         { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
         --image debar.image --account debar-account.json; }
         && debar/target/release/debar comparison-report --image debar.image
-        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) "$HARNESS_INPUT" "$HARNESS_REPORT"
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
 
   built-inputs-4:
     name: inputs built from every extended signature for mail
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0269aa5ee4e574a196586b2f0b788d3e22b7b863
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
     with:
-      harness-ref: 0269aa5ee4e574a196586b2f0b788d3e22b7b863
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
       known-differences: debar-known-differences.jsonl
       built-target: "4"
       boundary-sample: "0"
@@ -75,15 +78,16 @@ jobs:
         { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
         --image debar.image --account debar-account.json; }
         && debar/target/release/debar comparison-report --image debar.image
-        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) "$HARNESS_INPUT" "$HARNESS_REPORT"
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
 
   built-inputs-7:
     name: inputs built from every extended signature for text
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0269aa5ee4e574a196586b2f0b788d3e22b7b863
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
     with:
-      harness-ref: 0269aa5ee4e574a196586b2f0b788d3e22b7b863
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
       known-differences: debar-known-differences-text.jsonl
       built-target: "7"
       boundary-sample: "0"
@@ -92,15 +96,16 @@ jobs:
         { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
         --image debar.image --account debar-account.json; }
         && debar/target/release/debar comparison-report --image debar.image
-        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) "$HARNESS_INPUT" "$HARNESS_REPORT"
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
 
   built-logical-0:
     name: inputs built from every generic logical signature
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0269aa5ee4e574a196586b2f0b788d3e22b7b863
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
     with:
-      harness-ref: 0269aa5ee4e574a196586b2f0b788d3e22b7b863
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
       known-differences: debar-known-differences.jsonl
       built-target: "0"
       boundary-sample: "0"
@@ -111,15 +116,16 @@ jobs:
         { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
         --image debar.image --account debar-account.json; }
         && debar/target/release/debar comparison-report --image debar.image
-        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) "$HARNESS_INPUT" "$HARNESS_REPORT"
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
 
   built-logical-3:
     name: inputs built from every logical signature for web pages
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0269aa5ee4e574a196586b2f0b788d3e22b7b863
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
     with:
-      harness-ref: 0269aa5ee4e574a196586b2f0b788d3e22b7b863
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
       known-differences: debar-known-differences-web-pages.jsonl
       built-target: "3"
       boundary-sample: "0"
@@ -130,15 +136,16 @@ jobs:
         { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
         --image debar.image --account debar-account.json; }
         && debar/target/release/debar comparison-report --image debar.image
-        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) "$HARNESS_INPUT" "$HARNESS_REPORT"
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
 
   built-logical-4:
     name: inputs built from every logical signature for mail
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0269aa5ee4e574a196586b2f0b788d3e22b7b863
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
     with:
-      harness-ref: 0269aa5ee4e574a196586b2f0b788d3e22b7b863
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
       known-differences: debar-known-differences.jsonl
       built-target: "4"
       boundary-sample: "0"
@@ -149,15 +156,16 @@ jobs:
         { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
         --image debar.image --account debar-account.json; }
         && debar/target/release/debar comparison-report --image debar.image
-        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) "$HARNESS_INPUT" "$HARNESS_REPORT"
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
 
   built-logical-7:
     name: inputs built from every logical signature for text
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0269aa5ee4e574a196586b2f0b788d3e22b7b863
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
     with:
-      harness-ref: 0269aa5ee4e574a196586b2f0b788d3e22b7b863
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
       known-differences: debar-known-differences-text.jsonl
       built-target: "7"
       boundary-sample: "0"
@@ -168,15 +176,16 @@ jobs:
         { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
         --image debar.image --account debar-account.json; }
         && debar/target/release/debar comparison-report --image debar.image
-        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) "$HARNESS_INPUT" "$HARNESS_REPORT"
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
 
   fixtures-first-match:
     name: the harness's fixtures, without every match
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0269aa5ee4e574a196586b2f0b788d3e22b7b863
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
     with:
-      harness-ref: 0269aa5ee4e574a196586b2f0b788d3e22b7b863
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
       known-differences: debar-known-differences-first-match.jsonl
       matching: first
       build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
@@ -184,15 +193,16 @@ jobs:
         { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
         --image debar.image --account debar-account.json; }
         && debar/target/release/debar comparison-report --image debar.image
-        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) "$HARNESS_INPUT" "$HARNESS_REPORT"
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
 
   built-inputs-first-match:
     name: inputs built from every generic extended signature, and across window boundaries, without every match
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0269aa5ee4e574a196586b2f0b788d3e22b7b863
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
     with:
-      harness-ref: 0269aa5ee4e574a196586b2f0b788d3e22b7b863
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
       known-differences: debar-known-differences-first-match.jsonl
       matching: first
       built-target: "0"
@@ -202,15 +212,16 @@ jobs:
         { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
         --image debar.image --account debar-account.json; }
         && debar/target/release/debar comparison-report --image debar.image
-        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) "$HARNESS_INPUT" "$HARNESS_REPORT"
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
 
   built-logical-0-first-match:
     name: inputs built from every generic logical signature, without every match
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0269aa5ee4e574a196586b2f0b788d3e22b7b863
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
     with:
-      harness-ref: 0269aa5ee4e574a196586b2f0b788d3e22b7b863
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
       known-differences: debar-known-differences-first-match.jsonl
       matching: first
       built-target: "0"
@@ -222,4 +233,213 @@ jobs:
         { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
         --image debar.image --account debar-account.json; }
         && debar/target/release/debar comparison-report --image debar.image
-        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) "$HARNESS_INPUT" "$HARNESS_REPORT"
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  scan-core:
+    name: the scan-core fixtures
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
+    with:
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
+      known-differences: debar-known-differences-scan-core.jsonl
+      fixture-sets: scan-core
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  scan-core-first-match:
+    name: the scan-core fixtures, without every match
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
+    with:
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
+      known-differences: debar-known-differences-scan-core.jsonl
+      fixture-sets: scan-core
+      matching: first
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  scan-core-lowered-limits:
+    name: the scan-core fixtures, under lowered limits
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
+    with:
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
+      known-differences: debar-known-differences-scan-core.jsonl
+      fixture-sets: scan-core
+      scan-options: "--max-files 3 --max-scan-size 1500000 --max-file-size 2000000 --max-recursion 2 --alert-exceeds-max"
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  scan-core-lowered-limits-first-match:
+    name: the scan-core fixtures, under lowered limits, without every match
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
+    with:
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
+      known-differences: debar-known-differences-scan-core.jsonl
+      fixture-sets: scan-core
+      scan-options: "--max-files 3 --max-scan-size 1500000 --max-file-size 2000000 --max-recursion 2 --alert-exceeds-max"
+      matching: first
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  raw-only:
+    name: every fixture, raw-only
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
+    with:
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
+      known-differences: debar-known-differences-scan-core.jsonl
+      fixture-sets: basic scan-core containers
+      scan-options: "--raw-only"
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  raw-only-first-match:
+    name: every fixture, raw-only, without every match
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
+    with:
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
+      known-differences: debar-known-differences-scan-core.jsonl
+      fixture-sets: basic scan-core containers
+      scan-options: "--raw-only"
+      matching: first
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  raw-only-lowered-limits:
+    name: every fixture, raw-only, under lowered limits
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
+    with:
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
+      known-differences: debar-known-differences-scan-core.jsonl
+      fixture-sets: basic scan-core containers
+      scan-options: "--raw-only --max-files 2 --max-scan-size 400000 --max-file-size 2000000"
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  raw-only-lowered-limits-first-match:
+    name: every fixture, raw-only, under lowered limits, without every match
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
+    with:
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
+      known-differences: debar-known-differences-scan-core.jsonl
+      fixture-sets: basic scan-core containers
+      scan-options: "--raw-only --max-files 2 --max-scan-size 400000 --max-file-size 2000000"
+      matching: first
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  built-inputs-raw-only:
+    name: inputs built from every generic extended signature, and across window boundaries, raw-only
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
+    with:
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
+      known-differences: debar-known-differences-scan-core.jsonl
+      built-target: "0"
+      boundary-sample: "2000"
+      scan-options: "--raw-only"
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  built-logical-0-raw-only:
+    name: inputs built from every generic logical signature, raw-only
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
+    with:
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
+      known-differences: debar-known-differences-scan-core.jsonl
+      built-target: "0"
+      boundary-sample: "0"
+      extended-sample: "0"
+      logical-sample: "1000000"
+      scan-options: "--raw-only"
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"
+
+  built-logical-0-raw-only-first-match:
+    name: inputs built from every generic logical signature, raw-only, without every match
+    permissions:
+      contents: read
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@0cf7156f40565d6617d4027c299e20c807d1503a
+    with:
+      harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
+      known-differences: debar-known-differences-scan-core.jsonl
+      built-target: "0"
+      boundary-sample: "0"
+      extended-sample: "0"
+      logical-sample: "1000000"
+      scan-options: "--raw-only"
+      matching: first
+      build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
+      debar-command: >-
+        { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
+        --image debar.image --account debar-account.json; }
+        && debar/target/release/debar comparison-report --image debar.image
+        $( [ "$HARNESS_MATCHING" = every ] && echo --every-match ) $HARNESS_SCAN_OPTIONS
+        "$HARNESS_INPUT" "$HARNESS_REPORT"

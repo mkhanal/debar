@@ -20,7 +20,7 @@ use crate::own_bytes::match_own_bytes;
 use crate::report::{
     Completion, LayerId, LimitEvent, ObjectFact, Reported, ScanFailure, ScanReport, Verdict,
 };
-use crate::settings::{Facts, Matching, ScanSettings};
+use crate::settings::{Facts, Matching, ObjectSteps, ScanSettings};
 use crate::typing::{TypingError, kind_after_full_scan, kind_from_first_bytes};
 
 pub const LARGEST_OBJECT_LEFT_UNSCANNED: u64 = 5;
@@ -232,6 +232,9 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
             None => self.kind_from_first_bytes()?,
         };
         self.current_mut().kind = Some(kind);
+        if self.settings.object_steps == ObjectSteps::RawOnly {
+            return self.raw_only_pass();
+        }
         if self.run_modules(kind, Stage::BeforeOwnBytes)? == Flow::Abort {
             return Ok(Flow::Abort);
         }
@@ -242,6 +245,18 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
             return Ok(Flow::Abort);
         }
         self.run_modules(kind, Stage::AfterOwnBytes)
+    }
+
+    fn raw_only_pass(&mut self) -> Result<Flow, ScanFailure> {
+        Ok(
+            match self.pass(
+                GroupSelection::ForKind(ObjectKind::Untyped),
+                &MatchedGroups::default(),
+            )? {
+                PassEnd::Finished { .. } => Flow::Continue,
+                PassEnd::Aborted => Flow::Abort,
+            },
+        )
     }
 
     fn run_modules(&mut self, kind: ObjectKind, stage: Stage) -> Result<Flow, ScanFailure> {

@@ -44,6 +44,12 @@ Which of a file's detections a scan reports, in what order, and the verdict it g
 
 - A file the file-type database types as HTML from its first bytes is reported with no detection when a hash signature lists it.
 
+## A Raw-Only Scan Matches Each Object Once, Against The Signatures For Any Kind
+
+- Asked for a raw-only scan, a file of binary data is reported with a generic signature and a listed hash once each, and a signature for other data is not detected.
+- A file typed as HTML from its first bytes is detected by the hash of its own bytes.
+- The file is still reported with its type.
+
 ## Every File Gets The Same Verdict And Detections However Many Files Are Scanned At Once
 
 - Scanning many files on any number of threads gives each file the verdict and detections, in the same order, that scanning the files one at a time gives it.

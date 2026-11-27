@@ -289,6 +289,43 @@ fn a_page_typed_as_html_from_its_first_bytes_is_never_detected_by_the_hash_of_it
     }
 }
 
+#[test]
+fn a_raw_only_scan_matches_each_object_once_against_the_signatures_for_any_kind() {
+    const REQUIREMENT: &str =
+        "A Raw-Only Scan Matches Each Object Once, Against The Signatures For Any Kind";
+    let binary = binary_holding(b"\x00\x00\x00\x00binary", &[GENERIC_BODY, OTHER_DATA_BODY]);
+    let page = b"<html><body>a page a database lists by its hash</body></html>\n";
+    let hashes = [listing_hash_of(&binary), listing_hash_of(page)].concat();
+    let (directory, compiled) = loose_databases(
+        "raw-only-passes",
+        &[
+            ("local.ndb", PASS_DATABASE),
+            ("local.hdb", hashes.as_str()),
+            ("types.ftm", PASS_FILE_TYPES),
+        ],
+    );
+    let raw_only = ["--every-match", "--raw-only"];
+
+    let binary_report = report(&directory, &compiled.image, &raw_only, &binary);
+    let page_report = report(&directory, &compiled.image, &raw_only, page);
+
+    assert_eq!(
+        detections(&binary_report),
+        ["Test.Generic.UNOFFICIAL", "Test.Hash.UNOFFICIAL"],
+        "{REQUIREMENT}"
+    );
+    assert_eq!(
+        binary_report["type"], "CL_TYPE_BINARY_DATA",
+        "{REQUIREMENT}"
+    );
+    assert_eq!(
+        detections(&page_report),
+        ["Test.Hash.UNOFFICIAL"],
+        "{REQUIREMENT}: a page"
+    );
+    assert_eq!(page_report["type"], "CL_TYPE_HTML", "{REQUIREMENT}");
+}
+
 const FILES_SCANNED_AT_ONCE: usize = 160;
 const THREAD_COUNTS: [usize; 4] = [2, 4, 8, 16];
 

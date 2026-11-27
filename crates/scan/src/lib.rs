@@ -25,6 +25,6 @@ pub use scan::{
 pub use scan_time::{DEFAULT_LONGEST_SCAN, ScanTime};
 pub use settings::{
     DEFAULT_DEEPEST_LEVEL, DEFAULT_LARGEST_FILE, DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS,
-    DEFAULT_LARGEST_SCAN, DEFAULT_MOST_FILES, Facts, Limits, Matching, ScanSettings,
+    DEFAULT_LARGEST_SCAN, DEFAULT_MOST_FILES, Facts, Limits, Matching, ObjectSteps, ScanSettings,
 };
 pub use typing::{TypingError, kind_after_full_scan, kind_from_first_bytes};

@@ -9,13 +9,14 @@ use debar_matching::UnwantedCategories;
 use debar_platform::command_line::arguments;
 use debar_platform::threads::ThreadCount;
 use debar_scan::{
-    DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS, Facts, Limits, Matching, ScanSettings, ScanTime,
+    DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS, Facts, Limits, Matching, ObjectSteps,
+    ScanSettings, ScanTime,
 };
 
 const DEFAULT_RECURSION_LEVELS: u32 = 17;
 const MOST_RECURSION_LEVELS: u32 = 100;
 
-const USAGE: &str = "usage: debar comparison-report --image IMAGE [--every-match] [--heuristic-precedence] [LIMIT] [SCAN LIMIT]... [UNWANTED] INPUT REPORT\n\
+const USAGE: &str = "usage: debar comparison-report --image IMAGE [--every-match] [--heuristic-precedence] [LIMIT] [SCAN OPTION]... [UNWANTED] INPUT REPORT\n\
   Scans INPUT as one top-level object with the compiled IMAGE and writes REPORT in the\n\
   comparison harness's report schema, version 1. It is for comparison runs, not for users.\n\
   The scan stops at its first strong detection unless --every-match is given.\n\
@@ -25,7 +26,9 @@ const USAGE: &str = "usage: debar comparison-report --image IMAGE [--every-match
   --unwanted-category-not-containing TEXT to keep only those whose category does or does not\n\
   contain TEXT. LIMIT is --largest-regular-expression-object BYTES: regular expressions are\n\
   not matched in an object larger than BYTES (default 104857600; 0 matches them in any object).\n\
-  SCAN LIMIT is --max-scan-time MILLISECONDS (default 120000, counted as work done, never on a\n\
+  SCAN OPTION is --raw-only, which types each object and matches it once against the\n\
+  signatures for any kind, with no other pass, no object found inside it and no limit alert,\n\
+  or a limit: --max-scan-time MILLISECONDS (default 120000, counted as work done, never on a\n\
   clock), --max-files COUNT, --max-scan-size BYTES, --max-file-size BYTES (0 switches each off),\n\
   --max-recursion LEVELS (0 is the default of 17, at most 100), or --alert-exceeds-max, which\n\
   reports the first limit reached as a potentially unwanted detection.\n\
@@ -65,6 +68,7 @@ impl Unwanted {
             limits: scan_limits.limits,
             alert_on_limits: scan_limits.alert_on_limits,
             facts: Facts::NotGathered,
+            object_steps: scan_limits.object_steps,
         }
     }
 }
@@ -73,6 +77,7 @@ impl Unwanted {
 struct ScanLimits {
     limits: Limits,
     alert_on_limits: bool,
+    object_steps: ObjectSteps,
 }
 
 enum Request {
@@ -212,6 +217,10 @@ fn scan_limits_from(mut options: &[OsString]) -> Option<(ScanLimits, &[OsString]
         match options {
             [flag, rest @ ..] if flag == "--alert-exceeds-max" => {
                 scan_limits.alert_on_limits = true;
+                options = rest;
+            }
+            [flag, rest @ ..] if flag == "--raw-only" => {
+                scan_limits.object_steps = ObjectSteps::RawOnly;
                 options = rest;
             }
             [flag, value, rest @ ..] if flag.to_str()?.starts_with("--max-") => {
