@@ -10,7 +10,7 @@ use regex_automata::util::primitives::StateID;
 use regex_automata::util::start;
 
 use crate::backtracking_search::SubjectBytes as _;
-use crate::whole_object::PagedSubject;
+use crate::whole_object::{ObjectPages, PagedSubject};
 
 #[derive(Debug)]
 pub(crate) enum PagedSearchFailure {
@@ -196,7 +196,36 @@ fn search<F: Stepping, R: Stepping>(
     from: usize,
     anchored: Anchored,
 ) -> Result<Option<(usize, usize)>, PagedSearchFailure> {
-    let Some(end) = match_end(forward, subject, from, anchored)? else {
+    let end = match_end(forward, subject, from, anchored)?;
+    match_from_its_end(reverse, anchored_at_from, subject, from, end)
+}
+
+pub(crate) fn search_in_place_from_its_end(
+    forward: &InPlaceAutomaton<'_>,
+    reverse: &InPlaceAutomaton<'_>,
+    subject: &mut PagedSubject<'_, '_>,
+    from: usize,
+    anchored: Anchored,
+    end: Option<usize>,
+) -> Result<Option<(usize, usize)>, PagedSearchFailure> {
+    let anchored_at_from = anchored == Anchored::Yes || forward.is_always_start_anchored();
+    match_from_its_end(
+        &mut InPlaceStepping(reverse),
+        anchored_at_from,
+        subject,
+        from,
+        end,
+    )
+}
+
+fn match_from_its_end<R: Stepping>(
+    reverse: &mut R,
+    anchored_at_from: bool,
+    subject: &mut PagedSubject<'_, '_>,
+    from: usize,
+    end: Option<usize>,
+) -> Result<Option<(usize, usize)>, PagedSearchFailure> {
+    let Some(end) = end else {
         return Ok(None);
     };
     if end == from || anchored_at_from {
@@ -217,56 +246,174 @@ fn match_end<F: Stepping>(
         Some(before) => Some(byte_at(subject, before)?),
         None => None,
     };
-    let mut state = forward
-        .start(look_behind, anchored)
-        .ok_or(PagedSearchFailure::Unsearchable)?;
-    let mut found = None;
-    let mut at = from;
-    let mut stopped = Reached::Searching;
-    subject.visit_forward(from, |bytes| {
+    let mut scan = ForwardScan::starting(forward, look_behind, from, anchored)?;
+    subject.visit_forward(from, |bytes| scan.feed(forward, bytes))?;
+    scan.finish(forward, subject.length())
+}
+
+struct ForwardScan<State> {
+    state: State,
+    found: Option<usize>,
+    at: usize,
+    stopped: Reached,
+}
+
+impl<State: Copy> ForwardScan<State> {
+    fn starting<F: Stepping<State = State>>(
+        forward: &mut F,
+        look_behind: Option<u8>,
+        from: usize,
+        anchored: Anchored,
+    ) -> Result<Self, PagedSearchFailure> {
+        Ok(Self {
+            state: forward
+                .start(look_behind, anchored)
+                .ok_or(PagedSearchFailure::Unsearchable)?,
+            found: None,
+            at: from,
+            stopped: Reached::Searching,
+        })
+    }
+
+    fn is_stopped(&self) -> bool {
+        matches!(self.stopped, Reached::Dead | Reached::Quit)
+    }
+
+    fn feed<F: Stepping<State = State>>(
+        &mut self,
+        forward: &mut F,
+        bytes: &[u8],
+    ) -> ControlFlow<()> {
         let mut index = 0usize;
         while let Some(byte) = bytes.get(index) {
-            let Some(next) = forward.next(state, *byte) else {
-                stopped = Reached::Quit;
+            let Some(next) = forward.next(self.state, *byte) else {
+                self.stopped = Reached::Quit;
                 return ControlFlow::Break(());
             };
-            state = next;
-            if forward.is_special(state) {
-                match forward.reached(state) {
-                    Reached::Match => found = Some(at.saturating_add(index)),
+            self.state = next;
+            if forward.is_special(self.state) {
+                match forward.reached(self.state) {
+                    Reached::Match => self.found = Some(self.at.saturating_add(index)),
                     Reached::Searching => {
                         index = index.saturating_add(skipped(
                             bytes,
                             index,
-                            forward.leaving_bytes(state),
+                            forward.leaving_bytes(self.state),
                         ));
                     }
                     ended @ (Reached::Dead | Reached::Quit) => {
-                        stopped = ended;
+                        self.stopped = ended;
                         return ControlFlow::Break(());
                     }
                 }
             }
             index = index.saturating_add(1);
         }
-        at = at.saturating_add(bytes.len());
+        self.at = self.at.saturating_add(bytes.len());
         ControlFlow::Continue(())
+    }
+
+    fn finish<F: Stepping<State = State>>(
+        mut self,
+        forward: &mut F,
+        subject_length: usize,
+    ) -> Result<Option<usize>, PagedSearchFailure> {
+        match self.stopped {
+            Reached::Dead => return Ok(self.found),
+            Reached::Quit => return Err(PagedSearchFailure::Unsearchable),
+            Reached::Searching | Reached::Match => {}
+        }
+        if self.at < subject_length {
+            return Err(PagedSearchFailure::Unsearchable);
+        }
+        self.state = forward
+            .end_of_input(self.state)
+            .ok_or(PagedSearchFailure::Unsearchable)?;
+        if forward.reached(self.state) == Reached::Match {
+            self.found = Some(self.at);
+        }
+        Ok(self.found)
+    }
+}
+
+pub(crate) struct SharedSearch<'a, 'm> {
+    pub forward: &'a InPlaceAutomaton<'m>,
+    pub subject_start: usize,
+    pub subject_end: usize,
+    pub anchored: Anchored,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FirstMatchEnd {
+    Unknown,
+    Known(Option<usize>),
+}
+
+pub(crate) fn first_match_ends_sharing_one_read(
+    pages: &mut ObjectPages<'_>,
+    searches: &[SharedSearch<'_, '_>],
+) -> Result<Vec<FirstMatchEnd>, InputError> {
+    let mut object = pages.subject(0, u64::MAX);
+    let mut scans: Vec<_> = searches
+        .iter()
+        .map(|search| {
+            ForwardScan::starting(
+                &mut InPlaceStepping(search.forward),
+                None,
+                0,
+                search.anchored,
+            )
+            .ok()
+        })
+        .collect();
+    let from = searches
+        .iter()
+        .map(|search| search.subject_start)
+        .min()
+        .unwrap_or(0);
+    let mut at = from;
+    object.visit_forward(from, |bytes| {
+        let bytes_end = at.saturating_add(bytes.len());
+        let mut searching = false;
+        for (search, scan) in searches.iter().zip(scans.iter_mut()) {
+            let Some(scan) = scan.as_mut().filter(|scan| !scan.is_stopped()) else {
+                continue;
+            };
+            let first = search.subject_start.max(at);
+            let last = search.subject_end.min(bytes_end);
+            let fed = bytes
+                .get(first.saturating_sub(at)..last.saturating_sub(at))
+                .unwrap_or_default();
+            if !fed.is_empty()
+                && scan
+                    .feed(&mut InPlaceStepping(search.forward), fed)
+                    .is_break()
+            {
+                continue;
+            }
+            searching |= search.subject_end > bytes_end;
+        }
+        at = bytes_end;
+        if searching {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        }
     })?;
-    match stopped {
-        Reached::Dead => return Ok(found),
-        Reached::Quit => return Err(PagedSearchFailure::Unsearchable),
-        Reached::Searching | Reached::Match => {}
-    }
-    if at < subject.length() {
-        return Err(PagedSearchFailure::Unsearchable);
-    }
-    state = forward
-        .end_of_input(state)
-        .ok_or(PagedSearchFailure::Unsearchable)?;
-    if forward.reached(state) == Reached::Match {
-        found = Some(at);
-    }
-    Ok(found)
+    Ok(searches
+        .iter()
+        .zip(scans)
+        .map(|(search, scan)| {
+            scan.and_then(|scan| {
+                scan.finish(
+                    &mut InPlaceStepping(search.forward),
+                    search.subject_end.saturating_sub(search.subject_start),
+                )
+                .ok()
+            })
+            .map_or(FirstMatchEnd::Unknown, FirstMatchEnd::Known)
+        })
+        .collect())
 }
 
 fn skipped(bytes: &[u8], index: usize, leaving: &[u8]) -> usize {
@@ -274,9 +421,13 @@ fn skipped(bytes: &[u8], index: usize, leaving: &[u8]) -> usize {
         return 0;
     }
     let rest = bytes.get(index.saturating_add(1)..).unwrap_or_default();
-    rest.iter()
-        .position(|byte| leaving.contains(byte))
-        .unwrap_or(rest.len())
+    let found = match *leaving {
+        [one] => memchr::memchr(one, rest),
+        [one, two] => memchr::memchr2(one, two, rest),
+        [one, two, three] => memchr::memchr3(one, two, three, rest),
+        _ => rest.iter().position(|byte| leaving.contains(byte)),
+    };
+    found.unwrap_or(rest.len())
 }
 
 fn match_start<R: Stepping>(
@@ -364,7 +515,10 @@ mod tests {
     use regex_automata::util::syntax;
     use regex_automata::{Anchored, Input, MatchKind};
 
-    use super::{search_in_place, search_lazily};
+    use super::{
+        FirstMatchEnd, SharedSearch, first_match_ends_sharing_one_read, search_in_place,
+        search_in_place_from_its_end, search_lazily,
+    };
     use crate::backtracking_search::{BacktrackingBounds, backtracking_search, search_subject};
     use crate::whole_object::ObjectPages;
     use crate::work_meter::WorkMeter;
@@ -441,6 +595,69 @@ mod tests {
                         for anchored in [Anchored::No, Anchored::Yes] {
                             check(&object, subject_start, page_length, from, anchored);
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn searches_sharing_one_read_find_what_each_finds_reading_alone() {
+        let built: Vec<_> = PATTERNS.iter().map(|pattern| automata(pattern)).collect();
+        let automata: Vec<_> = built
+            .iter()
+            .map(|(forward, reverse)| (forward.as_ref(), reverse.as_ref()))
+            .collect();
+        let mut haystacks = Haystacks(0x0bad_cafe_f00d);
+        for _ in 0..200 {
+            let object = haystacks.haystack();
+            for page_length in PAGE_LENGTHS {
+                for anchored in [Anchored::No, Anchored::Yes] {
+                    let subjects: Vec<(usize, usize)> = automata
+                        .iter()
+                        .map(|_| {
+                            let start = (haystacks.next() as usize) % (object.len() + 1);
+                            let end =
+                                start + (haystacks.next() as usize) % (object.len() - start + 1);
+                            (start, end)
+                        })
+                        .collect();
+                    let searches: Vec<SharedSearch<'_, '_>> = automata
+                        .iter()
+                        .zip(&subjects)
+                        .map(|((forward, _), (start, end))| SharedSearch {
+                            forward,
+                            subject_start: *start,
+                            subject_end: *end,
+                            anchored,
+                        })
+                        .collect();
+                    let bytes = &object.as_slice();
+                    let mut pages = ObjectPages::new(bytes, page_length, 2);
+                    let shared = first_match_ends_sharing_one_read(&mut pages, &searches).unwrap();
+                    for (((forward, reverse), (start, end)), first_end) in
+                        automata.iter().zip(&subjects).zip(shared)
+                    {
+                        let mut alone = ObjectPages::new(bytes, page_length, 2);
+                        let mut subject = alone.subject(*start as u64, *end as u64);
+                        let expected =
+                            search_in_place(forward, reverse, &mut subject, 0, anchored).unwrap();
+                        let FirstMatchEnd::Known(first_end) = first_end else {
+                            panic!("no first end for {object:?} {start}..{end}");
+                        };
+                        let found = search_in_place_from_its_end(
+                            forward,
+                            reverse,
+                            &mut subject,
+                            0,
+                            anchored,
+                            first_end,
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            found, expected,
+                            "{object:?} {start}..{end} {anchored:?}, pages of {page_length}"
+                        );
                     }
                 }
             }

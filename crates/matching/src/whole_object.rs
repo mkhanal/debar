@@ -99,6 +99,10 @@ impl<'o> ObjectPages<'o> {
         }
     }
 
+    pub(crate) fn length(&self) -> u64 {
+        self.length
+    }
+
     pub(crate) fn take_failure(&mut self) -> Result<(), InputError> {
         self.failure.take().map_or(Ok(()), Err)
     }

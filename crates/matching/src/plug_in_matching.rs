@@ -1,8 +1,8 @@
 use debar_image::{
     AutomatonMalformed, BacktrackingProgram, ComparisonRecord, ExpressionAnchoring,
-    ExpressionMatches, ExpressionRecord, Image, ImageError, InPlaceAutomaton, MatchingPass,
-    Placement, PlugInSubsignatures, PlugInsMalformed, RecordedForm, ReportWindows, SignatureGroup,
-    automaton_in_place, compile_text, compile_text_lazily,
+    ExpressionMatches, ExpressionRecord, ExpressionTrigger, Image, ImageError, InPlaceAutomaton,
+    MatchingPass, Placement, PlugInSubsignatures, PlugInsMalformed, RecordedForm, ReportWindows,
+    SignatureGroup, automaton_in_place, compile_text, compile_text_lazily,
 };
 use debar_platform::input::InputError;
 use regex_automata::dfa::Automaton as _;
@@ -18,7 +18,10 @@ use crate::byte_values::comparisons_hold;
 use crate::executable_layout::{LayoutState, placed_starts};
 use crate::logical_state::ObjectContext;
 use crate::logical_state::{CountedMatches, LogicalState};
-use crate::paged_expression_search::{PagedSearchFailure, search_in_place, search_lazily};
+use crate::paged_expression_search::{
+    FirstMatchEnd, PagedSearchFailure, SharedSearch, first_match_ends_sharing_one_read,
+    search_in_place, search_in_place_from_its_end, search_lazily,
+};
 use crate::pattern_scan::{PatternScanError, PatternSettings};
 use crate::whole_object::{ObjectPages, PagedSubject, WholeObject};
 use crate::work_meter::WorkMeter;
@@ -80,39 +83,41 @@ pub(crate) fn match_plug_ins<'m>(
     {
         return Ok(());
     }
+    let known_first_ends = match object {
+        WholeObject::Paged(pages) => {
+            first_ends_read_once(group, plug_ins, state, request, pages, work)?
+        }
+        WholeObject::Held(_) => Vec::new(),
+    };
     for (index, trigger) in plug_ins.expression_triggers().enumerate() {
         if work.ran_out() {
             return Ok(());
         }
-        if !trigger.runs_unarmed && !state.is_armed(trigger.signature) {
+        if !armed_to_run(trigger, state) {
             continue;
         }
-        if !state.may_report_here(
-            trigger.signature,
-            request.image,
-            &request.settings,
-            &request.context,
+        let Some(record) = expression_to_search(
+            group,
+            plug_ins,
+            index,
+            trigger,
+            state,
+            request,
             object_length,
-            request.layout,
-        )? {
+        )?
+        else {
             continue;
-        }
-        let record = plug_ins
-            .expression(index)
-            .map_err(|reason| malformed(group, reason))?;
-        let holds = plug_ins
-            .trigger_holds(&record, |index| {
-                state.current_matches(record.signature, index).unwrap_or(0)
-            })
-            .map_err(|reason| malformed(group, reason))?;
-        if !holds {
-            continue;
-        }
-        let starts =
-            expression_starts(&record, request, object, work).map_err(|failure| match failure {
+        };
+        let known_first_end = known_first_ends
+            .get(index)
+            .copied()
+            .unwrap_or(FirstMatchEnd::Unknown);
+        let starts = expression_starts(&record, request, object, known_first_end, work).map_err(
+            |failure| match failure {
                 ExpressionFailure::Malformed => malformed(group, PlugInsMalformed::Expression),
                 ExpressionFailure::Input(error) => PatternScanError::Input(error),
-            })?;
+            },
+        )?;
         if !starts.is_empty() && !work.ran_out() {
             state.count(
                 record.signature,
@@ -123,6 +128,119 @@ pub(crate) fn match_plug_ins<'m>(
         }
     }
     Ok(())
+}
+
+fn armed_to_run(trigger: ExpressionTrigger, state: &LogicalState<'_>) -> bool {
+    trigger.runs_unarmed || state.is_armed(trigger.signature)
+}
+
+fn expression_to_search<'m>(
+    group: SignatureGroup,
+    plug_ins: &PlugInSubsignatures<'m>,
+    index: usize,
+    trigger: ExpressionTrigger,
+    state: &LogicalState<'_>,
+    request: &PlugInRequest<'_, 'm>,
+    object_length: u64,
+) -> Result<Option<ExpressionRecord<'m>>, PatternScanError> {
+    if !state.may_report_here(
+        trigger.signature,
+        request.image,
+        &request.settings,
+        &request.context,
+        object_length,
+        request.layout,
+    )? {
+        return Ok(None);
+    }
+    let record = plug_ins
+        .expression(index)
+        .map_err(|reason| malformed(group, reason))?;
+    let holds = plug_ins
+        .trigger_holds(&record, |index| {
+            state.current_matches(record.signature, index).unwrap_or(0)
+        })
+        .map_err(|reason| malformed(group, reason))?;
+    Ok(holds.then_some(record))
+}
+
+fn first_ends_read_once<'m>(
+    group: SignatureGroup,
+    plug_ins: &PlugInSubsignatures<'m>,
+    state: &LogicalState<'_>,
+    request: &PlugInRequest<'_, 'm>,
+    pages: &mut ObjectPages<'_>,
+    work: &WorkMeter,
+) -> Result<Vec<FirstMatchEnd>, PatternScanError> {
+    let object_length = pages.length();
+    let haystack_length = usize::try_from(object_length).unwrap_or(usize::MAX);
+    let mut work_left = work.left();
+    let mut planned = Vec::new();
+    for (index, trigger) in plug_ins.expression_triggers().enumerate() {
+        if !armed_to_run(trigger, state) {
+            continue;
+        }
+        let Some(record) = expression_to_search(
+            group,
+            plug_ins,
+            index,
+            trigger,
+            state,
+            request,
+            object_length,
+        )?
+        else {
+            continue;
+        };
+        let RecordedForm::Automata { forward, .. } = record.form else {
+            continue;
+        };
+        let (Some(subject), Ok(forward)) = (
+            subject_of(&record, request, haystack_length),
+            request.image.validated_automaton(forward),
+        ) else {
+            continue;
+        };
+        if let Some(left) = work_left.as_mut() {
+            let units = u64::try_from(
+                subject
+                    .end
+                    .saturating_sub(subject.start)
+                    .div_ceil(BYTES_SEARCHED_PER_WORK_UNIT),
+            )
+            .unwrap_or(u64::MAX);
+            let Some(remaining) = left.checked_sub(units) else {
+                break;
+            };
+            *left = remaining;
+        }
+        planned.push((index, forward, subject));
+    }
+    let mut known = vec![FirstMatchEnd::Unknown; plug_ins.expression_triggers().count()];
+    if planned.len() < 2 {
+        return Ok(known);
+    }
+    let searches: Vec<SharedSearch<'_, '_>> = planned
+        .iter()
+        .map(|(_, forward, subject)| SharedSearch {
+            forward,
+            subject_start: subject.start,
+            subject_end: subject.end,
+            anchored: if subject.anchored {
+                Anchored::Yes
+            } else {
+                Anchored::No
+            },
+        })
+        .collect();
+    let ends =
+        first_match_ends_sharing_one_read(pages, &searches).map_err(PatternScanError::Input)?;
+    for ((index, _, _), end) in planned.iter().zip(ends) {
+        if let Some(slot) = known.get_mut(*index) {
+            *slot = end;
+        }
+    }
+    Ok(known)
 }
 
 struct Windows {
@@ -306,6 +424,7 @@ fn expression_starts<'m>(
     record: &ExpressionRecord<'m>,
     request: &PlugInRequest<'_, 'm>,
     object: &mut WholeObject<'_>,
+    known_first_end: FirstMatchEnd,
     work: &mut WorkMeter,
 ) -> Result<Vec<u64>, ExpressionFailure> {
     let object_length = usize::try_from(object.length()).unwrap_or(usize::MAX);
@@ -321,9 +440,15 @@ fn expression_starts<'m>(
         WholeObject::Held(held) => {
             held_starts(request.image, record, &subject, held, anchored, work)?
         }
-        WholeObject::Paged(pages) => {
-            paged_starts(request.image, record, &subject, pages, anchored, work)?
-        }
+        WholeObject::Paged(pages) => paged_starts(
+            request.image,
+            record,
+            &subject,
+            pages,
+            anchored,
+            known_first_end,
+            work,
+        )?,
     };
     let base = u64::try_from(subject.start).unwrap_or(u64::MAX);
     Ok(relative_starts
@@ -423,6 +548,7 @@ fn paged_starts<'m>(
     subject: &Subject,
     pages: &mut ObjectPages<'_>,
     anchored: Anchored,
+    mut known_first_end: FirstMatchEnd,
     work: &mut WorkMeter,
 ) -> Result<Vec<usize>, ExpressionFailure> {
     let mut searched_bytes: PagedSubject<'_, '_> = pages.subject(
@@ -439,8 +565,19 @@ fn paged_starts<'m>(
             let forward = in_place(image, forward_bytes, &mut forward_copy)?;
             let reverse = in_place(image, reverse_bytes, &mut reverse_copy)?;
             matched_starts(record, subject, length, work, |from, work| {
-                let found =
-                    search_in_place(&forward, &reverse, &mut searched_bytes, from, anchored)?;
+                let found = match std::mem::replace(&mut known_first_end, FirstMatchEnd::Unknown) {
+                    FirstMatchEnd::Known(end) => search_in_place_from_its_end(
+                        &forward,
+                        &reverse,
+                        &mut searched_bytes,
+                        from,
+                        anchored,
+                        end,
+                    )?,
+                    FirstMatchEnd::Unknown => {
+                        search_in_place(&forward, &reverse, &mut searched_bytes, from, anchored)?
+                    }
+                };
                 charge_searched(work, from, found, length);
                 Ok(found)
             })?

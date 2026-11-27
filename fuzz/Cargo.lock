@@ -171,6 +171,7 @@ dependencies = [
  "debar-image",
  "debar-platform",
  "md-5",
+ "memchr",
  "regex-automata",
  "sha1",
  "sha2",
