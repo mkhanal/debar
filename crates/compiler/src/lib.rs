@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod account_report;
 
 use std::fmt;
@@ -6,7 +8,7 @@ use std::path::{Path, PathBuf};
 use debar_clamav_signatures::{Account, DatabaseError, DatabaseFile, compile};
 use debar_image::{BuildError, Image, ImageBuilder, ImageError};
 use debar_platform::filesystem::{
-    FilesystemError, read_file, regular_files_in, write_file_atomically,
+    FilesystemError, publish_read_only_file, read_file, regular_files_in, write_file_atomically,
 };
 
 pub use account_report::account_report;
@@ -72,7 +74,7 @@ pub fn compile_to_files(
     let compilation = compile_directory(databases)?;
     let report = account_report(&compilation.account, &compilation.image)
         .map_err(CompileError::BuiltImageUnreadable)?;
-    write_file_atomically(image_path, &compilation.image).map_err(CompileError::Filesystem)?;
+    publish_read_only_file(image_path, &compilation.image).map_err(CompileError::Filesystem)?;
     write_file_atomically(report_path, report.to_string().as_bytes())
         .map_err(CompileError::Filesystem)?;
     Ok(compilation)

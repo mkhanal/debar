@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod backtracking_search;
 mod byte_values;
 mod container_entries;

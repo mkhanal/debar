@@ -2,9 +2,15 @@ use std::fmt;
 use std::fs::File;
 use std::io;
 use std::ops::Range;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use memmap2::{Advice, Mmap};
+
+use crate::effective_user::EffectiveUser;
+
+const ANY_WRITE_PERMISSION: u32 = 0o222;
+const PERMISSION_BITS: u32 = 0o7777;
 
 pub struct MappedFile {
     contents: Contents,
@@ -25,6 +31,9 @@ pub enum ExpectedAccess {
 #[derive(Debug)]
 pub enum MappingError {
     Open { path: PathBuf, reason: io::Error },
+    NotARegularFile { path: PathBuf },
+    Writable { path: PathBuf, mode: u32 },
+    OwnedByAnotherUser { path: PathBuf, owner: u32 },
     Map { path: PathBuf, reason: io::Error },
     RangeOutsideTheFile { range: Range<usize>, length: usize },
     Advise { reason: io::Error },
@@ -36,6 +45,19 @@ impl fmt::Display for MappingError {
             Self::Open { path, reason } => {
                 write!(formatter, "cannot open {}: {reason}", path.display())
             }
+            Self::NotARegularFile { path } => {
+                write!(formatter, "{} is not a regular file", path.display())
+            }
+            Self::Writable { path, mode } => write!(
+                formatter,
+                "{} has permissions {mode:o}, so it could change while in use; only a file no one may write is mapped",
+                path.display()
+            ),
+            Self::OwnedByAnotherUser { path, owner } => write!(
+                formatter,
+                "{} is owned by user {owner}, who could make it writable while in use; only a file owned by this user or the administrator is mapped",
+                path.display()
+            ),
             Self::Map { path, reason } => {
                 write!(
                     formatter,
@@ -61,28 +83,17 @@ impl std::error::Error for MappingError {}
 
 impl MappedFile {
     pub fn open(path: &Path) -> Result<Self, MappingError> {
-        let file = File::open(path).map_err(|reason| MappingError::Open {
-            path: path.to_path_buf(),
-            reason,
-        })?;
-        let length = file
-            .metadata()
-            .map_err(|reason| MappingError::Open {
-                path: path.to_path_buf(),
-                reason,
-            })?
-            .len();
-        if length == 0 {
+        let file = UnchangeableFile::open(path)?;
+        if file.length == 0 {
             return Ok(Self {
                 contents: Contents::Empty,
             });
         }
-        // SAFETY: the mapping is read-only and shared, and only files that are
-        // never modified or truncated once written are mapped: an image is
-        // written under another name and renamed into place. A file changed
-        // in place while mapped would change the bytes under the returned
-        // slices, and truncating it would raise SIGBUS on access.
-        let mapping = unsafe { Mmap::map(&file) }.map_err(|reason| MappingError::Map {
+        // SAFETY: an UnchangeableFile is a regular file no one may write, owned by this
+        // user or the administrator, so no other user can change or shorten the bytes
+        // beneath the returned slices while they are mapped. The administrator, or this
+        // user after first making the file writable, still could (DECISIONS.md, 2026-11-27).
+        let mapping = unsafe { Mmap::map(&file.file) }.map_err(|reason| MappingError::Map {
             path: path.to_path_buf(),
             reason,
         })?;
@@ -118,5 +129,43 @@ impl MappedFile {
         mapping
             .advise_range(advice, range.start, range.len())
             .map_err(|reason| MappingError::Advise { reason })
+    }
+}
+
+struct UnchangeableFile {
+    file: File,
+    length: u64,
+}
+
+impl UnchangeableFile {
+    fn open(path: &Path) -> Result<Self, MappingError> {
+        let failed = |reason| MappingError::Open {
+            path: path.to_path_buf(),
+            reason,
+        };
+        let file = File::open(path).map_err(failed)?;
+        let metadata = file.metadata().map_err(failed)?;
+        if !metadata.file_type().is_file() {
+            return Err(MappingError::NotARegularFile {
+                path: path.to_path_buf(),
+            });
+        }
+        let mode = metadata.mode() & PERMISSION_BITS;
+        if mode & ANY_WRITE_PERMISSION != 0 {
+            return Err(MappingError::Writable {
+                path: path.to_path_buf(),
+                mode,
+            });
+        }
+        if !EffectiveUser::of_this_process().trusts_files_owned_by(metadata.uid()) {
+            return Err(MappingError::OwnedByAnotherUser {
+                path: path.to_path_buf(),
+                owner: metadata.uid(),
+            });
+        }
+        Ok(Self {
+            file,
+            length: metadata.len(),
+        })
     }
 }

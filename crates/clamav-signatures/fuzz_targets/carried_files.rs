@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 #![no_main]
 
 use debar_clamav_signatures::{DatabaseFile, compile};

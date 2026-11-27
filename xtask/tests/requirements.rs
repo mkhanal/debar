@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use xtask::requirements::{
     RequirementFinding, TextFile, is_married_test, is_specification, requirement_findings,
 };

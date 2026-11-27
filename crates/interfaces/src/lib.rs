@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod comparison_report;
 mod scan_measurement;
 

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 #![allow(clippy::panic)]
 
 use xtask::claims::{

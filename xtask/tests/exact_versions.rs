@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use xtask::exact_versions::loose_requirements;
 use xtask::workspace::{Dependency, DependencyKind, DependencySource, Member, Workspace};
 

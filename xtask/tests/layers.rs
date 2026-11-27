@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use xtask::layers::{LayerFinding, deny_wrapper_findings, layer_findings};
 use xtask::workspace::{Dependency, DependencyKind, DependencySource, Member, Workspace};
 

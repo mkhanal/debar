@@ -1,6 +1,7 @@
 use std::fmt;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -98,9 +99,39 @@ pub fn read_file(path: &Path) -> Result<Vec<u8>, FilesystemError> {
     })
 }
 
+const READABLE_AND_WRITABLE_BY_ALL_BEFORE_THE_UMASK: u32 = 0o666;
+const READABLE_BY_ALL_AND_WRITABLE_BY_NONE: u32 = 0o444;
+
 pub fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<(), FilesystemError> {
+    write_then_move_into_place(
+        path,
+        contents,
+        READABLE_AND_WRITABLE_BY_ALL_BEFORE_THE_UMASK,
+    )
+}
+
+pub fn publish_read_only_file(path: &Path, contents: &[u8]) -> Result<(), FilesystemError> {
+    write_then_move_into_place(path, contents, READABLE_BY_ALL_AND_WRITABLE_BY_NONE)
+}
+
+fn write_then_move_into_place(
+    path: &Path,
+    contents: &[u8],
+    permissions: u32,
+) -> Result<(), FilesystemError> {
     let partial = partial_path(path);
-    let mut file = File::create(&partial).map_err(failed(Operation::Write, &partial))?;
+    match std::fs::remove_file(&partial) {
+        Err(reason) if reason.kind() != io::ErrorKind::NotFound => {
+            return Err(failed(Operation::Write, &partial)(reason));
+        }
+        _ => {}
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(permissions)
+        .open(&partial)
+        .map_err(failed(Operation::Write, &partial))?;
     file.write_all(contents)
         .map_err(failed(Operation::Write, &partial))?;
     file.sync_all().map_err(failed(Operation::Sync, &partial))?;

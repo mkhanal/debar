@@ -30,6 +30,7 @@ debar-matching = { path = "crates/matching" }
 debar-platform = { path = "crates/platform" }
 debar-scan = { path = "crates/scan" }
 flate2 = { version = "=1.1.11", default-features = false, features = ["rust_backend"] }
+libc = { version = "=0.2.191", default-features = false }
 md-5 = { version = "=0.10.6", default-features = false }
 memmap2 = "=0.9.12"
 num-bigint = { version = "=0.4.8", default-features = false }
@@ -45,6 +46,7 @@ toml = { version = "=1.2.1", default-features = false, features = ["parse", "ser
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -60,5 +62,7 @@ string_slice = "deny"
 todo = "deny"
 unreachable = "deny"
 undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unnecessary_safety_comment = "deny"
 disallowed_methods = "forbid"
 disallowed_types = "forbid"

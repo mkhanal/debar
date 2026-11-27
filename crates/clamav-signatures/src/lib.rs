@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod account;
 mod body_pattern;
 mod byte_comparison_subsignatures;

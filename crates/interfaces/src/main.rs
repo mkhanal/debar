@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;

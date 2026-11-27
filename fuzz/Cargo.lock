@@ -165,6 +165,7 @@ dependencies = [
 name = "debar-platform"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "memmap2",
 ]
 

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 pub mod autofix;
 pub mod autofix_queue;
 pub mod board;
@@ -17,5 +19,7 @@ pub mod requirements;
 pub mod response_fields;
 pub mod task_arguments;
 pub mod task_outcome;
+pub mod unsafe_code;
+pub mod unsafe_reviews;
 pub mod work_classification;
 pub mod workspace;

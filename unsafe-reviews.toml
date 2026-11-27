@@ -1,0 +1,314 @@
+# The unsafe code of every dependency, reviewed at the version Debar uses (Constitution §18).
+# `cargo xtask dependencies` fails while a dependency with unsafe code has no review here.
+
+[[review]]
+crate = "aho-corasick"
+version = "1.1.5"
+reached-by = "the product"
+unsafe-code = "About 130 non-test unsafe sites: about 115 in the packed Teddy searcher (SSSE3/AVX2/NEON intrinsic wrappers in packed/vector.rs, raw-pointer haystack walks and get_unchecked into buckets and patterns in packed/teddy/generic.rs and builder.rs, raw byte compares in packed/pattern.rs, offset_from in packed/ext.rs), plus 1 sealed unsafe trait Automaton with 5 unsafe impls asserting that state IDs are valid."
+reviewed = "Read every unsafe site outside the vector.rs test modules, and the vector.rs wrappers for the x86_64 and aarch64 backends in full. Intrinsics run only after is_x86_feature_detected or compile-time target_feature (NEON is baseline on aarch64); Searcher::find asserts the haystack is at least minimum_len, which makes every pointer walk stay within [start, end); is_prefix_raw checks the pattern length against end; bucket and pattern IDs are fixed when the searcher is built from the patterns, never by the haystack; the Automaton impls rely only on the crate's own construction. No haystack byte can push a pointer out of bounds, and no unsoundness was found. A haystack shorter than the minimum reaches a panicking assert, not UB, and the crate's own callers check the length first."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "memchr"
+version = "2.8.3"
+reached-by = "the product"
+unsafe-code = "About 330 unsafe sites: about 280 are SIMD intrinsics and raw-pointer haystack walks (generic One/Two/Three and packed-pair searchers, run through SSE2/AVX2, NEON and wasm wrappers), about 40 are the SWAR word-at-a-time fallback, Rabin-Karp and is_equal_raw pointer walks, plus a cached ifunc function pointer transmuted from *mut (), a union of searcher kinds paired with its reader function in memmem, offset_from with unwrap_unchecked in ext.rs, and 2 unsafe impls of Send and Sync for the raw-pointer Iter."
+reviewed = "Read in full arch/generic/memchr.rs and packedpair.rs, arch/x86_64/memchr.rs, arch/x86_64/avx2/memchr.rs, arch/all/memchr.rs, rabinkarp.rs and mod.rs, ext.rs and memmem/searcher.rs. Sampled the sse2, neon and packedpair wrappers and found them the same pattern as avx2 (the wasm32 code is not built for Debar's targets). Every vector routine is dispatched only after is_available (runtime CPU detection, or baseline SSE2 or NEON), and every wrapper drops to the byte-at-a-time path when the length is below the vector width, so all loads stay within [start, end) whatever the bytes. Each memmem union read sits in the one function paired with that field at construction. The packed-pair find asserts min_haystack_len, which panics rather than causing UB if misused. No unsoundness or input-dependent invariant was found."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "regex-automata"
+version = "0.4.18"
+reached-by = "the product"
+unsafe-code = "About 55 unsafe sites: transition-table and haystack get_unchecked in the unrolled dense and lazy DFA search loops (dfa/search.rs, hybrid/search.rs, next_state_unchecked), unsafe from_bytes_unchecked deserialisers with slice::from_raw_parts casts of aligned u32 bytes to StateID, PatternID and accelerators (dfa/dense.rs, sparse.rs, accel.rs, util/wire.rs), the unsafe Automaton trait with 3 impls, and synchronisation primitives (util/lazy.rs, util/pool.rs owner fast path and spin Mutex, 4 unsafe impl Sync)."
+reviewed = "Read every unsafe site. The search loops guard each haystack index with at < input.end() (or >= start), where end <= haystack.len(), and index the transition table with state IDs that the DFA itself produced. Those IDs are valid by construction when the DFA is built, and for a deserialised dense DFA they are valid because the checked DFA::from_bytes, which Debar's image crate uses, validates the transitions, start table, match states and accelerators before returning. The from_raw_parts casts check length and alignment first; lazy.rs and pool.rs follow the standard CAS-ownership patterns. Haystack bytes only select a byte class, which is always below the stride, so hostile scanned input cannot break any invariant. The one invariant worth keeping is that compiled DFAs are always loaded through from_bytes and never from_bytes_unchecked, since the image file is the only untrusted path into these tables."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "zerocopy"
+version = "0.8.63"
+reached-by = "the product"
+unsafe-code = "Pervasive by design: about 300 unsafe blocks, 110 unsafe impls plus about 120 unsafe_impl! macro uses (marker traits FromBytes, IntoBytes, Immutable, Unaligned, KnownLayout on primitives and wrappers), 55 unsafe fns and 29 unsafe traits; the blocks are pointer casts and reference creation justified by layout checks, split_at_unchecked after a validated split point, and unreachable_unchecked on proven-impossible error arms."
+reviewed = "A sample, not every block: the paths Debar uses were read in full - FromBytes::ref_from_bytes, ref_from_prefix, ref_from_prefix_with_elems, ref_from_bytes_with_elems, read_from_prefix, IntoBytes::as_bytes, PtrInner::try_cast_into, DstLayout::validate_cast_and_convert_metadata and size_for_metadata (checked, returning Size errors on overflow), and the little_endian U16/U32/U64 types (repr(transparent) over [u8; N], so every byte pattern is valid). Every length, element count and alignment comes from the slice and the caller's count and is checked before a pointer is made, so damaged image bytes can only produce an Err, never an out-of-bounds or invalid reference; further confidence comes from the per-block SAFETY comments enforced by clippy::undocumented_unsafe_blocks and multiple_unsafe_ops_per_block, and the Kani proof harnesses present in layout.rs, byteorder.rs, byte_slice.rs and util/mod.rs (Miri testing is claimed in README.md but its CI config is not in the package). One assumption is Debar's, not zerocopy's: references into a memory map are only sound while the mapped file cannot change or shrink underneath them, which the platform layer's mapping must guarantee."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "zerocopy-derive"
+version = "0.8.63"
+reached-by = "the product"
+unsafe-code = "The macro itself has one internal unsafe fn (gen_trivial_is_safe_unchecked) and no unsafe in its own execution; what matters is what it emits into Debar's crates: unsafe impl of FromBytes, FromZeros, TryFromBytes, IntoBytes, Immutable, Unaligned and KnownLayout, plus for DSTs a NonNull::new_unchecked and addr_of_mut! field projections (about 8 emission sites in util.rs, known_layout.rs, project.rs and try_from_bytes.rs)."
+reviewed = "Read the derive logic for the traits Debar derives (from_bytes.rs, into_bytes.rs, unaligned.rs, the Immutable and KnownLayout paths and ImplBlockBuilder in util.rs) and the golden expected outputs for basic structs. Each emitted impl is guarded by where-bounds that make rustc prove every field has the same property, IntoBytes on a non-generic repr(C) struct additionally emits a compile-time PaddingFree check, and Unaligned refuses anything without repr(C), transparent or packed or with align above 1; Debar's records are non-generic repr(C) structs of byteorder integers, so a mistake in a record definition fails to compile rather than emitting an unsound impl. The macro runs on Debar's source only, so hostile scan or image bytes never reach it."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "generic-array"
+version = "0.14.7"
+reached-by = "the product"
+unsafe-code = "8 unsafe traits (ArrayLength and the sequence traits) with about 20 unsafe impls, 6 unsafe fns (ArrayBuilder, ArrayConsumer, an internal transmute) and about 40 unsafe blocks: slice views of the array via from_raw_parts, ptr::read/ptr::write element moves in builders, iterators, split, concat, append and pop, transmutes between [T; N] and GenericArray, and from_utf8_unchecked on hex output."
+reviewed = "Read every block. All rely on GenericArray<T, N> being repr(transparent) over nested repr(C) pairs whose layout equals [T; N], and on lengths fixed at the type level (typenum), so no runtime input sets a length; slice-to-array conversions assert the length first, builders and consumers track initialised elements for panic safety, and hex output writes only ASCII from a table. Minor: ArrayBuilder::iter_position makes a &mut to not-yet-initialised elements, a pattern Rust has not settled on but Miri accepts; with T = u8 in the hash crates it carries no practical risk and no input can influence it."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "block-buffer"
+version = "0.10.4"
+reached-by = "the product"
+unsafe-code = "4 unsafe blocks: three casts of a byte slice to a slice of GenericArray<u8, N> blocks via from_raw_parts, and one unreachable_unchecked asserting the cursor invariant pos < block size."
+reviewed = "Read every block. The casts compute the block count as len / N and the tail from the remainder, so the views stay inside the input slice, and Block<N> has alignment 1; the cursor invariant is established by try_new and set (checked, panicking on violation) and maintained by internal code, with BlockSize bounded below 256 at the type level so pos fits a u8. Input length and content never reach the invariant, so no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "flagset"
+version = "0.4.7"
+reached-by = "the product"
+unsafe-code = "1 unsafe fn (FlagSet::new_unchecked, a plain constructor that skips the valid-bits check) and 1 unsafe block emitted by the flags! macro calling it with each variant's literal value."
+reviewed = "Read both. The macro passes only the declared literal bits, and new_unchecked stores an integer with no memory-safety consequence, the contract only concerning which bits are meaningful; values decoded from certificates go through the checked or truncating constructors. No concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "base64ct"
+version = "1.8.3"
+reached-by = "the product"
+unsafe-code = "4 unsafe blocks in encoding.rs: in-place decoding through raw pointers to 3- and 4-byte windows with a final copy_nonoverlapping and get_unchecked, and two from_utf8_unchecked on encoder output; the rest of the crate denies unsafe_code."
+reviewed = "Read every block. Decoding iterates chunk < len / 4, so the read window 4*chunk+4 and the write window 3*chunk+3 stay inside the buffer, padding is validated first, and the tail length dlen - 3*full_chunks is at most 2 with dlen = 3n/4 <= len; the reads and writes are separated through a temporary so overlap is harmless; encoder output is drawn only from the ASCII alphabet. The bounds rest on arithmetic over the input length that holds for any bytes, though they are checked only by debug_assert; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "pem-rfc7468"
+version = "0.7.0"
+reached-by = "the product"
+unsafe-code = "1 unsafe block: str::from_utf8_unchecked on the PEM encoder's output; the crate otherwise denies unsafe_code."
+reviewed = "Read it. It runs only after an always-on check that every output byte is below 0x80, so the buffer is ASCII and valid UTF-8 whatever the input; decoding hostile PEM involves no unsafe. No concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "zeroize"
+version = "1.9.1"
+reached-by = "the product"
+unsafe-code = "15 unsafe blocks and 2 unsafe fns (volatile_set, zeroize_flat_type): volatile writes of zero over values, slices, MaybeUninit, Option, str and String, mem::zeroed for SIMD register types, and an empty inline-asm optimisation barrier."
+reviewed = "Read every block. Each writes zeros through a pointer from a live &mut over exactly size_of or len elements (length overflow asserted), to types for which all-zero is valid (DefaultIsZeroes, MaybeUninit, integers, SIMD vectors, UTF-8 bytes), and Option is overwritten with None after its value is taken; the asm barrier only reads a pointer. None of it depends on input data; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "num-bigint"
+version = "0.4.8"
+reached-by = "the product"
+unsafe-code = "8 unsafe sites: 2 String::from_utf8_unchecked in to_str_radix, 1 inline-asm div in div_wide (x86_64 only), 4 calls to the _addcarry/_subborrow intrinsics (x86_64 only) and 1 slice reinterpretation in bigrand, which is compiled only with the rand feature that Debar does not enable."
+reviewed = "Read every site. The radix strings contain only bytes mapped to '0'-'9' and 'a'-'z' after a radix 2..=36 assert; the intrinsics touch only registers and a local out-parameter; the div instruction would fault (SIGFPE, a crash, not memory corruption) if hi >= divisor, which every caller rules out - division by zero panics first and each call passes a remainder already below the divisor. Hostile big integers from signed databases cannot reach an unsound state."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "num-traits"
+version = "0.2.19"
+reached-by = "the product"
+unsafe-code = "1 unsafe block, in a macro used by the float-to-integer ToPrimitive conversions: f32/f64::to_int_unchecked."
+reviewed = "Read it and every expansion. Each call is preceded by a range check against the target's (MIN-1, MAX+1) or [MIN, MAX+1) bounds, which also rejects NaN and infinities since their comparisons are false, so the value always fits. No concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "libc"
+version = "0.2.191"
+reached-by = "the product"
+unsafe-code = "Almost entirely FFI: on linux-gnu/musl x86_64 and aarch64 about 45 extern \"C\" blocks of function declarations plus constants and repr(C) structs. The few bodies are about 45 unsafe C-macro ports (CMSG_*, FD_*, CPU_*, BPF_*, NLMSG_*, siginfo_t union accessors), union Default via mem::zeroed, an offset_of polyfill and one u8-to-c_char slice cast."
+reviewed = "Read the declarations Debar reaches (geteuid, mmap64/mmap, madvise, munmap, sysconf, getauxval, AT_HWCAP), which match the Linux prototypes, and every function body in the Linux files (unix/mod.rs, linux_like/mod.rs, linux/mod.rs, gnu/mod.rs, linux_l4re_shared.rs, new/linux_uapi, new/glibc); FD_* bounds-check and panic, CPU_* index a fixed array with checked indexing, the rest are pointer arithmetic the caller must make valid, and none of it is called by Debar or sees scanned bytes. Excluded every other OS (Windows, BSDs, Apple, Android, Fuchsia, Haiku, Hurd, Solaris, AIX, NTO, WASI and the rest); no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "memmap2"
+version = "0.9.12"
+reached-by = "the product"
+unsafe-code = "FFI calls to mmap/munmap/madvise/msync/mprotect/mremap/mlock/fcntl/ioctl in unix.rs (23), slice::from_raw_parts over the mapping in Deref (lib.rs, 36 including the unsafe map constructors and forwarding of advise), two madvise probes in advice.rs, and Send/Sync and StableDeref impls."
+reviewed = "Read every block in unix.rs, advice.rs and the Linux paths of lib.rs; Mmap::map rounds the offset to a page, maps a non-zero length and exposes exactly len bytes, Drop unmaps the same range, and soundness otherwise rests on the documented caller duty that the mapped file is not changed or truncated while mapped (Debar's own image file, not scanned input). Concern: advise/advise_range check offset <= len and len <= len separately, not offset + len <= len (flush does check it), so a wrong range from Debar can madvise pages past the map; Debar must bound the range itself, and the safe Advice enum includes HwPoison. Windows excluded."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "cpufeatures"
+version = "0.2.17"
+reached-by = "the product"
+unsafe-code = "Runtime CPU feature detection: on x86_64 two unsafe fn wrappers and one block around the cpuid intrinsics plus one _xgetbv call (4); on aarch64 Linux one getauxval(AT_HWCAP) FFI call (the other 3 are Apple sysctlbyname)."
+reviewed = "Read every block. cpuid is always present on x86_64, xgetbv is executed only after cpuid reports OSXSAVE, and getauxval is a plain libc call; results are cached in an AtomicU8, and none of it touches scanned bytes. Latent only: the aarch64 \"sha3\" check accepts HWCAP_SHA3 or HWCAP_SHA512 rather than both, but its only user (sha2's aarch64 SHA-512 backend) is not compiled without the asm feature. Apple and LoongArch code excluded."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "sha1"
+version = "0.10.7"
+reached-by = "the product"
+unsafe-code = "One pointer cast from &[GenericArray<u8, U64>] to &[[u8; 64]] (compress.rs), and on x86_64 one #[target_feature(sha,sse2,ssse3,sse4.1)] SHA-NI compression function with its dispatch call (2)."
+reviewed = "Read every block. The cast relies on GenericArray<u8, U64> being a repr(transparent) [u8; 64], which holds; the SHA-NI path is entered only when cpufeatures confirms all four features, and its loads are four unaligned 16-byte loads inside each 64-byte block, so no input byte value or length can make it read out of bounds. aarch64 uses the safe software path; LoongArch asm excluded."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "sha2"
+version = "0.10.9"
+reached-by = "the product"
+unsafe-code = "Two GenericArray-to-array block casts (sha256.rs, sha512.rs), and on x86_64 SIMD intrinsics behind runtime detection: SHA-NI SHA-256 (3) and AVX2 SHA-512 (10, including two casts of __m128i arrays to u64 arrays)."
+reviewed = "Read every compiled block. The casts rely on identical layout, which holds; SHA-256 enters SHA-NI only after cpufeatures confirms sha/sse2/ssse3/sse4.1 and loads four 16-byte lanes per 64-byte block; SHA-512 enters AVX2 only after the avx2 check, handles an odd first block singly so the two-block loop never reads past blocks.len(), and loads 8 lanes per 128-byte block. Excluded the aarch64 backends (compiled only with the asm feature, which is off) and LoongArch asm; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "md-5"
+version = "0.10.6"
+reached-by = "the product"
+unsafe-code = "One slice::from_raw_parts cast from &[GenericArray<u8, U64>] to &[[u8; 64]] of the same length (lib.rs); compression is the safe software implementation."
+reviewed = "Read every block. The cast relies on GenericArray<u8, U64> having the layout of [u8; 64], which holds, and it keeps the original length and lifetime. The x86 asm backend (asm feature, off) and LoongArch asm excluded; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "crc32fast"
+version = "1.5.5"
+reached-by = "the product"
+unsafe-code = "SIMD intrinsics behind runtime CPU feature detection, the rest of the crate being deny(unsafe_code): x86_64 PCLMULQDQ folding with VPCLMULQDQ AVX2 and AVX-512 variants (13), and aarch64 CRC32 instructions with a PMULL folding path (12)."
+reviewed = "Read every block in specialized/pclmulqdq.rs and specialized/aarch64.rs. Each kernel is unsafe only for its target features, which State::new or has_pmull detects first (avx512f/avx2 imply the other enabled features), and every load goes through a[..16], a[..32] or a[..64] slice indexing, so a short buffer could only panic, and the length guards (16, 128, 256, 2048 bytes, and 16*N for the N-stream folds) make even that unreachable for any input. No concern; this is newer and larger SIMD code than earlier 1.x releases."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "simd-adler32"
+version = "0.3.10"
+reached-by = "the product"
+unsafe-code = "SIMD intrinsics for the Adler-32 sum: x86_64 SSE2 (9), SSSE3 (8) and AVX2 (7) kernels chosen by is_x86_feature_detected, and one block in the aarch64 NEON kernel (baseline feature on aarch64)."
+reviewed = "Read every block in sse2.rs, ssse3.rs, avx2.rs and neon.rs. Each kernel runs only on a CPU with its feature, and loads read whole 32-byte blocks from chunks_exact(32), so they stay inside the slice; the 5552-byte NMAX chunking keeps the 16- and 32-bit accumulators from overflowing. Excluded AVX-512 (nightly feature, off) and WebAssembly; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "flate2"
+version = "1.1.11"
+reached-by = "the product"
+unsafe-code = "With rust_backend only four are compiled: initialize_buffer zeroes a MaybeUninit output slice and casts it to &mut [u8] (ffi/mod.rs), and write_to_spare_capacity_of_vec plus its two callers in compress_vec and decompress_vec set a Vec's length after the backend writes into its spare capacity (mem.rs)."
+reviewed = "Read every compiled block. The miniz_oxide backend's decompress_uninit uses the default that zeroes the whole spare capacity first, so set_len never exposes uninitialised bytes, and the new length is clamped to the capacity, so even a wrong bytes-written count from hostile data cannot reach past the allocation. Excluded the zlib, zlib-ng and zlib-rs backends (ffi/c.rs and the any_c_zlib blocks in mem.rs); no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "serde_core"
+version = "1.0.229"
+reached-by = "shipped debar binary (through serde_json in debar-interfaces and debar-compiler) and build and test tools"
+unsafe-code = "Two str::from_utf8_unchecked calls: one in the internal fmt::Write buffer used to format values, one when serializing an IP address built from ASCII digits and separators."
+reviewed = "Read both blocks. The format buffer only ever copies whole &str values in via write_str with a bounds check, and the IP path writes ASCII only, so the bytes are valid UTF-8; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "serde_json"
+version = "1.0.154"
+reached-by = "shipped debar binary (debar-interfaces and debar-compiler depend on it directly) and build and test tools"
+unsafe-code = "Fourteen sites: six str/String from_utf8_unchecked on serializer output or on StrRead input, one hint::unreachable_unchecked on the escape table, one offset_from inside the string scanner, one raw write of up to four bytes after Vec::reserve(4) for \\u escapes, and three transmutes plus one unsafe fn for RawValue (repr(transparent) over str, behind the raw_value feature)."
+reviewed = "Read every block. The UTF-8 claims hold because the serializer only splits input &str on ASCII bytes and StrRead parses with validate=true, which rejects lone surrogates before push_wtf8_codepoint could emit WTF-8; the reserve(4) write, the offset_from within the same slice, the escape-table match and the repr(transparent) transmutes all hold; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "itoa"
+version = "1.0.19"
+reached-by = "shipped debar binary (through serde_json) and build and test tools"
+unsafe-code = "About thirteen blocks in lib.rs: get_unchecked/get_unchecked_mut writes of digit pairs into a fixed MaybeUninit buffer sized per integer type, unchecked reads of the 200-byte DECIMAL_PAIRS table, a cast of the buffer to the per-type array, from_utf8_unchecked over the written ASCII tail, and one unreachable_unchecked on the length bound."
+reviewed = "Read every block. Indexes are pair*2 with pair below 100 (from divmod100) and buffer offsets that only count down from the per-type maximum length, the written tail is ASCII digits and '-', and the buffer is sized to the largest type; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "zmij"
+version = "1.0.23"
+reached-by = "shipped debar binary (through serde_json float formatting) and build and test tools"
+unsafe-code = "About seventy sites in lib.rs and stdarch_x86.rs: raw pointer writes of digits into the fixed Buffer, unchecked lookups in power-of-ten and digit tables, SSE2 (x86_64 baseline) and NEON (aarch64 baseline) intrinsics for digit conversion, transmutes building vector constants, empty asm! blocks used as optimisation barriers, and a final from_utf8_unchecked; the SSE4.1 path is cfg-gated on a target feature not enabled by default."
+reviewed = "Read a sample: the public entry (Buffer::format, format_finite), write() up to the special cases, the Pow10SignificandTable compute and get_unchecked paths, and the stdarch_x86 transmutes; the remaining digit-writing blocks were skimmed, not checked one by one. They rely on the decimal exponent staying inside the 618-entry table and the output staying within BUFFER_SIZE, which is the algorithm's arithmetic invariant rather than a runtime check, so correctness rests on upstream testing; no concern found, but this is the least independently verified crate in the set."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "hashbrown"
+version = "0.17.1"
+reached-by = "build and test tools only, through indexmap, which toml pulls in only with its preserve_order feature; the workspace's toml entry does not enable it, so this may not be compiled at all"
+unsafe-code = "About 480 occurrences, mostly in raw.rs (256), map.rs and table.rs: raw pointer and bucket arithmetic over the SwissTable allocation, SSE2 (x86_64) and NEON (aarch64) group loads and stores of control bytes, the internal Allocator trait over the global allocator, and unsafe impl Send/Sync for tables, entries and iterators; the rayon impls are feature-gated off."
+reviewed = "Read a sample: all of control/group/sse2.rs and neon.rs, alloc.rs, every unsafe impl Send/Sync outside rayon, and the capacity and layout arithmetic (capacity_to_buckets, calculate_layout_for) in raw.rs; the probing and insert paths in raw.rs were not read block by block. The layout arithmetic is checked (checked_mul/checked_add and an isize::MAX bound), Send/Sync impls carry T: Send/Sync bounds or rely on PhantomData in the wrapper as std's HashMap does, and this is the code behind std's HashMap; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "indexmap"
+version = "2.14.2"
+reached-by = "build and test tools only, through toml's preserve_order feature, which the workspace does not enable, so this may not be compiled at all"
+unsafe-code = "Twelve blocks: six pointer casts between [Bucket] and the repr(transparent) Slice wrappers (by reference and by Box), two disjoint &mut references from already-checked index sets, and three blocks in the extract_if-style ExtractCore that set_len and move items by raw pointer."
+reviewed = "Read every block. Slice is repr(transparent) over the bucket slice, the disjoint accessors check indices for bounds and uniqueness before creating the references, and ExtractCore asserts consistent lengths and only leaks (never double-drops) if its Drop does not run; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "toml_parser"
+version = "1.1.5+spec-1.1.0"
+reached-by = "build and test tools only"
+unsafe-code = "About 130 occurrences across lexer, decoder, parser and source.rs, all unchecked slicing (next_slice_unchecked, get_unchecked on str spans) and every one behind cfg(feature = \"unsafe\"); without that feature the crate is forbid(unsafe_code)."
+reviewed = "Read lib.rs, source.rs and a sample of the lexer blocks, and the feature wiring: toml 1.2.1 asks toml_parser only for alloc and std, and nothing else in the lockfile depends on it, so the unsafe feature is off and none of this code is compiled; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "winnow"
+version = "1.0.5"
+reached-by = "build and test tools only"
+unsafe-code = "Two transmutes from &[u8] to the repr(transparent) Bytes and BStr wrappers, plus about fourteen unsafe fn next_slice_unchecked/peek_slice_unchecked implementations and forwarders that slice with get_unchecked on the caller's promise that the offset is in bounds (and on a char boundary for &str)."
+reviewed = "Read every block. The transmutes are sound because both wrappers are repr(transparent) over [u8]; the unchecked slicers are only called by downstream code, and the only downstream here, toml_parser, calls them solely under its disabled unsafe feature, so they are compiled but unreached; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "proc-macro2"
+version = "1.0.107"
+reached-by = "compile time only, inside derive macros"
+unsafe-code = "Three unsafe fn Literal::from_str_unchecked layers (public, wrapper, fallback) whose contract is that the string is a valid literal, with no memory operation of their own, and one ptr::read of a field out of a ManuallyDrop TokenStream in the fallback take_inner."
+reviewed = "Read every block. The ptr::read moves the field out of a ManuallyDrop so the outer Drop never runs and nothing is dropped twice; from_str_unchecked only hands the string to the compiler or the fallback Literal, used by quote with literals it formatted itself; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "unicode-ident"
+version = "1.0.27"
+reached-by = "compile time only, inside derive macros"
+unsafe-code = "Two get_unchecked reads of the generated LEAF bitmap in is_xid_start and is_xid_continue."
+reviewed = "Read both blocks. The offset is built from a trie chunk index taken with a checked .get (falling back to the zero chunk), so it stays within LEAF by construction of the generated tables, which the crate's tests check over every char; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "syn"
+version = "2.0.119"
+reached-by = "compile time only, inside derive macros"
+unsafe-code = "About thirty-five sites: roughly twenty-eight raw pointer steps of Cursor over the flat TokenBuffer entry array in buffer.rs, three lifetime-only transmutes of Cursor in parse.rs and discouraged.rs, two reference casts from single-span tokens to the repr(transparent) WithSpan in token.rs, and unsafe impl Sync and Send for ThreadBound in thread.rs; other matches are the unsafe keyword as parsed syntax."
+reviewed = "Read thread.rs, token.rs, the transmutes and buffer.rs in full. Cursor movement relies on every group being closed by an End entry that records its offsets, which TokenBuffer builds itself and which stops every walk at the scope end; ThreadBound checks the thread id before every access and restricts Send to T: Copy; the casts and lifetime transmutes hold as commented; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "arbitrary"
+version = "1.5.0"
+reached-by = "fuzzing harness only"
+unsafe-code = "Five blocks: CString::from_vec_unchecked after removing every nul byte, str::from_utf8_unchecked on the prefix that from_utf8 already validated, and three blocks in array construction (ptr::write into MaybeUninit, a drop guard over the initialised prefix, and assume_init after all N writes)."
+reviewed = "Read every block. The nul bytes are removed by retain just before, the UTF-8 prefix comes from valid_up_to of a from_utf8 error over the same bytes, and the array guard drops only the initialised prefix if a callback fails or panics; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "libfuzzer-sys"
+version = "0.4.13"
+reached-by = "fuzzing harness only"
+unsafe-code = "Four sites of FFI with libFuzzer: the exported LLVMFuzzerTestOneInput, custom mutator and custom crossover entry points that build slices from libFuzzer's pointer and length, and one call to LLVMFuzzerMutate; the other matches are doc examples. The crate also compiles libFuzzer's C++ through its build script, which this review does not cover."
+reviewed = "Read every Rust block. The slices rely on libFuzzer passing a valid buffer of the stated length (max of size and max_size for the mutator), and fuzzer_mutate asserts size and max_size against the slice length before and after the call; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "cc"
+version = "1.11.1"
+reached-by = "fuzzing harness build script only (libfuzzer-sys builds with cc's parallel feature)"
+unsafe-code = "About thirty sites: libc FFI for the parallel job runner on Unix (pipe, fcntl, ioctl FIONREAD, poll, and the pidfd_open syscall on Linux; kqueue/kevent only on Apple and BSD), OwnedFd/File from_raw_fd and BorrowedFd::borrow_raw on descriptors just created or taken from the jobserver, Pin::new_unchecked and a no-op RawWaker in a tiny block_on executor, and a home-made OnceLock with unsafe impl Send/Sync; Windows FFI is cfg(windows) and not compiled on Linux."
+reviewed = "Read every block compiled on Linux. The FFI calls pass correctly sized locals and check return values, each from_raw_fd takes a descriptor the call just returned, the futures are pinned by shadowing so they cannot move, and OnceLock reads the value only after Once has completed with the same Send/Sync bounds as std; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "find-msvc-tools"
+version = "0.1.15"
+reached-by = "fuzzing harness build script only (dependency of cc)"
+unsafe-code = "About fifty-five sites of Windows FFI (registry, COM setup-config queries, LoadLibrary and GetProcAddress, windows-sys bindings), all in modules or an impl block under cfg(windows)."
+reviewed = "Checked the cfg gating in lib.rs and find_tools.rs: every unsafe site is cfg(windows), and on Linux find_tools compiles the cfg(not(windows)) stub, which has none, so no unsafe code from this crate is compiled on Linux x86_64 or aarch64; the Windows code was not read."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "jobserver"
+version = "0.1.35"
+reached-by = "fuzzing harness build script only (through cc's parallel feature)"
+unsafe-code = "About twenty-six sites compiled on Unix: libc FFI (pipe2, fcntl, fstat, poll, ioctl FIONREAD, sigaction, pthread_kill), File::from_raw_fd and borrow_raw on descriptor numbers read from MAKEFLAGS/CARGO_MAKEFLAGS, Command::pre_exec to clear close-on-exec, and the unsafe fn Client::from_env whose contract is that those numbers name descriptors the process may use; windows.rs and wasm.rs are not compiled on Linux."
+reviewed = "Read unix.rs and the unsafe parts of lib.rs. The descriptor claims rest on Cargo setting the jobserver variables for the build script, which it does, and the code checks each descriptor with fcntl (and fstat when asked) before use; the FFI calls use zeroed or correctly sized structures and check return values; no concern."
+reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "shlex"
+version = "2.0.1"
+reached-by = "fuzzing harness build script only (dependency of cc)"
+unsafe-code = "Six sites: two unsafe fn (Shlex::from_bytes and as_bytes_mut) whose contract is that the byte lexer was built from valid UTF-8, and four str/String from_utf8_unchecked calls on the byte lexer's and quoter's output."
+reviewed = "Read every block. The byte-level lexer and quoter only split on or insert ASCII bytes, so output built from a &str stays valid UTF-8, and the two unsafe fn hand the same promise to the caller; no concern."
+reviewed-on = "2026-11-27"

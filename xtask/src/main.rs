@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -11,6 +13,13 @@ use xtask::lint_tables::{
 use xtask::reference_mentions::mentions;
 use xtask::requirements::{TextFile, is_married_test, is_specification, requirement_findings};
 use xtask::task_outcome::{TaskError, TaskReport};
+use xtask::unsafe_code::{
+    UNSAFE_BLOCKS, crate_roots, roots_without_the_promise, unsafe_inventory_findings, unsafe_uses,
+};
+use xtask::unsafe_reviews::{
+    DependencyWithUnsafe, REVIEW_LIST, SOURCE_DIRECTORIES_NOT_BUILT_INTO_DEBAR, registry_packages,
+    unsafe_review_findings,
+};
 use xtask::workspace::Workspace;
 use xtask::{autofix, claiming};
 
@@ -23,6 +32,7 @@ const MIRI_CRATES: [&str; 1] = ["debar-platform"];
 const MIRI_FLAGS_FOR_THE_FILESYSTEM_GATE: &str = "-Zmiri-disable-isolation";
 const FUZZ_DIRECTORY: &str = "fuzz";
 const FUZZ_SECONDS_PER_TARGET: u32 = 60;
+const RELEASE_TARGETS: [&str; 2] = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"];
 
 #[derive(Clone, Copy)]
 enum Check {
@@ -34,10 +44,11 @@ enum Check {
     Layers,
     ReferenceMentions,
     Requirements,
+    UnsafeCode,
     Workflows,
 }
 
-const EVERY_CHANGE: [Check; 9] = [
+const EVERY_CHANGE: [Check; 10] = [
     Check::Format,
     Check::Lints,
     Check::Tests,
@@ -46,6 +57,7 @@ const EVERY_CHANGE: [Check; 9] = [
     Check::Layers,
     Check::ReferenceMentions,
     Check::Requirements,
+    Check::UnsafeCode,
     Check::Workflows,
 ];
 
@@ -60,6 +72,7 @@ impl Check {
             Self::Layers => "layers",
             Self::ReferenceMentions => "reference-mentions",
             Self::Requirements => "requirements",
+            Self::UnsafeCode => "unsafe-code",
             Self::Workflows => "workflows",
         }
     }
@@ -90,6 +103,7 @@ impl Check {
             Self::Layers => check_layers(root),
             Self::ReferenceMentions => check_reference_mentions(root),
             Self::Requirements => check_requirements(root),
+            Self::UnsafeCode => check_unsafe_code(root),
             Self::Workflows => run_command(root, "zizmor", &[WORKFLOWS]),
         }
     }
@@ -276,7 +290,78 @@ fn check_dependencies(root: &Path) -> Result<(), Failure> {
         &["deny", "--locked", "check", "--allow", "unused-wrapper"],
     );
     let exact = report_findings(&loose_requirements(&workspace(root)?));
-    every_failure([denied, exact])
+    let reviewed = check_unsafe_reviews(root);
+    every_failure([denied, exact, reviewed])
+}
+
+fn check_unsafe_reviews(root: &Path) -> Result<(), Failure> {
+    let findings = unsafe_review_findings(
+        &dependencies_with_unsafe(root)?,
+        &read_text(root, REVIEW_LIST)?,
+    )?;
+    report_findings(&findings)
+}
+
+fn dependencies_with_unsafe(root: &Path) -> Result<Vec<DependencyWithUnsafe>, Failure> {
+    let mut packages = Vec::new();
+    for directory in [root.to_path_buf(), root.join(FUZZ_DIRECTORY)] {
+        for target in RELEASE_TARGETS {
+            let metadata = command_output(
+                &directory,
+                "cargo",
+                &[
+                    "metadata",
+                    "--format-version",
+                    "1",
+                    "--locked",
+                    "--filter-platform",
+                    target,
+                ],
+            )?;
+            packages.extend(registry_packages(&metadata)?);
+        }
+    }
+    packages.sort_by(|left, right| (&left.name, &left.version).cmp(&(&right.name, &right.version)));
+    packages.dedup();
+    let mut found = Vec::new();
+    for package in packages {
+        let uses = unsafe_uses_under(Path::new(&package.directory), true)?;
+        if uses > 0 {
+            found.push(DependencyWithUnsafe {
+                name: package.name,
+                version: package.version,
+                uses,
+            });
+        }
+    }
+    Ok(found)
+}
+
+fn unsafe_uses_under(directory: &Path, is_package_root: bool) -> Result<usize, Failure> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|error| Failure(format!("cannot list {}: {error}", directory.display())))?;
+    let mut uses = 0usize;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| Failure(format!("cannot list {}: {error}", directory.display())))?;
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|error| Failure(format!("cannot read {}: {error}", path.display())))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if kind.is_dir() {
+            if !(is_package_root
+                && SOURCE_DIRECTORIES_NOT_BUILT_INTO_DEBAR.contains(&name.as_str()))
+            {
+                uses = uses.saturating_add(unsafe_uses_under(&path, false)?);
+            }
+        } else if kind.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
+            let bytes = std::fs::read(&path)
+                .map_err(|error| Failure(format!("cannot read {}: {error}", path.display())))?;
+            uses = uses.saturating_add(unsafe_uses(&String::from_utf8_lossy(&bytes)).len());
+        }
+    }
+    Ok(uses)
 }
 
 fn every_failure<const N: usize>(outcomes: [Result<(), Failure>; N]) -> Result<(), Failure> {
@@ -348,6 +433,42 @@ fn check_requirements(root: &Path) -> Result<(), Failure> {
     report_findings(&requirement_findings(&specifications, &married_tests))
 }
 
+fn check_unsafe_code(root: &Path) -> Result<(), Failure> {
+    let prefix = format!("{}/", root.display());
+    let mut roots = crate_roots(&metadata_without_dependencies(root)?, &prefix)?;
+    roots.extend(crate_roots(
+        &metadata_without_dependencies(&root.join(FUZZ_DIRECTORY))?,
+        &prefix,
+    )?);
+    let roots = roots
+        .into_iter()
+        .map(|crate_root| {
+            let source = TextFile {
+                text: read_text(root, &crate_root.path)?,
+                path: crate_root.path.clone(),
+            };
+            Ok((crate_root, source))
+        })
+        .collect::<Result<Vec<_>, Failure>>()?;
+    let sources = tracked_paths(root)?
+        .into_iter()
+        .filter(|path| {
+            Path::new(path)
+                .extension()
+                .is_some_and(|extension| extension == "rs")
+        })
+        .map(|path| {
+            Ok(TextFile {
+                text: read_text(root, &path)?,
+                path,
+            })
+        })
+        .collect::<Result<Vec<_>, Failure>>()?;
+    let mut findings = roots_without_the_promise(&roots);
+    findings.extend(unsafe_inventory_findings(&sources, &UNSAFE_BLOCKS));
+    report_findings(&findings)
+}
+
 fn report_findings<T: Display>(findings: &[T]) -> Result<(), Failure> {
     if findings.is_empty() {
         return Ok(());
@@ -357,12 +478,17 @@ fn report_findings<T: Display>(findings: &[T]) -> Result<(), Failure> {
 }
 
 fn workspace(root: &Path) -> Result<Workspace, Failure> {
-    let metadata = command_output(
-        root,
+    Ok(Workspace::from_cargo_metadata(
+        &metadata_without_dependencies(root)?,
+    )?)
+}
+
+fn metadata_without_dependencies(directory: &Path) -> Result<String, Failure> {
+    command_output(
+        directory,
         "cargo",
         &["metadata", "--format-version", "1", "--no-deps", "--locked"],
-    )?;
-    Ok(Workspace::from_cargo_metadata(&metadata)?)
+    )
 }
 
 fn tracked_paths(root: &Path) -> Result<Vec<String>, Failure> {

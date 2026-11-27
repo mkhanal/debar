@@ -94,3 +94,13 @@ What becomes of the databases a user loads: every line accounted for, and the im
 
 - The compile fails, naming the file and, for a line, its number.
 - No image is written.
+
+## A Compiled Image Is Written So That No One May Change It In Place
+
+- The compiler writes the image under another name and moves it into place whole.
+- The image it leaves is readable by every user and writable by none.
+
+## An Image Someone Else Could Change While Debar Uses It Is Refused
+
+- Debar refuses an image that any user may write, naming the image, and scans nothing.
+- Debar refuses an image owned by a user other than the one it runs as or the administrator, naming the image, and scans nothing.

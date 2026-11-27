@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 #![allow(clippy::unwrap_used)]
 
 use xtask::board_items::{BoardField, FieldType, FieldUpdate, FieldValue};

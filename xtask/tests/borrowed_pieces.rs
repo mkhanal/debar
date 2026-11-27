@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use xtask::borrowed_pieces::{ReleaseBlocker, release_blockers};
 
 const ROADMAP_WITHOUT_BORROWING: &str = "\

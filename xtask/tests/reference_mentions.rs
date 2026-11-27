@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use xtask::reference_mentions::{COMPARISON_WORKFLOW, REFERENCE_SCANNER_NAMES, mentions};
 
 fn every_name() -> impl Iterator<Item = &'static str> {

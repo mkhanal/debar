@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use xtask::lint_tables::{
     LintTableFinding, MemberManifest, clippy_configurations_outside_the_root, lint_table_findings,
 };

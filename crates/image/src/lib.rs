@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod backtracking_program;
 mod builder;
 mod byte_rarity;

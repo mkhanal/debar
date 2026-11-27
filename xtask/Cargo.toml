@@ -12,6 +12,7 @@ toml.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -27,5 +28,7 @@ string_slice = "deny"
 todo = "deny"
 unreachable = "deny"
 undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unnecessary_safety_comment = "deny"
 disallowed_methods = "allow"
 disallowed_types = "allow"

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod evidence;
 mod layers;
 mod ledger;

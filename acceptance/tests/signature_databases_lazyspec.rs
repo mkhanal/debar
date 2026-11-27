@@ -1,6 +1,8 @@
+#![forbid(unsafe_code)]
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 
 use acceptance::{
     comparison_report, compile, detections, lowercase_hex, members_of_pinned_databases,
@@ -871,4 +873,63 @@ fn a_malformed_certificate_icon_url_rule_or_switch_line_or_a_malformed_signature
         let message = refused(&databases, &directory, case);
         assert!(message.contains(named), "{REQUIREMENT}: {case}: {message}");
     }
+}
+
+const ANOTHER_USER: u32 = 54_321;
+
+#[test]
+fn a_compiled_image_is_written_so_that_no_one_may_change_it_in_place() {
+    const REQUIREMENT: &str = "A Compiled Image Is Written So That No One May Change It In Place";
+    let compiled = official_image().unwrap();
+    let directory = compiled.image.parent().unwrap();
+
+    let permissions = std::fs::metadata(&compiled.image)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(permissions & 0o777, 0o444, "{REQUIREMENT}");
+    let left_beside: Vec<String> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".partial"))
+        .collect();
+    assert_eq!(left_beside, Vec::<String>::new(), "{REQUIREMENT}");
+}
+
+#[test]
+fn an_image_someone_else_could_change_while_debar_uses_it_is_refused() {
+    const REQUIREMENT: &str = "An Image Someone Else Could Change While Debar Uses It Is Refused";
+    let compiled = official_image().unwrap();
+    let directory = scratch_directory("changeable-image").unwrap();
+    let input = directory.join("clean.txt");
+    write_file(&input, b"a small clean file to scan\n").unwrap();
+
+    let writable = directory.join("writable.image");
+    std::fs::copy(&compiled.image, &writable).unwrap();
+    std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o666)).unwrap();
+    let refused = comparison_report(&writable, &input, &directory);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|failure| failure.0.contains("writable.image")),
+        "{REQUIREMENT}"
+    );
+    assert!(!directory.join("report.jsonl").exists(), "{REQUIREMENT}");
+
+    let foreign_directory =
+        std::env::temp_dir().join(format!("debar-foreign-image-{}", std::process::id()));
+    std::fs::create_dir_all(&foreign_directory).unwrap();
+    let foreign = foreign_directory.join("foreign.image");
+    std::fs::copy(&compiled.image, &foreign).unwrap();
+    std::fs::set_permissions(&foreign, std::fs::Permissions::from_mode(0o444)).unwrap();
+    std::os::unix::fs::chown(&foreign, Some(ANOTHER_USER), None).unwrap();
+    let refused = comparison_report(&foreign, &input, &directory);
+    std::fs::remove_dir_all(&foreign_directory).unwrap();
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|failure| failure.0.contains("foreign.image")),
+        "{REQUIREMENT}"
+    );
+    assert!(!directory.join("report.jsonl").exists(), "{REQUIREMENT}");
 }

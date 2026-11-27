@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use xtask::issue_brief::{IssueComment, IssueView, issue_brief};
 
 fn issue() -> IssueView {
