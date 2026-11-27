@@ -360,3 +360,11 @@ Each becomes a requirement in `specs/` with its married test in the piece that f
 | Image | 496 MB; compile 20.3 s (`hyperfine`, 3 runs), 2.1 GiB peak |
 | Start, readiness and one small scan | 4,108,274 instructions; 2.8 ms wall-clock median; 8 KiB of the image resident from a cold cache, 168 KiB private once ready |
 | Throughput, share of the budget (twice the reference) | text 77 %, binary 67 %, PDF 86 %, OLE2 55 %, tar 70 %, system files 55 % |
+
+### 2026-11-27 — Aim for fifty times the reference's speed, and never lose speed once gained
+
+**Decision.** Twice the reference scanner's throughput stays the hard floor in `specs/`. Above it, the target is fifty times the reference on every kind of file in the standard corpus, single-threaded and at equal concurrency for the daemon. Each corpus kind's instruction budget is a ratchet: it is set to the best measured figure plus a small tolerance, so a change that slows Debar fails even while it is still above twice the reference. A budget only tightens; loosening one is a person's decision, recorded with the measurement that forced it.
+
+**Why.** The owner set fifty times as the aim: the reference is not a fast baseline. A floor alone would let speed already won drain away one reasonable change at a time.
+
+**Consequence.** Performance is a standing track, not a final slice: each stage is profiled, work no signature can observe is skipped, and the larger levers (a SIMD prefilter behind a safe platform primitive, cheaper verification, cheaper digests, parallel scanning of independent objects) are measured against every corpus kind. Progress against fifty times is reported with every change that moves it.

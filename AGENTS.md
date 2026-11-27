@@ -64,6 +64,18 @@ Use these words in code, specifications and documents, and no second word for th
 - Tests come before the code they prove.
 - Anything learned about a reference scanner on the way is written into `study/` before the task ends.
 
+## Handing work to an agent
+
+When work is split between agents, each task is sized so its agent can judge its own result, and briefed as a colleague would be, not handed a sliver.
+
+- **A task is one outcome a reviewer can check end to end**: a requirement passes, a measurement moves, a harness count changes, a note answers a question. Never a function or a file.
+- **Too small** when the brief dictates how (signatures, file layout, steps), when the agent cannot tell whether its result is right without someone else's piece, or when nothing checkable stands alone. Merge it into a larger task.
+- **Too big** when it holds two outcomes that could be checked separately, when it would outgrow one agent's context, or when it reaches into the internals of more than about two crates. Split it into tasks that each meet the first rule.
+- **Every brief carries** why (the decision, requirement or aim it serves), where it sits (the roadmap piece, neighbouring work in flight, the interfaces they expose or expect), what is settled and what is the agent's to decide and record, how it will be checked, and where to start reading. Pointing at sections is a starting place, not a fence: the agent may read anything it needs.
+- **The agent owns the how.** It pushes back when the brief looks wrong, reports the decisions it took and anything it saw outside its task that looked wrong, and asks the `signature-expert` or whoever directs the work rather than guessing.
+- **Parallel tasks** share their interfaces and know what each other is building, each in its own worktree; whoever directs the work reviews every merge against the whole design.
+- **An agent pushes and stops.** Whoever directs the work watches CI and hands failures back to the agent that still holds the context. While working, an agent runs the tests of what it changes, and the full check once before it pushes.
+
 ## Commits and pull requests
 
 - The message says what changed and why. That is where the journey lives (Constitution §17).

@@ -21,7 +21,7 @@ A compatible interface is also a part. It covers what a user of that scanner see
 1. **A drop-in replacement.** For each supported format, Debar works with every signature and handles every case the format's own scanner handles.
 2. **A much smaller footprint.** It uses far less memory and other system resources than that scanner.
 3. **Near-instant start.** It is ready to scan almost as soon as it starts.
-4. **Faster scanning.** It scans the same files faster than that scanner.
+4. **Faster scanning.** It scans the same files far faster than that scanner: at least twice as fast on every kind of file, aiming for fifty times.
 
 The second, third and fourth aims are budgets every change is tested against (Constitution §12), not hopes.
 
