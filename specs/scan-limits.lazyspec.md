@@ -24,6 +24,11 @@ What a scan leaves unscanned because of a size, and what it reports for it.
 - Asked for every detection, it reports the set of names the reference scanner reports for the same file and databases; asked for one, it reports one of them.
 - The scan completes, and the verdict is reported.
 
+## A File Is Scanned To Its End However Many Signatures It Triggers That Cannot Report In It
+
+- A file of 17 MiB holding the trigger of 400 logical signatures with a regular expression, each with a container condition the file does not meet, completes with its verdict and the detection at its last bytes.
+- Those signatures add nothing to the work the scan time limit counts.
+
 ## An Object Deeper Than The Recursion Limit Is Not Scanned
 
 - With a recursion limit of N, the deepest object scanned is at level N − 1, the top-level file being level 0.

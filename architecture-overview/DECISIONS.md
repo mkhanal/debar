@@ -723,3 +723,15 @@ The ratchet's figures are callgrind's (the requirement's count) and the table's 
 - **Against the reference's daemon at equal concurrency** (ten scanning threads, study knowledge "Baseline: scan speed"): system files 264.5 against 56.1 to 58.3 MiB/s, 4.5 to 4.7 times; single-threaded the same part is 73.1 against 10.2 to 11.7, 6.2 to 7.2 times. Debar's lead shrinks at ten threads because of the largest-file cap above, which the reference's slower rate never reaches. The reference's documents figure (12.7 to 13.2 MiB/s) covers all ten kinds and the unpacking Debar does not do yet, so it is not compared.
 
 **Why.** The aim of fifty times the reference is judged single-threaded and at equal concurrency (the decision "Aim for fifty times…"); a single core could not meet the second half at all.
+
+### 2026-11-27 — A regular expression is searched only for a signature that can report in the object
+
+**Decision.** After the walk, a logical signature's regular expression is searched only when the signature could report in this object: it passes the potentially-unwanted settings, and its `Container`, `Intermediates`, `FileSize`, `EntryPoint` and `NumberOfSections` conditions hold for the object. These are fixed for the object before any expression runs, and an expression's matches count only toward its own signature, so skipping it changes no detection, no rescan and no program trigger.
+
+- **Do-not-cache is not inferred for a skipped search.** A failed container or intermediates condition marks the object do-not-cache only when the expression held; a skipped search leaves that unknown, and it is left unmarked. The clean cache is keyed on the object's ancestry (the decision on the scan core), so a container-dependent signature can never be hidden by a cache hit.
+
+**Measured** on the official image in the toolchain image, `debar measure-scan`, one thread: the generated ZIP part went from failing on its first 16 MiB file (`scanning read more than the 3355443200 bytes this scan is allowed to read`; 397 expressions searched over each ZIP, from signatures for objects inside mail, triggered by `PK` at offset 0) to 296,896,917 work units for 98,965,639 bytes, 3.0 a byte; two 4 MiB ZIPs from 3,482,389,008 units to 26,183,376 (399 a byte to 3.0). OOXML is 3.0 a byte. The whole documents part, all ten kinds, now finishes: 180.9 MiB/s on one thread and 1,216.5 MiB/s on ten, against the reference daemon's 12.7 to 13.2 MiB/s on ten (study knowledge "Baseline: scan speed"), which unpacks the archives and documents Debar does not unpack yet and so is not a like-for-like comparison.
+
+**Why.** Each search reads a large object again through the input gate, so a few hundred searches that could never report used up the read allowance and the work budget of a scan whose verdict they could not change.
+
+**Consequence.** "A File Is Scanned To Its End However Many Signatures It Triggers That Cannot Report In It" holds this. Searches that can report still each read a large object once more; a file over 4 MiB that triggers about 200 such expressions would still reach the read allowance.

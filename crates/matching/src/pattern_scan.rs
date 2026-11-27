@@ -1024,9 +1024,8 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             image: self.image,
             windows: self.report_windows,
             image_fuzzy_hash: self.image_fuzzy_hash,
-            largest_object_for_regular_expressions: self
-                .settings
-                .largest_object_for_regular_expressions,
+            settings: self.settings,
+            context: self.context,
             layout: match self.layout_need {
                 LayoutNeed::Executable => match &self.executable_layout {
                     Some(layout) => LayoutState::Known(layout),

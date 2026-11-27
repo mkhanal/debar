@@ -10,8 +10,8 @@
 use debar_image::{
     ByteComparison, ByteEncoding, ByteOrder, ByteSet, Category, ContainerSignature,
     ContentSubsignature, CountComparison, CountTest, Expression, ExpressionAnchoring,
-    ExpressionForm, ExpressionMatches, ExpressionTree, Greed, Image, ImageBuilder, Indicator,
-    KindCondition, KindDescription, LogicalConditions, LogicalOutcome, LogicalSignature,
+    ExpressionForm, ExpressionMatches, ExpressionTree, Greed, Image, ImageBuilder, InclusiveRange,
+    Indicator, KindCondition, KindDescription, LogicalConditions, LogicalOutcome, LogicalSignature,
     LookDirection, MaskedByte, ObjectKind, OwnBytes, Pattern, PatternElement, Placement,
     RecognitionRank, RegularExpressionSubsignature, ReportWindows, SignatureGroup,
     SignatureProgramId, SizeCondition, Subsignature, TreeRepetition, ValueComparison,
@@ -767,4 +767,68 @@ fn an_object_too_large_to_hold_whole_is_matched_to_its_end() {
         detected_with(&image, &missing, None, None),
         Vec::<String>::new()
     );
+}
+
+fn detected_inside(
+    conditions: &LogicalConditions,
+    ancestors: &[ObjectKind],
+    object: &[u8],
+) -> bool {
+    let signature = with_expression(leaf(1), regular("x[0-9]+y"));
+    let mut builder = ImageBuilder::new();
+    builder
+        .add_logical_signature(&LogicalSignature {
+            outcome: LogicalOutcome::Detection,
+            group: GENERIC,
+            category: Category::Malware,
+            name: signature.name,
+            indicator: Indicator::Strong,
+            expression: &signature.expression,
+            subsignatures: &signature.subsignatures,
+            conditions,
+        })
+        .unwrap();
+    builder.describe_object_kind(ObjectKind::BinaryData, binary_data());
+    let image = builder.finish().unwrap();
+    let image = Image::open(&image).unwrap();
+    let request = PatternRequest {
+        selection: GroupSelection::ForKind(ObjectKind::BinaryData),
+        settings: PatternSettings {
+            potentially_unwanted: false,
+            unwanted_categories: UnwantedCategories::Every,
+            every_match: true,
+            largest_object_for_regular_expressions: None,
+        },
+        object_length: object.len() as u64,
+        context: ObjectContext {
+            ancestors,
+            retyped: false,
+        },
+        image_fuzzy_hash: None,
+    };
+    scan_object(&image, request, || None, object)
+        .unwrap()
+        .logical
+        .detections()
+        .next()
+        .is_some()
+}
+
+#[test]
+fn a_regular_expression_is_matched_only_where_its_signatures_conditions_can_hold() {
+    let in_zip = LogicalConditions {
+        container: Some(KindCondition::Kind(ObjectKind::Zip)),
+        ..LogicalConditions::default()
+    };
+    let object = b"MARK....x123y";
+    assert!(detected_inside(&in_zip, &[ObjectKind::Zip], object));
+    assert!(!detected_inside(&in_zip, &[], object));
+    assert!(!detected_inside(&in_zip, &[ObjectKind::Rar], object));
+
+    let sized = |lowest, highest| LogicalConditions {
+        file_size: Some(InclusiveRange { lowest, highest }),
+        ..LogicalConditions::default()
+    };
+    assert!(detected_inside(&sized(13, 13), &[], object));
+    assert!(!detected_inside(&sized(14, 20), &[], object));
 }

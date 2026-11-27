@@ -351,6 +351,37 @@ impl<'m> LogicalState<'m> {
             .map_or(1, |count| u64::from(count.matches()))
     }
 
+    pub(crate) fn may_report_here(
+        &self,
+        id: LogicalSignatureId,
+        image: &Image<'_>,
+        settings: &PatternSettings<'_>,
+        context: &ObjectContext<'_>,
+        object_length: u64,
+        layout: LayoutState<'_>,
+    ) -> Result<bool, PatternScanError> {
+        let record = self
+            .view
+            .signature(id)
+            .map_err(|reason| self.malformed(reason))?;
+        if !reported_under_the_settings(image, settings, &record)? {
+            return Ok(false);
+        }
+        let conditions = self
+            .view
+            .conditions(&record)
+            .map_err(|reason| self.malformed(reason))?;
+        let Some(conditions) = &conditions else {
+            return Ok(true);
+        };
+        Ok(
+            match conditions_before_the_outcome(conditions, context, object_length, layout) {
+                ConditionsOutcome::Hold => true,
+                ConditionsOutcome::FailOnAncestors | ConditionsOutcome::Fail => false,
+            },
+        )
+    }
+
     pub(crate) fn evaluate(
         &self,
         image: &Image<'_>,
@@ -369,10 +400,7 @@ impl<'m> LogicalState<'m> {
                 .view
                 .signature(id)
                 .map_err(|reason| self.malformed(reason))?;
-            if record.category == Category::PotentiallyUnwanted
-                && !(settings.potentially_unwanted
-                    && settings.unwanted_categories.admit(image, record.name)?)
-            {
+            if !reported_under_the_settings(image, settings, &record)? {
                 continue;
             }
             let holds = self
@@ -430,6 +458,20 @@ impl<'m> LogicalState<'m> {
         }
         Ok(())
     }
+}
+
+fn reported_under_the_settings(
+    image: &Image<'_>,
+    settings: &PatternSettings<'_>,
+    record: &LogicalSignatureRecord<'_>,
+) -> Result<bool, PatternScanError> {
+    Ok(match record.category {
+        Category::PotentiallyUnwanted => {
+            settings.potentially_unwanted
+                && settings.unwanted_categories.admit(image, record.name)?
+        }
+        Category::Malware => true,
+    })
 }
 
 enum ConditionsOutcome {

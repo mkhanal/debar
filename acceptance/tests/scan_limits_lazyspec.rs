@@ -1,12 +1,14 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use acceptance::largest_file::{LARGEST_FILE, expressions_to_the_end, matched_only_to_the_end};
 use acceptance::{
     CompiledImage, comparison_report, comparison_report_objects, comparison_report_with, compile,
-    detections, scratch_directory, write_file,
+    detections, release_binaries, run, scratch_directory, write_file,
 };
 use serde_json::Value;
 
@@ -88,6 +90,79 @@ fn a_file_up_to_the_file_size_limit_is_scanned_to_its_end() {
     let one = detections(&first);
     assert_eq!(one.len(), 1, "{REQUIREMENT}");
     assert!(reference.contains(&one[0].as_str()), "{REQUIREMENT}");
+}
+
+const TRIGGERED_ELSEWHERE: usize = 400;
+const TRIGGERED_FILE_LENGTH: usize = 17 * 1024 * 1024;
+const MOST_WORK_FOR_THE_TRIGGERED_FILE: u64 = 2 * 17 * 1024 * 1024;
+const LAST_BYTES: &[u8] = b"LASTBYTE";
+const LAST_BYTES_BODY: &str = "Test.Last:0:EOF-8:4c41535442595445\n";
+
+fn triggered_only_in_mail(test: &str) -> (PathBuf, CompiledImage) {
+    let directory = scratch_directory(test).unwrap();
+    let databases = directory.join("databases");
+    std::fs::create_dir(&databases).unwrap();
+    let mut in_mail = String::new();
+    for index in 0..TRIGGERED_ELSEWHERE {
+        writeln!(
+            in_mail,
+            "Test.InMail{index};Engine:81-255,Container:CL_TYPE_MAIL,Target:0;1;0:504b;0/mail{index}[0-9]+end/"
+        )
+        .unwrap();
+    }
+    write_file(&databases.join("local.ldb"), in_mail.as_bytes()).unwrap();
+    write_file(&databases.join("local.ndb"), LAST_BYTES_BODY.as_bytes()).unwrap();
+    let compiled = compile(&databases, &directory, "triggered-only-in-mail").unwrap();
+    (directory, compiled)
+}
+
+fn triggering_file(directory: &Path, name: &str, ending: &[u8]) -> PathBuf {
+    let mut contents = vec![b'.'; TRIGGERED_FILE_LENGTH];
+    contents[..2].copy_from_slice(b"PK");
+    contents[TRIGGERED_FILE_LENGTH.checked_sub(ending.len()).unwrap()..].copy_from_slice(ending);
+    let input = directory.join(name);
+    write_file(&input, &contents).unwrap();
+    input
+}
+
+fn work_units_to_scan(image: &Path, input: &Path) -> u64 {
+    let measured = run(Command::new(&release_binaries().unwrap().debar)
+        .arg("measure-scan")
+        .arg("--image")
+        .arg(image)
+        .arg(input))
+    .unwrap();
+    let measured: Value = serde_json::from_slice(&measured).unwrap();
+    measured["work_units"].as_u64().unwrap()
+}
+
+#[test]
+fn a_file_is_scanned_to_its_end_however_many_signatures_it_triggers_that_cannot_report_in_it() {
+    const REQUIREMENT: &str =
+        "A File Is Scanned To Its End However Many Signatures It Triggers That Cannot Report In It";
+    let (directory, compiled) = triggered_only_in_mail("triggered-only-in-mail");
+    let ending_detected = triggering_file(&directory, "ending-detected", LAST_BYTES);
+    let ending_clean = triggering_file(&directory, "ending-clean", b"........");
+
+    let every = comparison_report_with(
+        &compiled.image,
+        &["--every-match"],
+        &ending_detected,
+        &directory,
+    )
+    .unwrap();
+    let work = work_units_to_scan(&compiled.image, &ending_clean);
+
+    assert_eq!(
+        detections(&every),
+        ["Test.Last.UNOFFICIAL"],
+        "{REQUIREMENT}"
+    );
+    assert_eq!(every["verdict"], "strong_indicator", "{REQUIREMENT}");
+    assert!(
+        work < MOST_WORK_FOR_THE_TRIGGERED_FILE,
+        "{REQUIREMENT}: {work} work units for {TRIGGERED_FILE_LENGTH} bytes"
+    );
 }
 
 const ARCHIVE_MARK: &[u8] = b"ARCHIVEMARK";

@@ -16,9 +16,10 @@ use zerocopy::IntoBytes;
 
 use crate::byte_values::comparisons_hold;
 use crate::executable_layout::{LayoutState, placed_starts};
+use crate::logical_state::ObjectContext;
 use crate::logical_state::{CountedMatches, LogicalState};
 use crate::paged_expression_search::{PagedSearchFailure, search_in_place, search_lazily};
-use crate::pattern_scan::PatternScanError;
+use crate::pattern_scan::{PatternScanError, PatternSettings};
 use crate::whole_object::{ObjectPages, PagedSubject, WholeObject};
 use crate::work_meter::WorkMeter;
 
@@ -29,7 +30,8 @@ pub(crate) struct PlugInRequest<'l, 'm> {
     pub image: &'l Image<'m>,
     pub windows: Option<ReportWindows>,
     pub image_fuzzy_hash: Option<u64>,
-    pub largest_object_for_regular_expressions: Option<u64>,
+    pub settings: PatternSettings<'l>,
+    pub context: ObjectContext<'l>,
     pub layout: LayoutState<'l>,
 }
 
@@ -71,6 +73,7 @@ pub(crate) fn match_plug_ins<'m>(
         }
     }
     if request
+        .settings
         .largest_object_for_regular_expressions
         .is_some_and(|largest| object_length > largest)
     {
@@ -81,6 +84,16 @@ pub(crate) fn match_plug_ins<'m>(
             return Ok(());
         }
         if !trigger.runs_unarmed && !state.is_armed(trigger.signature) {
+            continue;
+        }
+        if !state.may_report_here(
+            trigger.signature,
+            request.image,
+            &request.settings,
+            &request.context,
+            object_length,
+            request.layout,
+        )? {
             continue;
         }
         let record = plug_ins
