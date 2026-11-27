@@ -1,4 +1,5 @@
-use crate::report::Limit;
+use debar_formats::{Limit, Room};
+
 use crate::settings::Limits;
 
 pub(crate) struct Ledger {
@@ -31,27 +32,20 @@ impl Ledger {
     }
 
     pub(crate) fn admit(&self, needed: u64) -> Result<(), Limit> {
-        if self
-            .limits
-            .largest_scan
-            .is_some_and(|largest| needed > largest.saturating_sub(self.scanned_bytes))
-        {
-            return Err(Limit::LargestScan);
+        self.room().admit(needed)
+    }
+
+    pub(crate) fn room(&self) -> Room {
+        Room {
+            largest_file: self.limits.largest_file,
+            scan_bytes_left: self
+                .limits
+                .largest_scan
+                .map(|largest| largest.saturating_sub(self.scanned_bytes)),
+            files_left: self
+                .limits
+                .most_files
+                .map(|most| most.saturating_sub(self.files)),
         }
-        if self
-            .limits
-            .largest_file
-            .is_some_and(|largest| needed > largest)
-        {
-            return Err(Limit::LargestFile);
-        }
-        if self
-            .limits
-            .most_files
-            .is_some_and(|most| self.files >= most)
-        {
-            return Err(Limit::MostFiles);
-        }
-        Ok(())
     }
 }

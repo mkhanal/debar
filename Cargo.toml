@@ -4,6 +4,7 @@ members = [
     "acceptance",
     "crates/clamav-signatures",
     "crates/compiler",
+    "crates/formats",
     "crates/image",
     "crates/interfaces",
     "crates/matching",
@@ -21,10 +22,12 @@ publish = false
 
 [workspace.dependencies]
 base64ct = { version = "=1.8.3", default-features = false, features = ["alloc"] }
+cap = { version = "=0.1.2", default-features = false, features = ["stats"] }
 cms = { version = "=0.2.3", default-features = false, features = ["alloc"] }
 const-oid = { version = "=0.9.6", default-features = false, features = ["db"] }
 der = { version = "=0.7.10", default-features = false, features = ["alloc", "oid"] }
 debar-clamav-signatures = { path = "crates/clamav-signatures" }
+debar-formats = { path = "crates/formats" }
 debar-image = { path = "crates/image" }
 debar-matching = { path = "crates/matching" }
 debar-platform = { path = "crates/platform" }

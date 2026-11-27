@@ -1,14 +1,17 @@
+use debar_formats::Object;
 use debar_image::ObjectKind;
 use debar_matching::{DigestNeed, ObjectDigests};
 use debar_platform::input::InputError;
 
 use crate::evidence::Evidence;
-use crate::object_bytes::{ObjectBytes, ObjectWindow, digests_of};
+use crate::object_bytes::{ObjectBytes, digests_of};
 use crate::report::{LayerId, Verdict};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Arrival {
     TopLevel,
+    Part,
+    View,
     Embedded,
     Retyped,
 }
@@ -19,7 +22,7 @@ pub(crate) struct Layer<'o> {
     pub(crate) depth: u32,
     pub(crate) arrival: Arrival,
     pub(crate) kind: Option<ObjectKind>,
-    pub(crate) bytes: ObjectWindow<'o>,
+    pub(crate) bytes: Object<'o>,
     pub(crate) evidence: Evidence,
     pub(crate) trusted: bool,
     pub(crate) do_not_cache: bool,
@@ -27,7 +30,7 @@ pub(crate) struct Layer<'o> {
 }
 
 impl<'o> Layer<'o> {
-    fn new(id: LayerId, parent: Option<&Self>, arrival: Arrival, bytes: ObjectWindow<'o>) -> Self {
+    fn new(id: LayerId, parent: Option<&Self>, arrival: Arrival, bytes: Object<'o>) -> Self {
         Self {
             id,
             parent: parent.map(|parent| parent.id),
@@ -73,12 +76,7 @@ pub(crate) struct Layers<'o> {
 impl<'o> Layers<'o> {
     pub(crate) fn with_top_level(bytes: &'o dyn ObjectBytes) -> Self {
         Self {
-            top_level: Layer::new(
-                LayerId(0),
-                None,
-                Arrival::TopLevel,
-                ObjectWindow::whole(bytes),
-            ),
+            top_level: Layer::new(LayerId(0), None, Arrival::TopLevel, Object::borrowed(bytes)),
             nested: Vec::new(),
             pushed: 0,
         }
@@ -96,7 +94,7 @@ impl<'o> Layers<'o> {
         self.nested.last_mut().unwrap_or(&mut self.top_level)
     }
 
-    pub(crate) fn push(&mut self, arrival: Arrival, bytes: ObjectWindow<'o>) {
+    pub(crate) fn push(&mut self, arrival: Arrival, bytes: Object<'o>) {
         self.pushed = self.pushed.saturating_add(1);
         let child = Layer::new(LayerId(self.pushed), Some(self.current()), arrival, bytes);
         self.nested.push(child);
@@ -118,6 +116,7 @@ impl<'o> Layers<'o> {
             .take(below_current)
             .rev()
             .chain((!self.nested.is_empty()).then_some(&self.top_level))
+            .filter(|layer| layer.arrival != Arrival::View)
             .map(|layer| layer.kind.unwrap_or(ObjectKind::Untyped))
             .collect()
     }

@@ -15,6 +15,13 @@ pub enum Matching {
     EveryMatch,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Facts {
+    #[default]
+    NotGathered,
+    Gathered,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     pub largest_file: Option<u64>,
@@ -43,6 +50,7 @@ pub struct ScanSettings<'s> {
     pub largest_object_for_regular_expressions: Option<u64>,
     pub limits: Limits,
     pub alert_on_limits: bool,
+    pub facts: Facts,
 }
 
 impl<'s> ScanSettings<'s> {

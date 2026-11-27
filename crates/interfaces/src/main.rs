@@ -7,7 +7,9 @@ use std::process::ExitCode;
 use debar_interfaces::{measure_scan, write_comparison_report};
 use debar_matching::UnwantedCategories;
 use debar_platform::command_line::arguments;
-use debar_scan::{DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS, Limits, Matching, ScanSettings};
+use debar_scan::{
+    DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS, Facts, Limits, Matching, ScanSettings,
+};
 
 const DEFAULT_RECURSION_LEVELS: u32 = 17;
 const MOST_RECURSION_LEVELS: u32 = 100;
@@ -58,6 +60,7 @@ impl Unwanted {
             largest_object_for_regular_expressions,
             limits: scan_limits.limits,
             alert_on_limits: scan_limits.alert_on_limits,
+            facts: Facts::NotGathered,
         }
     }
 }

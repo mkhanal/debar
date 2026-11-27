@@ -7,9 +7,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+debar-formats.workspace = true
 debar-image.workspace = true
 debar-matching.workspace = true
 debar-platform.workspace = true
+
+[dev-dependencies]
+cap.workspace = true
 
 [lints]
 workspace = true

@@ -312,3 +312,11 @@ reached-by = "fuzzing harness build script only (dependency of cc)"
 unsafe-code = "Six sites: two unsafe fn (Shlex::from_bytes and as_bytes_mut) whose contract is that the byte lexer was built from valid UTF-8, and four str/String from_utf8_unchecked calls on the byte lexer's and quoter's output."
 reviewed = "Read every block. The byte-level lexer and quoter only split on or insert ASCII bytes, so output built from a &str stays valid UTF-8, and the two unsafe fn hand the same promise to the caller; no concern."
 reviewed-on = "2026-11-27"
+
+[[review]]
+crate = "cap"
+version = "0.1.2"
+reached-by = "tests and the fuzzing harness only: the scan crate's container-parts tests and the scan_core fuzz target install it as the global allocator to measure and bound a scan's heap"
+unsafe-code = "One unsafe impl of GlobalAlloc for Cap<H> (alloc, dealloc, alloc_zeroed, realloc), each forwarding to the wrapped allocator, with Layout::from_size_align_unchecked in realloc; the Alloc impl behind the nightly feature is not compiled."
+reviewed = "Read the whole of lib.rs. Every method checks and adjusts the remaining-bytes counter with atomics and either forwards the caller's own pointer and layout unchanged to the wrapped allocator or returns null, which the GlobalAlloc contract allows; realloc rebuilds the layout from the old layout's alignment and the requested size, which GlobalAlloc::realloc already requires to be valid. No pointer is made or offset by the crate itself; no concern."
+reviewed-on = "2026-11-27"

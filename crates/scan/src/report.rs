@@ -1,7 +1,8 @@
 use std::fmt;
 
+use debar_formats::{Fact, Limit};
 use debar_image::{ImageError, ObjectKind};
-use debar_matching::PatternScanError;
+use debar_matching::{ContainerEntryError, PatternScanError};
 use debar_platform::input::InputError;
 
 use crate::typing::TypingError;
@@ -24,17 +25,15 @@ pub struct Reported {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Limit {
-    LargestFile,
-    LargestScan,
-    MostFiles,
-    DeepestLevel,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LimitEvent {
     pub limit: Limit,
     pub layer: LayerId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectFact {
+    pub layer: LayerId,
+    pub fact: Fact,
 }
 
 #[derive(Debug)]
@@ -44,6 +43,19 @@ pub enum ScanFailure {
     Patterns(PatternScanError),
     Typing(TypingError),
     KindNotDescribed(ObjectKind),
+    ContainerEntries(ContainerEntryError),
+    PartOutsideItsObject {
+        offset: u64,
+        length: u64,
+        object_length: u64,
+    },
+    ProducedBeyondRoom {
+        length: u64,
+        room: u64,
+    },
+    ModuleOutputsBeyondBound {
+        most: u64,
+    },
 }
 
 impl fmt::Display for ScanFailure {
@@ -56,6 +68,25 @@ impl fmt::Display for ScanFailure {
             Self::KindNotDescribed(kind) => {
                 write!(formatter, "the image does not describe the kind {kind:?}")
             }
+            Self::ContainerEntries(error) => {
+                write!(formatter, "cannot test a container entry: {error}")
+            }
+            Self::PartOutsideItsObject {
+                offset,
+                length,
+                object_length,
+            } => write!(
+                formatter,
+                "a format module gave a part of {length} bytes at {offset}, beyond the {object_length} bytes of its object"
+            ),
+            Self::ProducedBeyondRoom { length, room } => write!(
+                formatter,
+                "a format module produced {length} bytes to hold where {room} bytes were left to it"
+            ),
+            Self::ModuleOutputsBeyondBound { most } => write!(
+                formatter,
+                "format modules gave more than {most} views, entries and facts in one scan"
+            ),
         }
     }
 }
@@ -83,6 +114,12 @@ impl From<PatternScanError> for ScanFailure {
     }
 }
 
+impl From<ContainerEntryError> for ScanFailure {
+    fn from(error: ContainerEntryError) -> Self {
+        Self::ContainerEntries(error)
+    }
+}
+
 impl From<TypingError> for ScanFailure {
     fn from(error: TypingError) -> Self {
         Self::Typing(error)
@@ -101,4 +138,5 @@ pub struct ScanReport {
     pub reported: Vec<Reported>,
     pub completion: Completion,
     pub limits: Vec<LimitEvent>,
+    pub facts: Vec<ObjectFact>,
 }

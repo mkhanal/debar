@@ -527,7 +527,7 @@ fn a_child_beyond_the_deepest_level_is_not_scanned_and_raises_the_one_limit_aler
         .iter()
         .map(|event| event.limit)
         .collect();
-    assert_eq!(limits, [Limit::DeepestLevel, Limit::DeepestLevel]);
+    assert_eq!(limits, [Limit::DeepestLevel]);
     assert_eq!(
         scanned.names_on(0),
         ["Test.Embedded", "Test.Limits.Recursion"]

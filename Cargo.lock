@@ -49,6 +49,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cap"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f125eb85b84a24c36b02ed1d22c9dd8632f53b3cde6e4d23512f94021030003"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -129,6 +135,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "debar-formats"
+version = "0.0.0"
+dependencies = [
+ "debar-image",
+ "debar-platform",
+]
+
+[[package]]
 name = "debar-image"
 version = "0.0.0"
 dependencies = [
@@ -176,6 +190,8 @@ dependencies = [
 name = "debar-scan"
 version = "0.0.0"
 dependencies = [
+ "cap",
+ "debar-formats",
  "debar-image",
  "debar-matching",
  "debar-platform",

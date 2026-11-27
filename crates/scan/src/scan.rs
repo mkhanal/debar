@@ -1,24 +1,31 @@
+use debar_formats::{
+    ContainerEntry, Fact, FormatModule, HeaderCheck, Limit, ModuleContext, ModuleError,
+    ModuleOutput, Object, Part, PartBytes, PartOutcome, PartRole, Stage,
+};
 use debar_image::{
     EngineAlert, Image, Indicator, KindView, ObjectKind, OffsetAction, OwnBytes, TypingRules,
 };
 use debar_matching::{
     GroupSelection, LogicalEvent, MatchedGroups, ObjectContext, PatternRequest, PatternSettings,
-    Trust, TypeFound, whole_object_detections, whole_object_digest_need, whole_object_trust,
-    whole_object_trust_digest_need,
+    Trust, TypeFound, container_entry_detections, whole_object_detections,
+    whole_object_digest_need, whole_object_trust, whole_object_trust_digest_need,
 };
 
 use crate::evidence::{Alert, Alerting};
+use crate::format_modules::FormatModules;
 use crate::layers::{Arrival, Layer, Layers};
 use crate::ledger::Ledger;
-use crate::object_bytes::{ObjectBytes, ObjectWindow};
+use crate::object_bytes::ObjectBytes;
 use crate::own_bytes::match_own_bytes;
 use crate::report::{
-    Completion, LayerId, Limit, LimitEvent, Reported, ScanFailure, ScanReport, Verdict,
+    Completion, LayerId, LimitEvent, ObjectFact, Reported, ScanFailure, ScanReport, Verdict,
 };
-use crate::settings::{Matching, ScanSettings};
+use crate::settings::{Facts, Matching, ScanSettings};
 use crate::typing::{TypingError, kind_after_full_scan, kind_from_first_bytes};
 
 pub const LARGEST_OBJECT_LEFT_UNSCANNED: u64 = 5;
+pub const MOST_PRODUCED_BYTES_HELD: u64 = 16 * 1024 * 1024;
+pub const MOST_UNCOUNTED_MODULE_OUTPUTS: u64 = 100_000;
 
 pub struct FinishedObject<'o> {
     pub layer: LayerId,
@@ -45,14 +52,28 @@ pub fn scan(
     settings: &ScanSettings<'_>,
     observer: &mut dyn ObjectObserver,
 ) -> ScanReport {
+    scan_with_modules(image, object, settings, FormatModules::built_in(), observer)
+}
+
+pub fn scan_with_modules(
+    image: &Image<'_>,
+    object: &dyn ObjectBytes,
+    settings: &ScanSettings<'_>,
+    modules: FormatModules<'_>,
+    observer: &mut dyn ObjectObserver,
+) -> ScanReport {
     let mut scan = Scan {
         image,
         settings,
+        modules,
         ledger: Ledger::new(settings.limits),
         layers: Layers::with_top_level(object),
         reported: Vec::new(),
         limits: Vec::new(),
         limit_alerted: false,
+        facts: Vec::new(),
+        produced_held: 0,
+        uncounted_outputs: 0,
         observer,
     };
     let completion = match scan.scan_top_level() {
@@ -79,22 +100,38 @@ enum PassEnd {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Child {
     Scanned,
-    Refused,
+    Trusted,
+    Refused(Limit),
     Aborted,
 }
 
-struct Scan<'i, 'm, 's, 'o, 'b> {
+impl Child {
+    const fn of_part(self) -> Option<PartOutcome> {
+        match self {
+            Self::Scanned => Some(PartOutcome::Scanned),
+            Self::Trusted => Some(PartOutcome::Trusted),
+            Self::Refused(limit) => Some(PartOutcome::Refused(limit)),
+            Self::Aborted => None,
+        }
+    }
+}
+
+struct Scan<'i, 'm, 's, 'r, 'o, 'b> {
     image: &'i Image<'m>,
     settings: &'s ScanSettings<'s>,
+    modules: FormatModules<'r>,
     ledger: Ledger,
     layers: Layers<'o>,
     reported: Vec<Reported>,
     limits: Vec<LimitEvent>,
     limit_alerted: bool,
+    facts: Vec<ObjectFact>,
+    produced_held: u64,
+    uncounted_outputs: u64,
     observer: &'b mut dyn ObjectObserver,
 }
 
-impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
+impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
     fn scan_top_level(&mut self) -> Result<Flow, ScanFailure> {
         let flow = self.top_level_steps();
         self.finish_layer();
@@ -120,30 +157,66 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
     fn scan_child(
         &mut self,
         arrival: Arrival,
-        given_kind: ObjectKind,
-        bytes: ObjectWindow<'o>,
+        given_kind: Option<ObjectKind>,
+        bytes: Object<'o>,
     ) -> Result<Child, ScanFailure> {
         if bytes.length() <= LARGEST_OBJECT_LEFT_UNSCANNED {
             return Ok(Child::Scanned);
         }
-        let admitted = self
-            .ledger
-            .admit(bytes.length())
-            .and_then(|()| self.ledger.admits_a_level_below(self.current().depth));
-        if let Err(limit) = admitted {
-            return Ok(match self.limit_reached(limit)? {
-                Flow::Continue => Child::Refused,
-                Flow::Abort => Child::Aborted,
-            });
+        if let Some(refused) = self.refused_at_the_push(bytes.length())? {
+            return Ok(refused);
         }
         self.layers.push(arrival, bytes);
-        let flow = self.object_steps(Some(given_kind));
+        let flow = self.object_steps(given_kind);
         self.finish_layer();
-        self.layers.pop();
-        Ok(match flow? {
-            Flow::Continue => Child::Scanned,
+        Ok(self.popped_after(flow?))
+    }
+
+    fn scan_view(
+        &mut self,
+        matched_as: ObjectKind,
+        bytes: Object<'o>,
+    ) -> Result<Child, ScanFailure> {
+        if bytes.length() == 0 {
+            return Ok(Child::Scanned);
+        }
+        if let Some(refused) = self.refused_at_the_push(bytes.length())? {
+            return Ok(refused);
+        }
+        self.layers.push(Arrival::View, bytes);
+        self.current_mut().kind = Some(matched_as);
+        let flow = match self.pass(
+            GroupSelection::ForKind(matched_as),
+            &MatchedGroups::default(),
+        ) {
+            Ok(PassEnd::Finished { .. }) => Ok(Flow::Continue),
+            Ok(PassEnd::Aborted) => Ok(Flow::Abort),
+            Err(failure) => Err(failure),
+        };
+        Ok(self.popped_after(flow?))
+    }
+
+    fn refused_at_the_push(&mut self, length: u64) -> Result<Option<Child>, ScanFailure> {
+        let admitted = self
+            .ledger
+            .admit(length)
+            .and_then(|()| self.ledger.admits_a_level_below(self.current().depth));
+        let Err(limit) = admitted else {
+            return Ok(None);
+        };
+        Ok(Some(match self.limit_reached(limit)? {
+            Flow::Continue => Child::Refused(limit),
             Flow::Abort => Child::Aborted,
-        })
+        }))
+    }
+
+    fn popped_after(&mut self, flow: Flow) -> Child {
+        let trusted = self.layers.pop().is_some_and(|popped| popped.trusted);
+        match flow {
+            Flow::Abort => Child::Aborted,
+            Flow::Continue if trusted => Child::Trusted,
+            Flow::Continue => Child::Scanned,
+        }
     }
 
     fn object_steps(&mut self, given_kind: Option<ObjectKind>) -> Result<Flow, ScanFailure> {
@@ -159,10 +232,182 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
             None => self.kind_from_first_bytes()?,
         };
         self.current_mut().kind = Some(kind);
+        if self.run_modules(kind, Stage::BeforeOwnBytes)? == Flow::Abort {
+            return Ok(Flow::Abort);
+        }
         let PassEnd::Finished { matched_groups, .. } = self.own_bytes(kind)? else {
             return Ok(Flow::Abort);
         };
-        self.extra_pass(kind, &matched_groups)
+        if self.extra_pass(kind, &matched_groups)? == Flow::Abort {
+            return Ok(Flow::Abort);
+        }
+        self.run_modules(kind, Stage::AfterOwnBytes)
+    }
+
+    fn run_modules(&mut self, kind: ObjectKind, stage: Stage) -> Result<Flow, ScanFailure> {
+        for module in self.modules.for_kind(kind, stage) {
+            if self.run_module(module)? == Flow::Abort {
+                return Ok(Flow::Abort);
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn run_module(&mut self, module: &'r dyn FormatModule) -> Result<Flow, ScanFailure> {
+        let object = self.current().bytes.clone();
+        let mut context = self.module_context(None);
+        let opened = module.open(object, &mut context);
+        if self.limits_the_module_reached(context)? == Flow::Abort {
+            return Ok(Flow::Abort);
+        }
+        let mut parts = match opened {
+            Ok(parts) => parts,
+            Err(error) => return self.module_stopped(error),
+        };
+        let mut last_part = None;
+        loop {
+            let mut context = self.module_context(last_part);
+            let output = parts.next(&mut context);
+            if self.limits_the_module_reached(context)? == Flow::Abort {
+                return Ok(Flow::Abort);
+            }
+            if let Ok(Some(output)) = &output {
+                self.count_uncounted(output)?;
+            }
+            let flow = match output {
+                Ok(None) => return Ok(Flow::Continue),
+                Err(error) => return self.module_stopped(error),
+                Ok(Some(ModuleOutput::Part(part))) => {
+                    let child = self.scan_part(part)?;
+                    last_part = child.of_part();
+                    if child == Child::Aborted {
+                        Flow::Abort
+                    } else {
+                        Flow::Continue
+                    }
+                }
+                Ok(Some(ModuleOutput::Entry(entry))) => self.container_entry(&entry)?,
+                Ok(Some(ModuleOutput::Fact(fact))) => {
+                    self.record_fact(fact);
+                    Flow::Continue
+                }
+            };
+            if flow == Flow::Abort {
+                return Ok(Flow::Abort);
+            }
+        }
+    }
+
+    fn count_uncounted(&mut self, output: &ModuleOutput<'_>) -> Result<(), ScanFailure> {
+        if let ModuleOutput::Part(Part {
+            role: PartRole::Child { .. },
+            ..
+        }) = output
+        {
+            return Ok(());
+        }
+        self.uncounted_outputs = self.uncounted_outputs.saturating_add(1);
+        if self.uncounted_outputs > MOST_UNCOUNTED_MODULE_OUTPUTS {
+            return Err(ScanFailure::ModuleOutputsBeyondBound {
+                most: MOST_UNCOUNTED_MODULE_OUTPUTS,
+            });
+        }
+        Ok(())
+    }
+
+    fn module_context(&self, last_part: Option<PartOutcome>) -> ModuleContext {
+        ModuleContext::new(
+            self.ledger.room(),
+            MOST_PRODUCED_BYTES_HELD.saturating_sub(self.produced_held),
+            self.settings.facts == Facts::Gathered,
+            last_part,
+        )
+    }
+
+    fn limits_the_module_reached(&mut self, context: ModuleContext) -> Result<Flow, ScanFailure> {
+        for limit in context.into_refusals() {
+            if self.limit_reached(limit)? == Flow::Abort {
+                return Ok(Flow::Abort);
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn module_stopped(&mut self, error: ModuleError) -> Result<Flow, ScanFailure> {
+        match error {
+            ModuleError::Input(error) => Err(ScanFailure::Input(error)),
+            ModuleError::Damaged { at } => {
+                self.record_fact(Fact::BrokenStructure { at });
+                Ok(Flow::Continue)
+            }
+        }
+    }
+
+    fn scan_part(&mut self, part: Part<'o>) -> Result<Child, ScanFailure> {
+        let (bytes, produced) = self.part_bytes(part.bytes)?;
+        self.produced_held = self.produced_held.saturating_add(produced);
+        let child = match part.role {
+            PartRole::Child { kind } => self.scan_child(Arrival::Part, kind, bytes),
+            PartRole::View { matched_as } => self.scan_view(matched_as, bytes),
+        };
+        self.produced_held = self.produced_held.saturating_sub(produced);
+        child
+    }
+
+    fn part_bytes(&self, bytes: PartBytes<'o>) -> Result<(Object<'o>, u64), ScanFailure> {
+        match bytes {
+            PartBytes::Window { offset, length } => {
+                let object = &self.current().bytes;
+                let window =
+                    object
+                        .window(offset, length)
+                        .ok_or(ScanFailure::PartOutsideItsObject {
+                            offset,
+                            length,
+                            object_length: object.length(),
+                        })?;
+                Ok((window, 0))
+            }
+            PartBytes::Produced(produced) => {
+                let length = ObjectBytes::length(produced.as_slice());
+                let room = MOST_PRODUCED_BYTES_HELD.saturating_sub(self.produced_held);
+                if length > room {
+                    return Err(ScanFailure::ProducedBeyondRoom { length, room });
+                }
+                Ok((Object::held(produced), length))
+            }
+            PartBytes::Regenerable(producer) => Ok((Object::regenerable(producer), 0)),
+        }
+    }
+
+    fn container_entry(&mut self, entry: &ContainerEntry) -> Result<Flow, ScanFailure> {
+        let container = self.current();
+        let tested = debar_matching::ContainerEntry {
+            container: container.kind.unwrap_or(ObjectKind::Untyped),
+            container_size: container.bytes.length(),
+            name: entry.name.as_deref(),
+            compressed_size: entry.compressed_size,
+            real_size: entry.real_size,
+            encrypted: entry.encrypted,
+            position: entry.position,
+        };
+        let every_match = self.settings.matching == Matching::EveryMatch;
+        for detection in container_entry_detections(self.image, &tested, every_match)? {
+            if self.alert(detection.name, detection.indicator)? == Flow::Abort {
+                return Ok(Flow::Abort);
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn record_fact(&mut self, fact: Fact) {
+        let found = ObjectFact {
+            layer: self.current().id,
+            fact,
+        };
+        if self.settings.facts == Facts::Gathered && !self.facts.contains(&found) {
+            self.facts.push(found);
+        }
     }
 
     fn own_bytes(&mut self, kind: ObjectKind) -> Result<PassEnd, ScanFailure> {
@@ -193,8 +438,8 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
             return Ok(PassEnd::Aborted);
         }
         let found_kind = kind_after_full_scan(self.image, kind, &types_found)?;
-        if found_kind != kind {
-            self.current_mut().kind = Some(found_kind);
+        if found_kind != kind && self.retype(found_kind)? == Flow::Abort {
+            return Ok(PassEnd::Aborted);
         }
         Ok(PassEnd::Finished {
             types_found,
@@ -227,8 +472,9 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
             match action {
                 OffsetAction::Recorded => {}
                 OffsetAction::RetypesTheObject => {
-                    if description.acts_in(current_kind) {
-                        self.current_mut().kind = Some(found.kind);
+                    if description.acts_in(current_kind) && self.retype(found.kind)? == Flow::Abort
+                    {
+                        return Ok(Flow::Abort);
                     }
                 }
                 OffsetAction::Embedded(embedded) => {
@@ -236,14 +482,23 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
                     if !description.acts_in(passed_as) || found.offset <= before {
                         continue;
                     }
-                    let Some(bytes) = self
+                    let Some(from) = self
                         .current()
                         .bytes
                         .onward_from(found.offset.saturating_sub(before))
                     else {
                         continue;
                     };
-                    if self.scan_child(Arrival::Embedded, embedded.scanned_as, bytes)?
+                    let bytes = match self.modules.header_check(embedded.scanned_as, &from) {
+                        Ok(HeaderCheck::NotNeeded) => from,
+                        Ok(HeaderCheck::Fails) | Err(ModuleError::Damaged { .. }) => continue,
+                        Err(ModuleError::Input(error)) => return Err(error.into()),
+                        Ok(HeaderCheck::Holds { length }) => {
+                            last_taken = end_of_checked_header(found.offset, length);
+                            checked_extent(from, length)
+                        }
+                    };
+                    if self.scan_child(Arrival::Embedded, Some(embedded.scanned_as), bytes)?
                         == Child::Aborted
                     {
                         return Ok(Flow::Abort);
@@ -252,6 +507,11 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
             }
         }
         Ok(Flow::Continue)
+    }
+
+    fn retype(&mut self, kind: ObjectKind) -> Result<Flow, ScanFailure> {
+        self.current_mut().kind = Some(kind);
+        self.run_modules(kind, Stage::BeforeOwnBytes)
     }
 
     fn extra_pass(
@@ -275,7 +535,7 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
         selection: GroupSelection,
         matched_before: &MatchedGroups,
     ) -> Result<PassEnd, ScanFailure> {
-        let bytes = self.current().bytes;
+        let bytes = self.current().bytes.clone();
         let length = bytes.length();
         let hashes = self.settings.hashes();
         let digest_need = whole_object_digest_need(self.image, length, hashes)?;
@@ -319,13 +579,15 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
                         Flow::Abort => Child::Aborted,
                     }
                 }
-                LogicalEvent::Rescan(kind) => self.scan_child(Arrival::Retyped, kind, bytes)?,
+                LogicalEvent::Rescan(kind) => {
+                    self.scan_child(Arrival::Retyped, Some(kind), bytes.clone())?
+                }
                 LogicalEvent::ProgramTrigger(_) => Child::Scanned,
             };
             match child {
-                Child::Scanned => {}
+                Child::Scanned | Child::Trusted => {}
                 Child::Aborted => return Ok(PassEnd::Aborted),
-                Child::Refused => {
+                Child::Refused(_) => {
                     return Ok(PassEnd::Finished {
                         types_found: Vec::new(),
                         matched_groups,
@@ -339,14 +601,14 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
         })
     }
 
-    fn pattern_request<'r>(
+    fn pattern_request<'q>(
         &self,
         selection: GroupSelection,
         length: u64,
-        context: ObjectContext<'r>,
-    ) -> PatternRequest<'r>
+        context: ObjectContext<'q>,
+    ) -> PatternRequest<'q>
     where
-        's: 'r,
+        's: 'q,
     {
         PatternRequest {
             selection,
@@ -419,8 +681,13 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
     }
 
     fn limit_reached(&mut self, limit: Limit) -> Result<Flow, ScanFailure> {
-        let layer = self.current().id;
-        self.limits.push(LimitEvent { limit, layer });
+        let reached = LimitEvent {
+            limit,
+            layer: self.current().id,
+        };
+        if !self.limits.contains(&reached) {
+            self.limits.push(reached);
+        }
         self.layers.mark_each_from_the_current_up_not_to_be_cached();
         if !self.settings.alert_on_limits || self.limit_alerted {
             return Ok(Flow::Continue);
@@ -438,7 +705,7 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
     }
 
     fn kind_from_first_bytes(&self) -> Result<ObjectKind, ScanFailure> {
-        let bytes = self.current().bytes;
+        let bytes = &self.current().bytes;
         let prefix_length = u64::from(self.typing_rules()?.prefix_length).min(bytes.length());
         let mut first_bytes = vec![0u8; usize::try_from(prefix_length).unwrap_or(0)];
         bytes.read_at(0, &mut first_bytes)?;
@@ -489,6 +756,7 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
             reported,
             completion,
             limits: self.limits,
+            facts: self.facts,
         }
     }
 
@@ -499,6 +767,21 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
     fn current_mut(&mut self) -> &mut Layer<'o> {
         self.layers.current_mut()
     }
+}
+
+fn end_of_checked_header(offset: u64, length: u64) -> u64 {
+    match length.checked_sub(1) {
+        Some(after_the_first_byte) => offset.saturating_add(after_the_first_byte),
+        None => offset.saturating_sub(1),
+    }
+}
+
+fn checked_extent(from: Object<'_>, length: u64) -> Object<'_> {
+    if length == 0 {
+        return from;
+    }
+    let within = length.min(from.length());
+    from.window(0, within).unwrap_or(from)
 }
 
 const fn exceeded(limit: Limit) -> EngineAlert {
