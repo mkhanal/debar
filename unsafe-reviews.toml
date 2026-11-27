@@ -42,19 +42,19 @@ reviewed = "Read the derive logic for the traits Debar derives (from_bytes.rs, i
 reviewed-on = "2026-11-27"
 
 [[review]]
-crate = "generic-array"
-version = "0.14.7"
+crate = "hybrid-array"
+version = "0.4.15"
 reached-by = "the product"
-unsafe-code = "8 unsafe traits (ArrayLength and the sequence traits) with about 20 unsafe impls, 6 unsafe fns (ArrayBuilder, ArrayConsumer, an internal transmute) and about 40 unsafe blocks: slice views of the array via from_raw_parts, ptr::read/ptr::write element moves in builders, iterators, split, concat, append and pop, transmutes between [T; N] and GenericArray, and from_utf8_unchecked on hex output."
-reviewed = "Read every block. All rely on GenericArray<T, N> being repr(transparent) over nested repr(C) pairs whose layout equals [T; N], and on lengths fixed at the type level (typenum), so no runtime input sets a length; slice-to-array conversions assert the length first, builders and consumers track initialised elements for panic safety, and hex output writes only ASCII from a table. Minor: ArrayBuilder::iter_position makes a &mut to not-yet-initialised elements, a pattern Rust has not settled on but Miri accepts; with T = u8 in the hash crates it carries no practical risk and no input can influence it."
+unsafe-code = "About 37 unsafe sites: the sealed unsafe trait ArraySize with its macro-generated impls tying each typenum size to [T; N]; slice views of Array<T, U> through from_raw_parts in as_slice, slice_as_chunks, slice_as_flattened and the core-array casts; reference casts from a slice of checked length (slice_as_array, TryFrom); ptr::read splits, flatten and unflatten behind ManuallyDrop; MaybeUninit arrays in uninit, assume_init, concat and try_from_fn with a drop guard; Send and Sync impls; bytemuck Pod and Zeroable impls (feature off)."
+reviewed = "Read every block in lib.rs, from_fn.rs, flatten.rs, traits.rs and sizes.rs. Every cast relies on Array<T, U> being repr(transparent) over [T; U::USIZE], which the crate's own size impls guarantee and test; split and split_ref are bounded at the type level (U: Sub<N> exists only when N <= U); slice_as_chunks takes len / N whole blocks and the remainder, so both views stay inside the input slice; slice-to-array casts check the length first; try_from_fn writes each slot once through a guard that drops only initialised elements on panic. No length or index comes from runtime input: the digest crates use only u8 arrays of fixed type-level size. No concern."
 reviewed-on = "2026-11-27"
 
 [[review]]
 crate = "block-buffer"
-version = "0.10.4"
+version = "0.12.1"
 reached-by = "the product"
-unsafe-code = "4 unsafe blocks: three casts of a byte slice to a slice of GenericArray<u8, N> blocks via from_raw_parts, and one unreachable_unchecked asserting the cursor invariant pos < block size."
-reviewed = "Read every block. The casts compute the block count as len / N and the tail from the remainder, so the views stay inside the input slice, and Block<N> has alignment 1; the cursor invariant is established by try_new and set (checked, panicking on violation) and maintained by internal code, with BlockSize bounded below 256 at the type level so pos fits a u8. Input length and content never reach the invariant, so no concern."
+unsafe-code = "21 unsafe sites: the eager buffer keeps its cursor in the last byte of a MaybeUninit block (get_pos and set_pos read and write that byte), digest_blocks copies input into the block with copy_nonoverlapping and hands it to compress as initialised once full, digest_pad writes the delimiter and zeros before assume_init_mut, get_data views the initialised prefix with from_raw_parts, Clone is a ptr::read of a type without Drop, two unreachable_unchecked assert the cursor invariant, and the read buffer (for extendable outputs) keeps its cursor in its first byte."
+reviewed = "Read every block in lib.rs, sealed.rs and read.rs. The cursor invariant (pos < block size for the eager kind the hashes use, block size below 256 at the type level) is set only by Default, the checked try_new, set and deserialize, and by digest_blocks, which writes in place only when the input is shorter than the space left (so the cursor byte at the end is overwritten only while a full block is compressed, after which ResetGuard rewrites it, also on panic) and otherwise stores a leftover shorter than a block; so get_data never views uninitialised bytes and no copy runs past the block. Input length and content decide only how many whole blocks are passed on, computed as len / N by hybrid-array. The read buffer is not reached by the MD5, SHA-1 and SHA-256 hashers Debar uses. No concern."
 reviewed-on = "2026-11-27"
 
 [[review]]
@@ -123,34 +123,34 @@ reviewed-on = "2026-11-27"
 
 [[review]]
 crate = "cpufeatures"
-version = "0.2.17"
+version = "0.3.1"
 reached-by = "the product"
-unsafe-code = "Runtime CPU feature detection: on x86_64 two unsafe fn wrappers and one block around the cpuid intrinsics plus one _xgetbv call (4); on aarch64 Linux one getauxval(AT_HWCAP) FFI call (the other 3 are Apple sysctlbyname)."
-reviewed = "Read every block. cpuid is always present on x86_64, xgetbv is executed only after cpuid reports OSXSAVE, and getauxval is a plain libc call; results are cached in an AtomicU8, and none of it touches scanned bytes. Latent only: the aarch64 \"sha3\" check accepts HWCAP_SHA3 or HWCAP_SHA512 rather than both, but its only user (sha2's aarch64 SHA-512 backend) is not compiled without the asm feature. Apple and LoongArch code excluded."
+unsafe-code = "Runtime CPU feature detection: on x86_64 two unsafe fn wrappers and one block around the cpuid intrinsics (leaves 1, 7.0 and 7.1) plus one _xgetbv call; on aarch64 Linux one getauxval(AT_HWCAP) call (the other blocks are Apple sysctlbyname and LoongArch, not built for Debar's targets)."
+reviewed = "Read every block in x86.rs and aarch64.rs. cpuid is always present on x86_64, xgetbv runs only after cpuid reports XSAVE and OSXSAVE, getauxval is a plain libc call; results are cached in an atomic and none of it touches scanned bytes. Latent only: leaf 7 is read without checking the highest supported leaf (a concern only on CPUs that predate it), and the aarch64 \"sha3\" check accepts HWCAP_SHA3 or HWCAP_SHA512 rather than both; its only user is sha2's SHA-512 backend, which Debar does not call."
 reviewed-on = "2026-11-27"
 
 [[review]]
 crate = "sha1"
-version = "0.10.7"
+version = "0.11.0"
 reached-by = "the product"
-unsafe-code = "One pointer cast from &[GenericArray<u8, U64>] to &[[u8; 64]] (compress.rs), and on x86_64 one #[target_feature(sha,sse2,ssse3,sse4.1)] SHA-NI compression function with its dispatch call (2)."
-reviewed = "Read every block. The cast relies on GenericArray<u8, U64> being a repr(transparent) [u8; 64], which holds; the SHA-NI path is entered only when cpufeatures confirms all four features, and its loads are four unaligned 16-byte loads inside each 64-byte block, so no input byte value or length can make it read out of bounds. aarch64 uses the safe software path; LoongArch asm excluded."
+unsafe-code = "The runtime dispatch (2 blocks) into two hardware compression functions: x86_64 SHA-NI (unsafe fn with #[target_feature(sha,sse2,ssse3,sse4.1)]: four unaligned 16-byte loads per 64-byte block, one 16-byte state load and store) and aarch64 SHA-1 instructions (unsafe fn with #[target_feature(sha2)]: four 16-byte vld1q_u8 loads per block, one vld1q_u32 and vst1q_u32 of the first four state words); LoongArch asm excluded."
+reviewed = "Read every block. Each backend is entered only after cpufeatures confirms its features at run time (or they are enabled at compile time); blocks arrive as &[[u8; 64]] from block-buffer, so every load is inside a block, and the state loads and stores cover state[0..4] of a [u32; 5]. No input byte value or length can move a pointer out of bounds. No concern."
 reviewed-on = "2026-11-27"
 
 [[review]]
 crate = "sha2"
-version = "0.10.9"
+version = "0.11.1"
 reached-by = "the product"
-unsafe-code = "Two GenericArray-to-array block casts (sha256.rs, sha512.rs), and on x86_64 SIMD intrinsics behind runtime detection: SHA-NI SHA-256 (3) and AVX2 SHA-512 (10, including two casts of __m128i arrays to u64 arrays)."
-reviewed = "Read every compiled block. The casts rely on identical layout, which holds; SHA-256 enters SHA-NI only after cpufeatures confirms sha/sse2/ssse3/sse4.1 and loads four 16-byte lanes per 64-byte block; SHA-512 enters AVX2 only after the avx2 check, handles an odd first block singly so the two-block loop never reads past blocks.len(), and loads 8 lanes per 128-byte block. Excluded the aarch64 backends (compiled only with the asm feature, which is off) and LoongArch asm; no concern."
+unsafe-code = "SHA-256: the runtime dispatch (2 blocks) into x86_64 SHA-NI (safe #[target_feature(sha,sse4.1)] functions with unaligned 16-byte loads of each block and of the state, 3 blocks) and aarch64 SHA-2 instructions (safe #[target_feature(sha2)] functions with vld1q loads of 16-byte slices of the block, the state and the round constants, and two vst1q stores, 4 blocks); rk in the soft unrolled backend reads a round constant by pointer at an index the macro fixes below 64. SHA-512: the same pattern for x86_64 AVX2 and aarch64 SHA-3 backends, including two casts of __m128i arrays to u64 arrays; LoongArch, RISC-V and wasm backends excluded."
+reviewed = "Read every compiled SHA-256 block and the SHA-512 blocks. SHA-256 enters SHA-NI only after cpufeatures confirms sha and sse4.1, and the aarch64 path only after HWCAP_SHA2; every vector load takes its pointer from a subslice bounded by safe indexing (&block[16 * i..][..16], &K32[i..][..4], &state[4 * i..][..4]) or from a &[u8; 64] block, so no input byte value or length can make it read out of bounds. The SHA-512 backends are not called by Debar (it uses SHA-256 only); their loads are of the same bounded form, and their aarch64 detection inherits cpufeatures' latent sha3-or-sha512 check. No concern."
 reviewed-on = "2026-11-27"
 
 [[review]]
 crate = "md-5"
-version = "0.10.6"
+version = "0.11.0"
 reached-by = "the product"
-unsafe-code = "One slice::from_raw_parts cast from &[GenericArray<u8, U64>] to &[[u8; 64]] of the same length (lib.rs); compression is the safe software implementation."
-reviewed = "Read every block. The cast relies on GenericArray<u8, U64> having the layout of [u8; 64], which holds, and it keeps the original length and lifetime. The x86 asm backend (asm feature, off) and LoongArch asm excluded; no concern."
+unsafe-code = "One unsafe block, in the LoongArch assembly backend, which is not built for Debar's targets; the compression Debar runs is the safe software implementation."
+reviewed = "Read the crate's unsafe block and confirmed from its cfg that x86_64 and aarch64 build only the safe soft backend. No concern."
 reviewed-on = "2026-11-27"
 
 [[review]]

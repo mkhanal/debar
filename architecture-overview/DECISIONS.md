@@ -558,3 +558,27 @@ A 1 KiB text object costs 2.4 M instructions beyond the scan's start, from 5.0 M
 **Why.** Memory mapping a scanned file was rejected (truncation raises SIGBUS), and holding the object whole costs its size in private memory. Pages keep a scan within its 32 MiB bound at any object size, and the held path keeps the measured speed of every object the benchmark corpus holds.
 
 **Consequence.** The 16 MiB cap and `ScanFailure::TooLargeToHoldWhole` are gone, which answers open item A6 of the matcher design. Two requirements now hold this: "A File Up To The File-Size Limit Is Scanned To Its End" and "Scanning One File Holds At Most 32 MiB Of Memory".
+
+### 2026-11-27 — SHA-256 in hardware, through the maintained digest crates
+
+**Decision.** The digest crates move to `md-5` 0.11.0, `sha1` 0.11.0 and `sha2` 0.11.1, whose SHA-256 and SHA-1 run on the CPU's SHA instructions on arm64 as well as on x86_64, chosen at run time. No code of Debar's own changes; the unsafe code of each new or changed crate (`block-buffer` 0.12.1, `cpufeatures` 0.3.1, `hybrid-array` 0.4.15 and the three hashes) is reviewed in `unsafe-reviews.toml`.
+
+- **The maintained crate, not our own.** On arm64, `sha2` 0.10 kept its hardware backend behind its `asm` feature, which also replaces the x86_64 SHA-NI path with `sha2-asm`'s software assembly and adds a C build; a platform-layer primitive of our own would be new unsafe code for what a reviewed crate already does. 0.11.1 is preferred to 0.11.2 (two days old), which changes only RISC-V and SHA-512 backends Debar does not use.
+- **Every digest computed today is needed.** The whole-object need rule (an entry at the object's exact size, or of any size) asks for MD5 and SHA-256 on every object, because the pinned databases hold entries of any size for both: 11 MD5 and 2 SHA-256, all whole-file detection (`awk -F: '$2=="*"{print FILENAME, length($1)}'` over the unpacked `.hdb`, `.hsb`, `.hdu`, `.hsu`, `.fp` and `.sfp` files). No trust entry needs a digest at the sizes measured, and SHA-1 is not computed. So no digest can be skipped without changing what a signature observes.
+- **MD5 is now the digest cost.** In software it is 9.6 instructions per byte (`md-5` 0.10.6 and 0.11.0 alike, 16 MiB under cachegrind), as much as the whole fifty-times budget on text (9.1), binary (10.2), PDF (10.1) and tar (9.5). No CPU Debar targets has MD5 instructions, and a stream's steps depend on each other, so vectors do not help.
+- **x86_64 is unchanged where it is measured.** Valgrind does not run SHA-NI, so the scan profile and the ratchet on x86_64 still count software SHA-256: about 1 % fewer instructions under amd64 emulation, inside the tolerance, so the x86_64 records stay. On x86_64 hardware SHA-NI was already used before this change.
+
+**Measured** on the pinned databases, in the toolchain image on an Apple Silicon Mac (aarch64 Linux VM). No detection changed: Debar's report (detections, verdict, type and the object's SHA-256) was byte-identical before and after on every eighth of the harness's 40,063 built inputs, sorted by path, and its fixtures (5,009 inputs), with and without every match, and every acceptance test passes.
+
+| Instructions per byte, before → after | text | binary | PDF | OLE2 | tar | system |
+| --- | --- | --- | --- | --- | --- | --- |
+| Digests (MD5 and SHA-256) | 40.0 → 11.2 | 40.0 → 11.2 | 40.0 → 11.2 | 40.0 → 11.2 | 40.0 → 11.2 | 40.0 → 11.2 |
+| Scan total | 96.0 → 67.5 | 93.2 → 64.8 | 108.4 → 80.0 | 102.4 → 73.9 | 99.2 → 70.9 | 126.3 → 98.0 |
+| Share of the budget (twice the reference) | 42 % → 30 % | 37 % → 26 % | 43 % → 32 % | 25 % → 18 % | 42 % → 30 % | 30 % → 24 % |
+| Times the reference, single-threaded | 4.8 → 6.8 | 5.4 → 7.8 | 4.7 → 6.3 | 7.9 → 10.9 | 4.8 → 6.7 | 6.6 → 8.5 |
+| Fifty times the reference would be | 9.1 | 10.2 | 10.1 | 16.1 | 9.5 | 16.7 |
+| Wall-clock on the standard corpus, MiB/s, median of 3, before → after (recorded, not gated; a shared machine) | 76 → 125 | 85 → 117 | 43 → 51 | 79 → 103 | 71 → 110 | 56 → 67 |
+
+Other stages are unchanged within 0.5 per byte. Under amd64 emulation the digest stage goes from 63.5 to 62.1 per byte.
+
+**Next levers, by the profile:** the prefilter (32 to 38 per byte), verification (9 to 25), and MD5 (9.6 on every object), which puts fifty times out of reach on text, binary, PDF and tar while the need rule asks for it on every object.

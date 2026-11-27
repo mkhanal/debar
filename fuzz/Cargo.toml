@@ -14,7 +14,7 @@ debar-image = { path = "../crates/image" }
 debar-matching = { path = "../crates/matching" }
 debar-scan = { path = "../crates/scan" }
 libfuzzer-sys = "=0.4.13"
-md-5 = { version = "=0.10.6", default-features = false }
+md-5 = { version = "=0.11.0", default-features = false }
 
 [workspace]
 members = ["."]
