@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use debar_interfaces::{measure_scan, write_comparison_report};
 use debar_matching::UnwantedCategories;
 use debar_platform::command_line::arguments;
+use debar_platform::threads::ThreadCount;
 use debar_scan::{
     DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS, Facts, Limits, Matching, ScanSettings, ScanTime,
 };
@@ -28,10 +29,11 @@ const USAGE: &str = "usage: debar comparison-report --image IMAGE [--every-match
   clock), --max-files COUNT, --max-scan-size BYTES, --max-file-size BYTES (0 switches each off),\n\
   --max-recursion LEVELS (0 is the default of 17, at most 100), or --alert-exceeds-max, which\n\
   reports the first limit reached as a potentially unwanted detection.\n\
-       debar measure-scan --image IMAGE PATH...\n\
-  Scans every regular file under each PATH as a top-level object and prints how many bytes\n\
-  were scanned, how fast, and how much of the scan time limit's work they took, as JSON. It is\n\
-  for measuring throughput, not for users.";
+       debar measure-scan --image IMAGE [--threads COUNT] PATH...\n\
+  Scans every regular file under each PATH as a top-level object, COUNT files at once (default\n\
+  1), and prints how many bytes were scanned, how fast, how much of the scan time limit's work\n\
+  they took, and the verdict and detections of every file with any, as JSON. It is for\n\
+  measuring throughput, not for users.";
 
 enum Unwanted {
     Off,
@@ -86,6 +88,7 @@ enum Request {
     },
     MeasureScan {
         image: PathBuf,
+        threads: ThreadCount,
         inputs: Vec<PathBuf>,
     },
 }
@@ -118,7 +121,11 @@ fn main() -> ExitCode {
             ),
         )
         .map_err(|error| error.to_string()),
-        Request::MeasureScan { image, inputs } => measure_scan(&image, &inputs)
+        Request::MeasureScan {
+            image,
+            threads,
+            inputs,
+        } => measure_scan(&image, threads, &inputs)
             .map(|measurement| println!("{measurement}"))
             .map_err(|error| error.to_string()),
     };
@@ -151,15 +158,24 @@ fn request_from(arguments: &[OsString]) -> Option<Request> {
                 report: PathBuf::from(report),
             })
         }
-        [command, flag, image, inputs @ ..]
-            if command == "measure-scan" && flag == "--image" && !inputs.is_empty() =>
-        {
-            Some(Request::MeasureScan {
+        [command, flag, image, rest @ ..] if command == "measure-scan" && flag == "--image" => {
+            let (threads, inputs) = threads_from(rest)?;
+            (!inputs.is_empty()).then(|| Request::MeasureScan {
                 image: PathBuf::from(image),
+                threads,
                 inputs: inputs.iter().map(PathBuf::from).collect(),
             })
         }
         _ => None,
+    }
+}
+
+fn threads_from(options: &[OsString]) -> Option<(ThreadCount, &[OsString])> {
+    match options {
+        [flag, count, rest @ ..] if flag == "--threads" => {
+            Some((ThreadCount::new(count.to_str()?.parse().ok()?)?, rest))
+        }
+        _ => Some((ThreadCount::ONE, options)),
     }
 }
 

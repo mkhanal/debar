@@ -191,7 +191,7 @@ fn report_lines(
     Ok(lines)
 }
 
-fn verdict_name(verdict: Verdict) -> &'static str {
+pub(crate) fn verdict_name(verdict: Verdict) -> &'static str {
     match verdict {
         Verdict::NothingFound => "nothing_found",
         Verdict::Trusted => "trusted",

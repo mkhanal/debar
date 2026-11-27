@@ -6,10 +6,11 @@
 )]
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use acceptance::{
-    CompiledImage, comparison_report_with, compile, detections, lowercase_hex, scratch_directory,
-    write_file,
+    CompiledImage, comparison_report_with, compile, detections, lowercase_hex, release_binaries,
+    run, scratch_directory, write_file,
 };
 use md5::Md5;
 use serde_json::Value;
@@ -285,5 +286,91 @@ fn a_page_typed_as_html_from_its_first_bytes_is_never_detected_by_the_hash_of_it
 
         assert_eq!(scanned["type"], "CL_TYPE_HTML", "{REQUIREMENT}");
         assert!(detections(&scanned).is_empty(), "{REQUIREMENT}");
+    }
+}
+
+const FILES_SCANNED_AT_ONCE: usize = 160;
+const THREAD_COUNTS: [usize; 4] = [2, 4, 8, 16];
+
+fn files_of_every_verdict(directory: &Path) -> Vec<(PathBuf, &'static str)> {
+    let mut files = Vec::new();
+    for index in 0..FILES_SCANNED_AT_ONCE {
+        let padding = vec![b'.'; (index % 7) * 50 * 1024 + 1024];
+        let (contents, verdict) = match index % 4 {
+            0 => (padding, "nothing_found"),
+            1 => ([FIRST, &padding].concat(), "strong_indicator"),
+            2 => ([&padding, UNWANTED].concat(), "potentially_unwanted"),
+            _ => (
+                [&padding, SECOND, &padding, FIRST].concat(),
+                "strong_indicator",
+            ),
+        };
+        let path = directory.join(format!("file-{index:03}"));
+        write_file(&path, &contents).unwrap();
+        files.push((path, verdict));
+    }
+    files
+}
+
+fn measured_scan(image: &Path, threads: usize, inputs: &Path) -> Value {
+    let output = run(Command::new(&release_binaries().unwrap().debar)
+        .arg("measure-scan")
+        .arg("--image")
+        .arg(image)
+        .arg("--threads")
+        .arg(threads.to_string())
+        .arg(inputs))
+    .unwrap();
+    serde_json::from_slice(&output).unwrap()
+}
+
+#[test]
+fn every_file_gets_the_same_verdict_and_detections_however_many_files_are_scanned_at_once() {
+    const REQUIREMENT: &str =
+        "Every File Gets The Same Verdict And Detections However Many Files Are Scanned At Once";
+    let (directory, compiled) = loose_databases("threads", &[("local.ndb", DATABASE)]);
+    let inputs = directory.join("inputs");
+    std::fs::create_dir(&inputs).unwrap();
+    let files = files_of_every_verdict(&inputs);
+
+    let one_at_a_time = measured_scan(&compiled.image, 1, &inputs);
+    let listed_paths: Vec<&str> = one_at_a_time["detected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|scanned| scanned["path"].as_str().unwrap())
+        .collect();
+    let paths_in_file_order: Vec<&str> = files
+        .iter()
+        .filter(|(_, verdict)| *verdict != "nothing_found")
+        .map(|(path, _)| path.to_str().unwrap())
+        .collect();
+    assert_eq!(listed_paths, paths_in_file_order, "{REQUIREMENT}");
+
+    for (path, verdict) in &files {
+        let alone = comparison_report_with(&compiled.image, &[], path, &directory).unwrap();
+        let listed = one_at_a_time["detected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|scanned| scanned["path"] == path.to_str().unwrap());
+        assert_eq!(alone["verdict"], *verdict, "{REQUIREMENT}");
+        match listed {
+            Some(scanned) => {
+                assert_eq!(scanned["verdict"], alone["verdict"], "{REQUIREMENT}");
+                assert_eq!(scanned["detections"], alone["detections"], "{REQUIREMENT}");
+            }
+            None => assert_eq!(alone["verdict"], "nothing_found", "{REQUIREMENT}"),
+        }
+    }
+    for threads in THREAD_COUNTS {
+        let at_once = measured_scan(&compiled.image, threads, &inputs);
+
+        assert_eq!(at_once["threads"], threads, "{REQUIREMENT}");
+        assert_eq!(at_once["files"], FILES_SCANNED_AT_ONCE, "{REQUIREMENT}");
+        assert_eq!(
+            at_once["detected"], one_at_a_time["detected"],
+            "{REQUIREMENT}: {threads} threads"
+        );
     }
 }

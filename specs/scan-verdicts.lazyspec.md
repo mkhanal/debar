@@ -43,3 +43,8 @@ Which of a file's detections a scan reports, in what order, and the verdict it g
 ## A Page Typed As HTML From Its First Bytes Is Never Detected By The Hash Of Its Own Bytes
 
 - A file the file-type database types as HTML from its first bytes is reported with no detection when a hash signature lists it.
+
+## Every File Gets The Same Verdict And Detections However Many Files Are Scanned At Once
+
+- Scanning many files on any number of threads gives each file the verdict and detections, in the same order, that scanning the files one at a time gives it.
+- The results are reported in the order of the files, whatever order their scans finish in.
