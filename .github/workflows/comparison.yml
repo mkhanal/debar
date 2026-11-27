@@ -15,9 +15,9 @@ jobs:
     name: the harness's fixtures
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6 # main
     with:
-      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
+      harness-ref: 8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6
       known-differences: debar-known-differences.jsonl
       build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
       debar-command: >-
@@ -29,9 +29,9 @@ jobs:
     name: inputs built from every generic extended signature, and across window boundaries
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6 # main
     with:
-      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
+      harness-ref: 8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6
       known-differences: debar-known-differences.jsonl
       built-target: "0"
       boundary-sample: "2000"
@@ -45,9 +45,9 @@ jobs:
     name: inputs built from every extended signature for web pages
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6 # main
     with:
-      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
+      harness-ref: 8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6
       known-differences: debar-known-differences-web-pages.jsonl
       built-target: "3"
       boundary-sample: "0"
@@ -61,9 +61,9 @@ jobs:
     name: inputs built from every extended signature for mail
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6 # main
     with:
-      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
+      harness-ref: 8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6
       known-differences: debar-known-differences.jsonl
       built-target: "4"
       boundary-sample: "0"
@@ -77,9 +77,9 @@ jobs:
     name: inputs built from every extended signature for text
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6 # main
     with:
-      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
+      harness-ref: 8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6
       known-differences: debar-known-differences-text.jsonl
       built-target: "7"
       boundary-sample: "0"
@@ -93,9 +93,9 @@ jobs:
     name: inputs built from every generic logical signature
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6 # main
     with:
-      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
+      harness-ref: 8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6
       known-differences: debar-known-differences.jsonl
       built-target: "0"
       boundary-sample: "0"
@@ -111,9 +111,9 @@ jobs:
     name: inputs built from every logical signature for web pages
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6 # main
     with:
-      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
+      harness-ref: 8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6
       known-differences: debar-known-differences-web-pages.jsonl
       built-target: "3"
       boundary-sample: "0"
@@ -129,9 +129,9 @@ jobs:
     name: inputs built from every logical signature for mail
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6 # main
     with:
-      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
+      harness-ref: 8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6
       known-differences: debar-known-differences.jsonl
       built-target: "4"
       boundary-sample: "0"
@@ -147,9 +147,9 @@ jobs:
     name: inputs built from every logical signature for text
     permissions:
       contents: read
-    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@a2d1e0ee23a688c7afe729171265249af271418b # main
+    uses: mkhanal/debar-clamav-harness/.github/workflows/compare.yml@8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6 # main
     with:
-      harness-ref: a2d1e0ee23a688c7afe729171265249af271418b
+      harness-ref: 8d4a5cd881bfa18d8c6cd9822ebfe8fe526c45e6
       known-differences: debar-known-differences-text.jsonl
       built-target: "7"
       boundary-sample: "0"
