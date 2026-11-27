@@ -13,3 +13,8 @@ How fast Debar scans, with every pinned database in its image and default settin
 - For each kind of content in the standard benchmark corpus (system files, text, web pages, random binary data, PDF, OLE2 and tar), Debar scans at most the instructions per MiB that would run at twice the reference scanner's measured single-threaded rate on that kind.
 - The instructions are counted on fixed slices of each kind, generated the same way on every run, and system files from the toolchain image.
 - Wall-clock rates on the whole corpus are measured and recorded; they do not gate a change.
+
+## Debar Never Scans Slower Than Its Best Measured Speed
+
+- For each kind of content in the standard benchmark corpus, on each supported architecture, Debar scans at most its best recorded instructions per MiB on that kind plus 2 %, counted as the requirement above counts them.
+- A kind measured more than 2 % below its record fails until the record is lowered to the new figure, so a record only ever tightens.

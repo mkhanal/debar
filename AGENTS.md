@@ -98,6 +98,8 @@ Everything builds and runs inside the toolchain image, on CI and on a developer 
 | write the comparison harness's report for one file | `./in-toolchain target/release/debar comparison-report --image FILE INPUT REPORT` |
 | measure hash lookups per second | `./in-toolchain cargo run --release --locked -p debar-matching --example hash_lookup_rate -- IMAGE` |
 | measure scanning throughput over files | `./in-toolchain target/release/debar measure-scan --image FILE PATH...` |
+| see where a scan's instructions go, stage by stage, on every corpus kind | `./in-toolchain cargo run --release --locked -p acceptance --bin scan-profile [IMAGE [DEBAR]]` (the official image and the current binary by default) |
+| record a faster scan in the throughput ratchet | lower the kind's figure in `acceptance/best-scan-speed.json` to the one the failing ratchet test prints; never raise one without a person's decision recorded in DECISIONS |
 | bound the per-scan logical state of an image | `./in-toolchain cargo run --release --locked -p debar-matching --example logical_state_bound -- IMAGE` |
 | check that a release may be cut | `./in-toolchain cargo xtask release-check` |
 | format the code | `./in-toolchain cargo fmt --all` |

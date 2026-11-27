@@ -386,3 +386,35 @@ Each becomes a requirement in `specs/` with its married test in the piece that f
 **Why.** Every rule above is one a signature can observe, kept, or one it cannot, made deterministic. Pulling parts one at a time is the only order that reproduces where the reference cuts a scan short.
 
 **Consequence.** The scan logic that grew inside the interfaces layer for the harness moves into `debar-scan`, and the input gate is rebuilt to bound its reads, before anything else. Text moves to piece 6, because it is matched through the script normaliser, the first format module. Until the matcher reads regular-expression objects through a random-access reader, an object needing that is materialised only up to 16 MiB, and a larger one is reported as an internal limit, a recorded difference. The full design, with the reference-specific reasoning, is in the study folder.
+
+### 2026-11-27 — The throughput ratchet, the scan profile and a cheaper prefilter, as built
+
+**Decision.** The first piece of the performance track is in place, with these settled:
+
+- **The ratchet.** `acceptance/best-scan-speed.json` records, per architecture and corpus kind, the best instructions per MiB measured as the twice-the-reference requirement counts them. A second requirement in `specs/scan-speed.lazyspec.md` fails a change that scans more than 2 % above a record, and fails one that scans more than 2 % below it until the record is lowered to the new figure, printed in the failure; so a record only tightens, and raising one is a visible edit for a person to decide. The two requirements share one measurement, cached under a key of the binary, the image and the slice generator, since the counts are deterministic.
+- **The tolerance is 2 %.** Instruction counts repeat exactly for one binary and input; 2 % absorbs differences between machines of one architecture (a runner against a local virtual machine) and small unrelated changes, and is still well inside any gain worth recording. The x86_64 records were measured under amd64 emulation (OrbStack on Apple Silicon, valgrind in the toolchain image); CI's figures replace them if they differ by more than the tolerance.
+- **The profile.** `cargo run --release -p acceptance --bin scan-profile [IMAGE [DEBAR]]` generates the same slices as the requirement, runs cachegrind without cache simulation on each kind and on an empty run, groups each function's own instructions into stages by a table of name rules in the tool, subtracts the empty run per stage and prints instructions per byte per stage and kind beside the twice and fifty times targets (also written as `target/scan-profile/profile.json`). Stage entry functions are marked never to be inlined so their bodies keep their names. Callgrind's toggles and entry dumps were tried first and rejected: its call tracking on the aarch64 binary missed returns and most entries (4 of about 64 entries dumped). Limits: code inlined into a function counts where it is inlined; the type-recognition scan inside typing counts as prefilter and verification.
+- **The lever: the prefilter**, the largest stage on every kind (86 to 93 instructions per byte). The per-position tests now run in a loop with no calls, which looks for the next position the precomputed selection filter (four-byte and two-byte) or the armed-part filter admits, and only there does the per-group work; the armed-part filter holds every case variant of each anchor, so no position is lowered to test it; the two-byte filters are fixed-size arrays with no bounds check. The hits, and their order, are those of the previous loops. 31 instructions per position, from 81.
+- **No SIMD yet.** The test is a hashed bitset load per position, which vector units without gathers do not speed up; whether baseline intrinsics are safe to call on Rust 1.100 (A13) is still open.
+
+**Why.** The owner's aim of fifty times the reference needs every stage measured and speed once gained kept (the decision before this one); the prefilter was the largest stage everywhere.
+
+**Measured** on the pinned databases, in the toolchain image on an Apple Silicon Mac (aarch64 Linux VM), on the requirement's slices. No detection changed: Debar's report was byte-identical before and after on the harness's 48,354 built inputs and fixtures, the slices and the system files, and every acceptance test passes.
+
+| Instructions per byte, before → after | text | binary | PDF | OLE2 | tar | system |
+| --- | --- | --- | --- | --- | --- | --- |
+| Prefilter | 87.9 → 32.8 | 86.4 → 31.2 | 88.7 → 33.7 | 92.6 → 34.3 | 86.4 → 31.3 | 92.8 → 38.0 |
+| Digests (MD5 and SHA-256, in software) | 40.0 | 40.0 | 40.0 | 40.0 | 40.0 | 40.0 |
+| Second pass search | 0 | 0 | 39.8 | 44.4 | 1.4 | 39.7 |
+| Verifying candidates | 31.4 | 29.4 | 29.0 | 26.5 | 22.7 | 39.1 |
+| Allocating and copying | 9.3 | 7.8 | 11.4 | 9.6 | 8.7 | 12.6 |
+| Selecting signatures | 5.6 | 5.6 | 5.5 | 6.2 | 5.5 | 1.7 |
+| Scan total | 176.2 → 122.5 | 171.1 → 117.1 | 218.8 → 165.2 | 221.6 → 164.5 | 166.7 → 112.7 | 228.4 → 175.6 |
+| Share of the budget (twice the reference) | 77 % → 53 % | 67 % → 46 % | 86 % → 65 % | 55 % → 41 % | 70 % → 47 % | 55 % → 42 % |
+| Times the reference, single-threaded | 2.6 → 3.7 | 3.0 → 4.4 | 2.3 → 3.1 | 3.6 → 4.9 | 2.9 → 4.2 | 3.6 → 4.8 |
+| Fifty times the reference would be | 9.1 | 10.2 | 10.1 | 16.1 | 9.5 | 16.7 |
+| Wall-clock on the standard corpus, MiB/s, median of 3, before → after (recorded, not gated; a shared machine) | 61 → 76 | 65 → 104 | 21.0 → 21.1 | 23 → 29 | 34 → 46 | 45 → 58 |
+
+On x86_64 (emulated) the same slices run 1.33 times the aarch64 instructions on text and binary and 1.27 to 1.35 on PDF, OLE2 and tar; system files differ by architecture. The real PDF corpus did not speed up: its time goes to stages the slices barely exercise, which the profile should be pointed at next.
+
+**Next levers, by the profile:** the digests (40 per byte on every kind: SHA-256 in hardware behind a safe primitive, A13), the second pass search (about 40 per byte where it runs: the armed anchors through the same call-free filter instead of an automaton built per scan), verification (23 to 39), and the copy of every chunk into the retained buffer.

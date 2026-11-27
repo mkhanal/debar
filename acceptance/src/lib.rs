@@ -8,6 +8,8 @@ use std::sync::OnceLock;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
+pub mod scan_speed;
+
 pub const PINNED_DATABASES: [&str; 3] = ["bytecode.cvd", "daily.cvd", "main.cvd"];
 
 #[derive(Debug)]
