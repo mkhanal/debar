@@ -175,3 +175,10 @@ path = "../crates/formats/fuzz_targets/html_pages.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "mail_messages"
+path = "../crates/formats/fuzz_targets/mail_messages.rs"
+test = false
+doc = false
+bench = false

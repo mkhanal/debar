@@ -5,6 +5,7 @@ mod facts;
 mod html;
 mod limits;
 mod little_endian;
+mod mail;
 mod module;
 mod object;
 mod ole2;
@@ -16,6 +17,7 @@ pub use facts::{
     DocumentAction, EncryptedContent, Fact, MacroLanguage, ScriptLanguage, Unsupported,
 };
 pub use limits::{Limit, Room};
+pub use mail::{DEEPEST_MIME_NESTING, MAIL_MESSAGES, MailMessages};
 pub use module::{
     AfterTheEntry, ContainerEntry, FormatModule, HeaderCheck, ModuleError, ModuleOutput, Part,
     PartBytes, PartRole, PartSource, Stage,
@@ -31,6 +33,7 @@ pub const BUILT_IN_MODULES: &[&dyn FormatModule] = &[
     &ZIP_ARCHIVES,
     &OLE2_DOCUMENTS,
     &HTML_PAGES,
+    &MAIL_MESSAGES,
     &PLAIN_TEXT,
     &SCRIPT_TEXT,
 ];

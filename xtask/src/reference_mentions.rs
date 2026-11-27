@@ -19,7 +19,7 @@ pub enum AllowedPath {
 
 pub const COMPARISON_WORKFLOW: &str = ".github/workflows/comparison.yml";
 
-pub const MAY_NAME_THE_REFERENCE_SCANNER: [AllowedPath; 7] = [
+pub const MAY_NAME_THE_REFERENCE_SCANNER: [AllowedPath; 8] = [
     AllowedPath::File("PRODUCT.md"),
     AllowedPath::File("README.md"),
     AllowedPath::File(COMPARISON_WORKFLOW),
@@ -27,6 +27,7 @@ pub const MAY_NAME_THE_REFERENCE_SCANNER: [AllowedPath; 7] = [
     AllowedPath::Under("crates/compat-clamav/"),
     AllowedPath::Under("crates/clamav-signatures/"),
     AllowedPath::File("xtask/src/reference_mentions.rs"),
+    AllowedPath::File("crates/formats/src/mail/output.rs"),
 ];
 
 pub const SUPPORTED_FORMAT_PART_NAMES: [&str; 3] = [

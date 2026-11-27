@@ -43,10 +43,11 @@ impl FormatModule for PlainText {
         object: Object<'o>,
         context: &mut ModuleContext,
     ) -> Result<Box<dyn PartSource<'o> + 'o>, ModuleError> {
-        if context.current_kind() == ObjectKind::Html {
-            return Ok(Box::new(TextView::Finished));
+        match context.current_kind() {
+            ObjectKind::Html => Ok(Box::new(TextView::Finished)),
+            ObjectKind::Mail => Ok(Box::new(TextView::PendingThenMatchedAsMail(object))),
+            _ => Ok(Box::new(TextView::Pending(object))),
         }
-        Ok(Box::new(TextView::Pending(object)))
     }
 }
 
@@ -69,7 +70,9 @@ impl FormatModule for ScriptText {
 }
 
 enum TextView<'o> {
+    PendingThenMatchedAsMail(Object<'o>),
     Pending(Object<'o>),
+    MatchedAsMail { length: u64 },
     Finished,
 }
 
@@ -78,17 +81,32 @@ impl<'o> PartSource<'o> for TextView<'o> {
         &mut self,
         context: &mut ModuleContext,
     ) -> Result<Option<ModuleOutput<'o>>, ModuleError> {
-        let TextView::Pending(object) = std::mem::replace(self, TextView::Finished) else {
-            return Ok(None);
+        let object = match std::mem::replace(self, TextView::Finished) {
+            TextView::Pending(object) => object,
+            TextView::PendingThenMatchedAsMail(object) => {
+                *self = TextView::MatchedAsMail {
+                    length: object.length(),
+                };
+                object
+            }
+            TextView::MatchedAsMail { length } => {
+                return Ok(Some(ModuleOutput::Part(Part {
+                    bytes: PartBytes::Window { offset: 0, length },
+                    role: PartRole::View {
+                        matched_as: ObjectKind::Mail,
+                    },
+                })));
+            }
+            TextView::Finished => return Ok(None),
         };
         if object.length() > LARGEST_TEXT_NORMALISED {
-            return Ok(None);
+            return self.next(context);
         }
         let Some(piece) = context
             .text_normalised_in_pieces_of()
             .and_then(PieceLength::of_raw_bytes)
         else {
-            return Ok(None);
+            return self.next(context);
         };
         let bytes = match normalise(&object, piece, context.room_to_produce())? {
             NormalisedText::Held(bytes) => PartBytes::Produced(bytes),
