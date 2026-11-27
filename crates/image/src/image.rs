@@ -9,6 +9,7 @@ use crate::certificate_rules::CertificateRules;
 use crate::container_signatures::ContainerSignatures;
 use crate::engine_alerts::{EngineAlert, EngineAlerts};
 use crate::engine_features::EngineFeatures;
+use crate::expression_automata::{AutomatonMalformed, InPlaceAutomaton, ValidatedAutomata};
 use crate::hash_partition::{HashPartition, PartitionKey, PartitionMalformed};
 use crate::icon_signatures::{self, IconGroups};
 use crate::layout::{
@@ -181,6 +182,7 @@ pub struct SectionExtent {
 pub struct Image<'m> {
     bytes: &'m [u8],
     sections: Vec<SectionExtent>,
+    automata: ValidatedAutomata<'m>,
 }
 
 impl<'m> Image<'m> {
@@ -221,7 +223,11 @@ impl<'m> Image<'m> {
             .ok_or(ImageError::TooShort)?
             .next_multiple_of(SECTION_ALIGNMENT);
         let sections = section_extents(directory, bytes.len(), directory_end)?;
-        Ok(Self { bytes, sections })
+        Ok(Self {
+            bytes,
+            sections,
+            automata: ValidatedAutomata::default(),
+        })
     }
 
     #[must_use]
@@ -294,6 +300,13 @@ impl<'m> Image<'m> {
             .map(LogicalGroup::read)
             .transpose()
             .map_err(|reason| ImageError::LogicalGroupMalformed { group, reason })
+    }
+
+    pub fn validated_automaton(
+        &self,
+        bytes: &'m [u8],
+    ) -> Result<InPlaceAutomaton<'m>, AutomatonMalformed> {
+        self.automata.automaton(bytes)
     }
 
     pub fn plug_in_subsignatures(

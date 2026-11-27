@@ -2,7 +2,7 @@ use zerocopy::little_endian::{U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 pub const MAGIC: [u8; 8] = *b"DEBARIMG";
-pub const LAYOUT_VERSION: u32 = 6;
+pub const LAYOUT_VERSION: u32 = 7;
 pub const BYTE_ORDER_MARK: u32 = 0x0403_0201;
 pub const SECTION_ALIGNMENT: usize = 4096;
 pub const CHECKSUM_LENGTH: usize = 32;

@@ -18,7 +18,7 @@ const LARGEST_FILTER_BITS: u32 = 30;
 const SMALLEST_BUCKET_BITS: u32 = 4;
 const SHORT_FILTER_BYTES: usize = 1 << 13;
 const TABLE_PART_COUNT: usize = 9;
-const PART_COUNT: usize = 2 * TABLE_PART_COUNT + 4;
+const PART_COUNT: usize = 2 * TABLE_PART_COUNT + 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TablePart {
@@ -49,6 +49,7 @@ const TABLE_PARTS_IN_ORDER: [TablePart; TABLE_PART_COUNT] = [
 enum Part {
     Table(MatchingPass, TablePart),
     Positional,
+    PlacedByAnchor,
     Signatures,
     ProgramStarts,
     Programs,
@@ -69,9 +70,10 @@ impl Part {
                 TABLE_PART_COUNT.saturating_add(table_index(table))
             }
             Self::Positional => tables_end,
-            Self::Signatures => tables_end.saturating_add(1),
-            Self::ProgramStarts => tables_end.saturating_add(2),
-            Self::Programs => tables_end.saturating_add(3),
+            Self::PlacedByAnchor => tables_end.saturating_add(1),
+            Self::Signatures => tables_end.saturating_add(2),
+            Self::ProgramStarts => tables_end.saturating_add(3),
+            Self::Programs => tables_end.saturating_add(4),
         }
     }
 }
@@ -112,6 +114,76 @@ struct ShortAnchorEntry {
     program: U32,
     nearest: U32,
     farthest: U32,
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Clone, Copy)]
+#[repr(C)]
+struct PlacedByAnchorEntry {
+    anchor_position: U32,
+    anchor_length: u8,
+    anchor_case: u8,
+    anchor: [u8; LONG_ANCHOR_LENGTH],
+    signature: U32,
+}
+
+impl PlacedByAnchorEntry {
+    fn of(placement: Placement, first_segment: &Segment, signature: u32) -> Option<Self> {
+        let Placement::FromStart { distance, shift: 0 } = placement else {
+            return None;
+        };
+        let (anchor, anchor_length, case, displacement) = match first_segment.anchor {
+            Anchor::Long {
+                bytes,
+                case,
+                displacement,
+            } => (bytes, LONG_ANCHOR_LENGTH, case, displacement),
+            Anchor::Short {
+                bytes: [first, second],
+                case,
+                displacement,
+            } => (
+                [first, second, 0, 0],
+                SHORT_ANCHOR_LENGTH,
+                case,
+                displacement,
+            ),
+            Anchor::Everywhere => return None,
+        };
+        if displacement.nearest != displacement.farthest {
+            return None;
+        }
+        Some(Self {
+            anchor_position: U32::new(distance.checked_add(displacement.nearest)?),
+            anchor_length: u8::try_from(anchor_length).ok()?,
+            anchor_case: anchor_case_code(case),
+            anchor,
+            signature: U32::new(signature),
+        })
+    }
+
+    fn order(&self) -> (u32, u8, u8, [u8; LONG_ANCHOR_LENGTH], u32) {
+        (
+            self.anchor_position.get(),
+            self.anchor_length,
+            self.anchor_case,
+            self.anchor,
+            self.signature.get(),
+        )
+    }
+
+    fn anchor_class(&self) -> (u8, u8) {
+        (self.anchor_length, self.anchor_case)
+    }
+}
+
+const ANCHOR_CASE_EXACT: u8 = 0;
+const ANCHOR_CASE_FOLDED: u8 = 1;
+
+const fn anchor_case_code(case: AnchorCase) -> u8 {
+    match case {
+        AnchorCase::Exact => ANCHOR_CASE_EXACT,
+        AnchorCase::Folded => ANCHOR_CASE_FOLDED,
+    }
 }
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Clone, Copy)]
@@ -283,6 +355,7 @@ struct PlacedPrograms {
     main: PendingTables,
     second: PendingTables,
     positional: Vec<U32>,
+    placed_by_anchor: Vec<PlacedByAnchorEntry>,
     entries: Vec<SignatureEntry>,
     program_starts: Vec<U32>,
     programs: Vec<u8>,
@@ -303,6 +376,7 @@ pub fn build(
         main,
         second,
         positional,
+        mut placed_by_anchor,
         entries,
         mut program_starts,
         programs,
@@ -353,11 +427,13 @@ pub fn build(
             length: U32::new(0),
         }; PART_COUNT],
     };
+    placed_by_anchor.sort_by_key(PlacedByAnchorEntry::order);
     let mut parts: Vec<Vec<u8>> = Vec::with_capacity(PART_COUNT);
     parts.extend(main.parts);
     parts.extend(second.parts);
     parts.extend([
         positional.as_bytes().to_vec(),
+        placed_by_anchor.as_bytes().to_vec(),
         entries.as_bytes().to_vec(),
         program_starts.as_bytes().to_vec(),
         programs,
@@ -405,7 +481,12 @@ impl PlacedPrograms {
         let fields = placement_fields(signature.placement);
         let placement = fields.code;
         if placement != PLACEMENT_ANYWHERE {
-            self.positional.push(U32::new(signature_id));
+            match signature.segments.first().and_then(|first_segment| {
+                PlacedByAnchorEntry::of(signature.placement, first_segment, signature_id)
+            }) {
+                Some(entry) => self.placed_by_anchor.push(entry),
+                None => self.positional.push(U32::new(signature_id)),
+            }
         }
         if fields.in_executable {
             self.executable_placements = true;
@@ -965,6 +1046,7 @@ pub struct PatternGroup<'m> {
     main: AnchorTables<'m>,
     second: AnchorTables<'m>,
     positional: &'m [U32],
+    placed_by_anchor: &'m [PlacedByAnchorEntry],
     signatures: &'m [SignatureEntry],
     program_starts: &'m [U32],
     programs: &'m [u8],
@@ -1005,6 +1087,8 @@ impl<'m> PatternGroup<'m> {
             main: AnchorTables::read(header, MatchingPass::Main, &part)?,
             second: AnchorTables::read(header, MatchingPass::Second, &part)?,
             positional: records(part(Part::Positional)?)?,
+            placed_by_anchor: <[PlacedByAnchorEntry]>::ref_from_bytes(part(Part::PlacedByAnchor)?)
+                .map_err(|_| GroupMalformed::Layout)?,
             signatures: <[SignatureEntry]>::ref_from_bytes(part(Part::Signatures)?)
                 .map_err(|_| GroupMalformed::Layout)?,
             program_starts: records(part(Part::ProgramStarts)?)?,
@@ -1044,6 +1128,59 @@ impl<'m> PatternGroup<'m> {
         self.positional
             .iter()
             .map(|signature| PatternSignatureId(signature.get()))
+    }
+
+    pub fn placed_by_anchor_that_may_match(
+        &self,
+        object_start: &[u8],
+        object_length: u64,
+        into: &mut Vec<PatternSignatureId>,
+    ) {
+        let mut rest = self.placed_by_anchor;
+        while let Some(first) = rest.first() {
+            let anchor_position = first.anchor_position.get();
+            if u64::from(anchor_position) >= object_length {
+                return;
+            }
+            let class = first.anchor_class();
+            let in_class = rest.partition_point(|entry| {
+                entry.anchor_position.get() == anchor_position && entry.anchor_class() == class
+            });
+            let (entries, after) = rest.split_at(in_class);
+            rest = after;
+            let (anchor_length, case) = class;
+            let anchor_end = u64::from(anchor_position).saturating_add(u64::from(anchor_length));
+            if anchor_end > object_length {
+                continue;
+            }
+            let found = usize::try_from(anchor_position).ok().and_then(|start| {
+                object_start.get(start..start.checked_add(usize::from(anchor_length))?)
+            });
+            let Some(found) = found else {
+                into.extend(
+                    entries
+                        .iter()
+                        .map(|entry| PatternSignatureId(entry.signature.get())),
+                );
+                continue;
+            };
+            let mut anchor = [0u8; LONG_ANCHOR_LENGTH];
+            for (slot, byte) in anchor.iter_mut().zip(found) {
+                *slot = match case {
+                    ANCHOR_CASE_FOLDED => byte.to_ascii_lowercase(),
+                    _ => *byte,
+                };
+            }
+            let first_match = entries.partition_point(|entry| entry.anchor < anchor);
+            into.extend(
+                entries
+                    .get(first_match..)
+                    .unwrap_or_default()
+                    .iter()
+                    .take_while(|entry| entry.anchor == anchor)
+                    .map(|entry| PatternSignatureId(entry.signature.get())),
+            );
+        }
     }
 
     #[must_use]

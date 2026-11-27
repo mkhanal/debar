@@ -90,8 +90,8 @@ pub use pattern_program::{
     SHORT_ANCHOR_LENGTH, StepView, ascii_lowercase, set_in_sequence_contains,
 };
 pub use plug_in_subsignatures::{
-    ComparisonRecord, ExpressionRecord, PlugInSubsignatures, PlugInsMalformed, PlugInsNotBuilt,
-    RecordedForm,
+    ComparisonRecord, ExpressionRecord, ExpressionTrigger, PlugInSubsignatures, PlugInsMalformed,
+    PlugInsNotBuilt, RecordedForm,
 };
 pub use record_codec::RecordMalformed;
 pub use selection_filters::{FiltersMalformed, SelectionFilter};

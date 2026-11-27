@@ -71,6 +71,14 @@ impl Calibration {
     }
 
     #[must_use]
+    pub fn instructions_in(&self, seconds: f64) -> f64 {
+        seconds
+            * NANOSECONDS_PER_SECOND
+            * self.instructions_per_nanosecond
+            * instructions_on_this_architecture()
+    }
+
+    #[must_use]
     pub fn instructions_per_mebibyte_at(&self, times_the_reference: f64) -> f64 {
         let nanoseconds_per_mebibyte =
             NANOSECONDS_PER_SECOND / (times_the_reference * self.reference_mebibytes_per_second);
@@ -98,7 +106,10 @@ pub fn measured_scan_speed(image: &Path) -> Outcome<Vec<KindMeasured>> {
     static MEASURING: Mutex<()> = Mutex::new(());
     let _one_at_a_time = MEASURING.lock().unwrap_or_else(PoisonError::into_inner);
     let directory = target_directory().join("acceptance").join("scan-speed");
-    let record = directory.join(format!("measured-{}.json", measurement_key(image)?));
+    let record = directory.join(format!(
+        "measured-{}.json",
+        measurement_key(image, include_bytes!("scan_speed.rs"))?
+    ));
     if let Ok(text) = fs::read(&record) {
         return measured_from_json(&serde_json::from_slice(&text)?);
     }
@@ -140,10 +151,11 @@ pub fn as_float(count: u64) -> f64 {
     high * HALF_SCALE + low
 }
 
-fn measurement_key(image: &Path) -> Outcome<String> {
+pub(crate) fn measurement_key(image: &Path, measuring_source: &[u8]) -> Outcome<String> {
     let mut hasher = Sha256::new();
     hasher.update(fs::read(&release_binaries()?.debar)?);
     hasher.update(include_bytes!("scan_speed.rs"));
+    hasher.update(measuring_source);
     hasher.update(image.as_os_str().as_encoded_bytes());
     Ok(lowercase_hex(
         hasher.finalize().get(..8).unwrap_or_default(),
@@ -197,7 +209,11 @@ pub const fn this_architecture() -> &'static str {
 }
 
 pub fn best_measured(kind: &str) -> Outcome<u64> {
-    let path = workspace_root().join(BEST_MEASURED_RECORD);
+    best_recorded(BEST_MEASURED_RECORD, kind)
+}
+
+pub(crate) fn best_recorded(record: &str, kind: &str) -> Outcome<u64> {
+    let path = workspace_root().join(record);
     let record: Value = serde_json::from_slice(&fs::read(&path)?)?;
     record
         .get(this_architecture())
@@ -212,7 +228,7 @@ pub fn best_measured(kind: &str) -> Outcome<u64> {
         })
 }
 
-struct SliceRandom(u64);
+pub(crate) struct SliceRandom(pub(crate) u64);
 
 impl SliceRandom {
     fn next(&mut self) -> u64 {
@@ -242,7 +258,7 @@ const SYLLABLES: [&str; 24] = [
 ];
 const VOCABULARY_WORDS: usize = 4000;
 
-fn vocabulary(random: &mut SliceRandom) -> Vec<String> {
+pub(crate) fn vocabulary(random: &mut SliceRandom) -> Vec<String> {
     (0..VOCABULARY_WORDS)
         .map(|_| {
             (0..=random.below(3))
@@ -361,7 +377,12 @@ fn tar_header(name: &str, length: usize) -> [u8; TAR_BLOCK] {
     header
 }
 
-fn slice_file(kind: &str, random: &mut SliceRandom, words: &[String], length: usize) -> Vec<u8> {
+pub(crate) fn slice_file(
+    kind: &str,
+    random: &mut SliceRandom,
+    words: &[String],
+    length: usize,
+) -> Vec<u8> {
     match kind {
         "text" => prose(random, words, length),
         "html" => web_page(random, words, length),
@@ -374,9 +395,9 @@ fn slice_file(kind: &str, random: &mut SliceRandom, words: &[String], length: us
 
 const SLICE_FILE_LENGTHS: [usize; 6] = [1 << 10, 1 << 14, 1 << 16, 1 << 18, 1 << 20, 1 << 21];
 const SLICE_FILES_PER_LENGTH: [usize; 6] = [16, 8, 4, 2, 1, 1];
-const GENERATED_SLICES: [&str; 6] = ["text", "html", "binary", "pdf", "ole2", "tar"];
+pub(crate) const GENERATED_SLICES: [&str; 6] = ["text", "html", "binary", "pdf", "ole2", "tar"];
 const SLICE_SEED: u64 = 0x6465_6261_725f_736c;
-const SYSTEM_FILES: &str = "/usr/bin";
+pub(crate) const SYSTEM_FILES: &str = "/usr/bin";
 const SYSTEM_SLICE_BYTES: u64 = 4 << 20;
 
 pub fn benchmark_slices(into: &Path) -> Outcome<Vec<(String, Vec<PathBuf>)>> {

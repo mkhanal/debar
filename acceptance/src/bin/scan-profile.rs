@@ -10,6 +10,7 @@ use acceptance::scan_speed::{
     BYTES_PER_MEBIBYTE, Calibration, TIMES_THE_REFERENCE_AIMED_FOR, TIMES_THE_REFERENCE_REQUIRED,
     as_float, benchmark_slices,
 };
+use acceptance::small_object_cost::{SmallObjectKind, small_object_slices};
 use acceptance::{Failure, Outcome, official_image, release_binaries, run, target_directory};
 use serde_json::{Value, json};
 
@@ -167,7 +168,11 @@ fn profile() -> Outcome<()> {
         fs::remove_dir_all(&directory)?;
     }
     fs::create_dir_all(directory.join("empty"))?;
-    let mut slices = slices(&directory)?;
+    let mut slices = measured_slices(benchmark_slices(&directory.join("slices"))?)?;
+    let by_byte = slices.len();
+    slices.extend(measured_slices(small_object_slices(
+        &directory.join("small-objects"),
+    )?)?);
     slices.push(Slice {
         kind: String::new(),
         files: vec![directory.join("empty")],
@@ -176,7 +181,13 @@ fn profile() -> Outcome<()> {
     let mut profiled = profile_all(&debar, &image, &directory, &slices)?;
     let starting = profiled.pop().unwrap_or([0; STAGES.len()]);
     slices.pop();
-    let report = report(&slices, &profiled, &starting);
+    let (large, small) = slices.split_at(by_byte);
+    let (large_profiled, small_profiled) = profiled.split_at(by_byte);
+    let report = json!({
+        "architecture": std::env::consts::ARCH,
+        "kinds": by_byte_report(large, large_profiled, &starting),
+        "small_objects": by_object_report(small, small_profiled, &starting),
+    });
     fs::write(
         directory.join("profile.json"),
         serde_json::to_vec_pretty(&report)?,
@@ -185,8 +196,8 @@ fn profile() -> Outcome<()> {
     Ok(())
 }
 
-fn slices(directory: &Path) -> Outcome<Vec<Slice>> {
-    benchmark_slices(&directory.join("slices"))?
+fn measured_slices(generated: Vec<(String, Vec<PathBuf>)>) -> Outcome<Vec<Slice>> {
+    generated
         .into_iter()
         .map(|(kind, files)| {
             let bytes = files.iter().try_fold(0u64, |total, file| {
@@ -270,24 +281,56 @@ fn stage_of(function: &str) -> usize {
         .unwrap_or(STAGES.len())
 }
 
-fn report(slices: &[Slice], profiled: &[ByStage], starting: &ByStage) -> Value {
-    let kinds: Vec<Value> = slices
+fn scanning(by_stage: &ByStage, starting: &ByStage) -> Vec<u64> {
+    by_stage
+        .iter()
+        .zip(starting)
+        .map(|(count, before)| count.saturating_sub(*before))
+        .collect()
+}
+
+fn stages(scanning: &[u64], per_unit: impl Fn(u64) -> f64, unit: &str) -> Vec<Value> {
+    STAGES
+        .iter()
+        .zip(scanning)
+        .map(|(stage, count)| json!({ "stage": stage.name, unit: per_unit(*count) }))
+        .collect()
+}
+
+fn by_object_report(slices: &[Slice], profiled: &[ByStage], starting: &ByStage) -> Vec<Value> {
+    slices
+        .iter()
+        .zip(profiled)
+        .map(|(slice, by_stage)| {
+            let objects = as_float(u64::try_from(slice.files.len()).unwrap_or(u64::MAX)).max(1.0);
+            let per_object = |count: u64| as_float(count) / objects;
+            let scanning = scanning(by_stage, starting);
+            let at = |times: f64| {
+                let small = SmallObjectKind::of(&slice.kind)?;
+                Calibration::of(&slice.kind).map(|calibration| {
+                    calibration.instructions_in(small.reference_seconds_per_object() / times)
+                })
+            };
+            json!({
+                "kind": slice.kind,
+                "bytes": slice.bytes,
+                "files": slice.files.len(),
+                "instructions_per_object": per_object(scanning.iter().sum()),
+                "required_instructions_per_object": at(TIMES_THE_REFERENCE_REQUIRED),
+                "aimed_instructions_per_object": at(TIMES_THE_REFERENCE_AIMED_FOR),
+                "stages": stages(&scanning, per_object, "instructions_per_object"),
+            })
+        })
+        .collect()
+}
+
+fn by_byte_report(slices: &[Slice], profiled: &[ByStage], starting: &ByStage) -> Vec<Value> {
+    slices
         .iter()
         .zip(profiled)
         .map(|(slice, by_stage)| {
             let per_byte = |count: u64| as_float(count) / as_float(slice.bytes).max(1.0);
-            let scanning: Vec<u64> = by_stage
-                .iter()
-                .zip(starting)
-                .map(|(count, before)| count.saturating_sub(*before))
-                .collect();
-            let stages: Vec<Value> = STAGES
-                .iter()
-                .zip(&scanning)
-                .map(|(stage, count)| {
-                    json!({ "stage": stage.name, "instructions_per_byte": per_byte(*count) })
-                })
-                .collect();
+            let scanning = scanning(by_stage, starting);
             let calibration = Calibration::of(&slice.kind);
             let at = |times: f64| {
                 calibration.map(|calibration| {
@@ -301,22 +344,46 @@ fn report(slices: &[Slice], profiled: &[ByStage], starting: &ByStage) -> Value {
                 "instructions_per_byte": per_byte(scanning.iter().sum()),
                 "required_instructions_per_byte": at(TIMES_THE_REFERENCE_REQUIRED),
                 "aimed_instructions_per_byte": at(TIMES_THE_REFERENCE_AIMED_FOR),
-                "stages": stages,
+                "stages": stages(&scanning, per_byte, "instructions_per_byte"),
             })
         })
-        .collect();
-    json!({ "architecture": std::env::consts::ARCH, "kinds": kinds })
+        .collect()
 }
 
 fn table(report: &Value) -> String {
-    let kinds = report["kinds"].as_array().cloned().unwrap_or_default();
-    let mut text = format!(
-        "Instructions per byte scanned, by stage ({})\n\n{:<24}",
-        report["architecture"].as_str().unwrap_or_default(),
-        "stage"
+    let architecture = report["architecture"].as_str().unwrap_or_default();
+    let mut text = kind_table(
+        &format!("Instructions per byte scanned, by stage ({architecture})"),
+        report["kinds"].as_array().map_or(&[], Vec::as_slice),
+        "byte",
+        1,
     );
-    for kind in &kinds {
-        let _ = write!(text, "{:>9}", kind["kind"].as_str().unwrap_or_default());
+    text.push('\n');
+    text.push_str(&kind_table(
+        &format!(
+            "Instructions per small object scanned, by stage ({architecture}; {} KiB objects, system files of at most {} KiB)",
+            acceptance::small_object_cost::SMALL_OBJECT_LENGTH >> 10,
+            acceptance::small_object_cost::LARGEST_SMALL_SYSTEM_FILE >> 10,
+        ),
+        report["small_objects"]
+            .as_array()
+            .map_or(&[], Vec::as_slice),
+        "object",
+        0,
+    ));
+    text
+}
+
+fn kind_table(title: &str, kinds: &[Value], unit: &str, precision: usize) -> String {
+    let width = 10;
+    let measured = format!("instructions_per_{unit}");
+    let mut text = format!("{title}\n\n{:<26}", "stage");
+    for kind in kinds {
+        let _ = write!(
+            text,
+            "{:>width$}",
+            kind["kind"].as_str().unwrap_or_default()
+        );
     }
     text.push('\n');
     let names: Vec<String> = kinds
@@ -327,23 +394,30 @@ fn table(report: &Value) -> String {
         .filter_map(|stage| stage["stage"].as_str().map(str::to_owned))
         .collect();
     for (row, name) in names.iter().enumerate() {
-        let _ = write!(text, "{name:<24}");
-        for kind in &kinds {
+        let _ = write!(text, "{name:<26}");
+        for kind in kinds {
             let value = kind["stages"]
                 .get(row)
-                .and_then(|stage| stage["instructions_per_byte"].as_f64());
-            let _ = write!(text, "{:>9.1}", value.unwrap_or(0.0));
+                .and_then(|stage| stage[measured.as_str()].as_f64());
+            let _ = write!(text, "{:>width$.precision$}", value.unwrap_or(0.0));
         }
         text.push('\n');
     }
     for (label, field) in [
-        ("scan total", "instructions_per_byte"),
-        ("twice the reference", "required_instructions_per_byte"),
-        ("fifty times the reference", "aimed_instructions_per_byte"),
+        ("scan total", measured.clone()),
+        ("twice the reference", format!("required_{measured}")),
+        ("fifty times the reference", format!("aimed_{measured}")),
     ] {
-        let _ = write!(text, "{label:<24}");
-        for kind in &kinds {
-            let _ = write!(text, "{:>9.1}", kind[field].as_f64().unwrap_or(0.0));
+        let _ = write!(text, "{label:<26}");
+        for kind in kinds {
+            match kind[field.as_str()].as_f64() {
+                Some(value) => {
+                    let _ = write!(text, "{value:>width$.precision$}");
+                }
+                None => {
+                    let _ = write!(text, "{:>width$}", "-");
+                }
+            }
         }
         text.push('\n');
     }

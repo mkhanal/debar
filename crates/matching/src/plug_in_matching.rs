@@ -1,10 +1,11 @@
 use debar_image::{
     AutomatonMalformed, BacktrackingProgram, ComparisonRecord, ExpressionAnchoring,
-    ExpressionMatches, ExpressionRecord, ImageError, InPlaceAutomaton, MatchingPass, Placement,
-    PlugInSubsignatures, PlugInsMalformed, RecordedForm, ReportWindows, SignatureGroup,
+    ExpressionMatches, ExpressionRecord, Image, ImageError, InPlaceAutomaton, MatchingPass,
+    Placement, PlugInSubsignatures, PlugInsMalformed, RecordedForm, ReportWindows, SignatureGroup,
     automaton_in_place, compile_text, compile_text_lazily,
 };
 use debar_platform::input::InputError;
+use regex_automata::dfa::Automaton as _;
 use regex_automata::dfa::regex::Regex;
 use regex_automata::{Anchored, Input, Match};
 
@@ -24,7 +25,8 @@ use crate::work_meter::WorkMeter;
 const START_WRAPPED_TO_ANYWHERE: u32 = u32::MAX;
 const START_WRAPPED_TO_NOWHERE: u32 = u32::MAX - 1;
 
-pub(crate) struct PlugInRequest<'l> {
+pub(crate) struct PlugInRequest<'l, 'm> {
+    pub image: &'l Image<'m>,
     pub windows: Option<ReportWindows>,
     pub image_fuzzy_hash: Option<u64>,
     pub largest_object_for_regular_expressions: Option<u64>,
@@ -36,11 +38,11 @@ fn malformed(group: SignatureGroup, reason: PlugInsMalformed) -> PatternScanErro
 }
 
 #[inline(never)]
-pub(crate) fn match_plug_ins(
+pub(crate) fn match_plug_ins<'m>(
     group: SignatureGroup,
-    plug_ins: &PlugInSubsignatures<'_>,
+    plug_ins: &PlugInSubsignatures<'m>,
     state: &mut LogicalState<'_>,
-    request: &PlugInRequest<'_>,
+    request: &PlugInRequest<'_, 'm>,
     object: &mut WholeObject<'_>,
     work: &mut WorkMeter,
 ) -> Result<(), PatternScanError> {
@@ -74,17 +76,16 @@ pub(crate) fn match_plug_ins(
     {
         return Ok(());
     }
-    for record in plug_ins.expressions() {
+    for (index, trigger) in plug_ins.expression_triggers().enumerate() {
         if work.ran_out() {
             return Ok(());
         }
-        let record = record.map_err(|reason| malformed(group, reason))?;
-        let may_run = record.unconditional
-            || record.trigger_holds_without_matches
-            || state.is_armed(record.signature);
-        if !may_run {
+        if !trigger.runs_unarmed && !state.is_armed(trigger.signature) {
             continue;
         }
+        let record = plug_ins
+            .expression(index)
+            .map_err(|reason| malformed(group, reason))?;
         let holds = plug_ins
             .trigger_holds(&record, |index| {
                 state.current_matches(record.signature, index).unwrap_or(0)
@@ -211,7 +212,7 @@ struct Subject {
 
 fn subject_of(
     record: &ExpressionRecord<'_>,
-    request: &PlugInRequest<'_>,
+    request: &PlugInRequest<'_, '_>,
     object_length: usize,
 ) -> Option<Subject> {
     let length = u32::try_from(object_length).unwrap_or(u32::MAX);
@@ -287,9 +288,9 @@ impl From<PagedSearchFailure> for ExpressionFailure {
     }
 }
 
-fn expression_starts(
-    record: &ExpressionRecord<'_>,
-    request: &PlugInRequest<'_>,
+fn expression_starts<'m>(
+    record: &ExpressionRecord<'m>,
+    request: &PlugInRequest<'_, 'm>,
     object: &mut WholeObject<'_>,
     work: &mut WorkMeter,
 ) -> Result<Vec<u64>, ExpressionFailure> {
@@ -303,8 +304,12 @@ fn expression_starts(
         Anchored::No
     };
     let relative_starts = match object {
-        WholeObject::Held(held) => held_starts(record, &subject, held, anchored, work)?,
-        WholeObject::Paged(pages) => paged_starts(record, &subject, pages, anchored, work)?,
+        WholeObject::Held(held) => {
+            held_starts(request.image, record, &subject, held, anchored, work)?
+        }
+        WholeObject::Paged(pages) => {
+            paged_starts(request.image, record, &subject, pages, anchored, work)?
+        }
     };
     let base = u64::try_from(subject.start).unwrap_or(u64::MAX);
     Ok(relative_starts
@@ -313,19 +318,21 @@ fn expression_starts(
         .collect())
 }
 
-fn in_place<'a>(
-    bytes: &'a [u8],
+fn in_place<'a, 'm: 'a>(
+    image: &Image<'m>,
+    bytes: &'m [u8],
     copy: &'a mut Vec<u32>,
 ) -> Result<InPlaceAutomaton<'a>, AutomatonMalformed> {
-    if let Ok(automaton) = automaton_in_place(bytes) {
+    if let Ok(automaton) = image.validated_automaton(bytes) {
         return Ok(automaton);
     }
     *copy = aligned_copy(bytes);
     automaton_in_place(copy.as_bytes())
 }
 
-fn held_starts(
-    record: &ExpressionRecord<'_>,
+fn held_starts<'m>(
+    image: &Image<'m>,
+    record: &ExpressionRecord<'m>,
     subject: &Subject,
     held: &[u8],
     anchored: Anchored,
@@ -339,8 +346,18 @@ fn held_starts(
             reverse: reverse_bytes,
         } => {
             let (mut forward_copy, mut reverse_copy) = (Vec::new(), Vec::new());
-            let forward = in_place(forward_bytes, &mut forward_copy)?;
-            let reverse = in_place(reverse_bytes, &mut reverse_copy)?;
+            if work.ran_out() {
+                return Ok(Vec::new());
+            }
+            let forward = in_place(image, forward_bytes, &mut forward_copy)?;
+            let first_end = forward
+                .try_search_fwd(&Input::new(haystack).anchored(anchored))
+                .map_err(|_| ExpressionFailure::Malformed)?;
+            if first_end.is_none() {
+                charge_searched(work, 0, None, haystack.len());
+                return Ok(Vec::new());
+            }
+            let reverse = in_place(image, reverse_bytes, &mut reverse_copy)?;
             let regex = Regex::builder().build_from_dfas(forward, reverse);
             matched_starts(record, subject, haystack.len(), work, |from, work| {
                 let input = Input::new(haystack).range(from..).anchored(anchored);
@@ -386,8 +403,9 @@ fn held_starts(
     })
 }
 
-fn paged_starts(
-    record: &ExpressionRecord<'_>,
+fn paged_starts<'m>(
+    image: &Image<'m>,
+    record: &ExpressionRecord<'m>,
     subject: &Subject,
     pages: &mut ObjectPages<'_>,
     anchored: Anchored,
@@ -404,8 +422,8 @@ fn paged_starts(
             reverse: reverse_bytes,
         } => {
             let (mut forward_copy, mut reverse_copy) = (Vec::new(), Vec::new());
-            let forward = in_place(forward_bytes, &mut forward_copy)?;
-            let reverse = in_place(reverse_bytes, &mut reverse_copy)?;
+            let forward = in_place(image, forward_bytes, &mut forward_copy)?;
+            let reverse = in_place(image, reverse_bytes, &mut reverse_copy)?;
             matched_starts(record, subject, length, work, |from, work| {
                 let found =
                     search_in_place(&forward, &reverse, &mut searched_bytes, from, anchored)?;

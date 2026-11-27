@@ -18,3 +18,9 @@ How fast Debar scans, with every pinned database in its image and default settin
 
 - For each kind of content in the standard benchmark corpus, on each supported architecture, Debar scans at most its best recorded instructions per MiB on that kind plus 2 %, counted as the requirement above counts them.
 - A kind measured more than 2 % below its record fails until the record is lowered to the new figure, so a record only ever tightens.
+
+## Debar Never Spends More On A Small Object Than Its Best Measured Cost
+
+- For each kind of content in the standard benchmark corpus, on each supported architecture, Debar spends at most its best recorded instructions per object plus 2 % scanning small objects of that kind: generated objects of 1 KiB, and for system files those of the toolchain image of at most 16 KiB.
+- The cost of an object is the instructions to scan a set of them, less those of a run that scans nothing, over the number of objects.
+- A kind measured more than 2 % below its record fails until the record is lowered to the new figure, so a record only ever tightens.

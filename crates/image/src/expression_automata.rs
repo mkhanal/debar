@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::sync::{Mutex, PoisonError};
+
 use regex_automata::dfa::{StartKind, dense};
 use regex_automata::nfa::thompson::{self, NFA, WhichCaptures};
 use regex_automata::util::syntax;
@@ -121,6 +124,30 @@ pub fn compile_text_lazily(text: &str) -> Result<LazyExpression, AutomatonMalfor
 }
 
 pub type InPlaceAutomaton<'m> = dense::DFA<&'m [u32]>;
+
+#[derive(Default)]
+pub(crate) struct ValidatedAutomata<'m> {
+    by_extent: Mutex<BTreeMap<(usize, usize), InPlaceAutomaton<'m>>>,
+}
+
+impl<'m> ValidatedAutomata<'m> {
+    pub(crate) fn automaton(
+        &self,
+        bytes: &'m [u8],
+    ) -> Result<InPlaceAutomaton<'m>, AutomatonMalformed> {
+        let extent = (bytes.as_ptr().addr(), bytes.len());
+        let mut validated = self
+            .by_extent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(automaton) = validated.get(&extent) {
+            return Ok(automaton.clone());
+        }
+        let automaton = automaton_in_place(bytes)?;
+        validated.insert(extent, automaton.clone());
+        Ok(automaton)
+    }
+}
 
 pub fn automaton_in_place(bytes: &[u8]) -> Result<InPlaceAutomaton<'_>, AutomatonMalformed> {
     dense::DFA::from_bytes(bytes)

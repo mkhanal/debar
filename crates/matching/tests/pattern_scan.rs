@@ -647,3 +647,83 @@ fn a_type_recognition_pattern_is_found_at_every_offset_it_matches() {
         .collect();
     assert_eq!(offsets, [2, 10]);
 }
+
+const LETTERS_AND_SPACES: [u8; 6] = [0x41, 0x42, 0x61, 0x62, 0x0a, 0x20];
+
+fn letter_or_space(random: &mut Random) -> u8 {
+    LETTERS_AND_SPACES[random.below(6) as usize]
+}
+
+fn case_folded_or_exact(random: &mut Random) -> MaskedByte {
+    let byte = letter_or_space(random);
+    if byte.is_ascii_alphabetic() && random.chance(50) {
+        MaskedByte {
+            value: byte.to_ascii_uppercase(),
+            mask: 0xdf,
+        }
+    } else {
+        MaskedByte::exactly(byte)
+    }
+}
+
+fn pattern_placed_by_its_anchor(random: &mut Random) -> Pattern {
+    let mut elements: Vec<PatternElement> = (0..2 + random.below(5))
+        .map(|_| PatternElement::Byte(case_folded_or_exact(random)))
+        .collect();
+    if random.chance(30) {
+        elements.push(PatternElement::Gap {
+            minimum: random.below(3) as u32,
+            maximum: Some(3 + random.below(3) as u32),
+        });
+        elements.push(PatternElement::Byte(case_folded_or_exact(random)));
+    }
+    Pattern {
+        before: None,
+        elements,
+        after: None,
+    }
+}
+
+#[test]
+fn signatures_placed_at_a_fixed_offset_are_found_as_a_naive_matcher_finds_them_whatever_the_chunks()
+{
+    let mut random = Random(3);
+    for _ in 0..400 {
+        let count = 1 + random.below(16) as usize;
+        let model = Model {
+            names: (0..count)
+                .map(|index| format!("Test.Placed-{index}"))
+                .collect(),
+            patterns: (0..count)
+                .map(|_| pattern_placed_by_its_anchor(&mut random))
+                .collect(),
+            placements: (0..count)
+                .map(|_| Placement::FromStart {
+                    distance: random.below(12) as u32,
+                    shift: 0,
+                })
+                .collect(),
+        };
+        let bytes = model.image();
+        let image = Image::open(&bytes).unwrap();
+        for _ in 0..10 {
+            let object: Vec<u8> = (0..random.below(24))
+                .map(|_| letter_or_space(&mut random))
+                .collect();
+            let expected = naive_detections(&model, &object);
+            let first_match_whole =
+                engine_detections(&image, &object, &[object.len().max(1)], false);
+            for chunk in [1, 2, 3, 5, object.len().max(1)] {
+                let found: BTreeSet<String> = engine_detections(&image, &object, &[chunk], true)
+                    .into_iter()
+                    .collect();
+                assert_eq!(found, expected, "chunk {chunk}, object {object:02x?}");
+                assert_eq!(
+                    engine_detections(&image, &object, &[chunk], false),
+                    first_match_whole,
+                    "chunk {chunk}, object {object:02x?}"
+                );
+            }
+        }
+    }
+}

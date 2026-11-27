@@ -664,3 +664,36 @@ Both are back to where they were before the pass as other data was added, less t
 - **Test.** `Every Mark In A File's First Bytes Is Weighed In The Order It Is Found` (specs/file-typing.lazyspec.md) runs the cases the reference was run on through the official image. The case where an excluded self-extracting kind masks an XDP mark (d29) is left out: Debar's walk then re-types the object as XDP in place, and which type the comparison records for that object is a question about the walk, not about typing.
 
 **Measured.** Instructions per MiB on the ratchet's slices, aarch64, before → after: HTML 2,321,846 → 2,330,339 (+0.37 %), text, binary, PDF, OLE2, tar and system within ±0.02 %; all within the 2 % tolerance, records unchanged. x86_64 not measured natively; the same code path runs, so a similar change is expected and CI's ratchet checks it.
+
+### 2026-11-27 — Small objects pay for what they hold, not for every signature tied to an offset, as built
+
+**Decision.** The cost of starting to scan an object is measured on small objects and kept as a ratchet, and the setup that cost every object the same whatever it held is gone:
+
+- **Signatures tied to an offset are found by their anchor.** A signature placed a fixed distance from the start, whose first part has an anchor at a fixed displacement, is no longer listed for placement on every object: the image holds it in a table sorted by where its anchor must lie and by the anchor's bytes and case. Placement waits for the object's first bytes, looks up each anchor position the object reaches, and places only the signatures whose anchor is there (and every one whose anchor lies beyond the bytes fed so far, as before). The others are placed as before. A dropped candidate is one the verifier would have ruled out by its anchor with no other effect; the queue stays ordered by anchor, so whether a first-match scan stops is decided as before. The layout version is 7.
+- **A program with no context before it** takes its starts as they are, instead of adding them one at a time.
+- **An expression record is read only when it may run**: its trigger flags and signature are tested on the stored entry first.
+- **A regular expression's reverse automaton is read only when the forward one finds a match end**, and **each automaton in the image is validated once per opened image** (`Image::validated_automaton`), not on every object: validating the 44 KiB automaton of one PDF signature's expression cost 156,000 instructions on every PDF.
+- **A candidate's full program is read only after its header has passed** the anchor, already-detected, chain, category and armed checks.
+- **The measure.** `scan-profile` prints a second table, instructions per small object by stage, over 64 generated objects of 1 KiB of each kind and the toolchain image's system files of at most 16 KiB (`acceptance/src/small_object_cost.rs`), against twice and fifty times the reference's measured time per object. The requirement "Debar Never Spends More On A Small Object Than Its Best Measured Cost" ratchets it as the per-kind records do, in `acceptance/best-small-object-cost.json`.
+- **The reference's time per small object** is measured in the study folder ("Raw scan per small object" in the scan-speed baseline): about 1.6 to 4.5 ms per object, nearly all of it the same for every object. The calibration keeps the least of three passes, the strictest target.
+
+**Why.** Real corpora are mostly small files (the system part of the standard corpus is 2,424 files in 237 MiB), and per-byte gains did not reach them (issue #6): a 1 KiB text object cost 2.4 M instructions, 0.9 M of them placing about 3,300 signatures tied to offsets that nearly never matched.
+
+**Measured** on the pinned databases, in the toolchain image on an Apple Silicon Mac (aarch64 Linux VM). No detection changed: Debar's reports were byte-identical before and after, with and without every match, on 6,000 of the harness's built inputs drawn with seed 6 and its fixtures, and on the scan-speed slices, the small objects and every file of the toolchain's `/usr/bin` (897 files); every acceptance test passes.
+
+| Instructions per small object, aarch64, before → after | system | text | html | binary | PDF | OLE2 | tar |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Selecting signatures | 656,531 → 17,768 | 703,468 → 17,307 | 7,959 → 3,115 | 703,878 → 17,712 | 690,766 → 19,377 | 783,391 → 17,202 | 706,092 → 20,658 |
+| Verifying candidates | 1,450,706 → 663,217 | 1,045,798 → 189,453 | 200,130 → 69,943 | 991,897 → 135,631 | 830,000 → 175,166 | 872,284 → 151,799 | 1,121,832 → 264,996 |
+| Whole-object matching | 137,655 → 16,645 | 123,636 → 10,379 | 0 | 123,815 → 10,563 | 296,898 → 18,612 | 136,181 → 16,141 | 127,040 → 13,783 |
+| Scan total | 3,240,538 → 1,376,584 | 2,465,726 → 415,760 | 282,978 → 146,116 | 2,393,291 → 348,144 | 2,426,728 → 454,220 | 2,434,745 → 402,209 | 2,550,239 → 511,190 |
+| Fifty times the reference would be | 707,886 | 463,262 | 659,910 | 595,259 | 509,701 | 1,203,982 | 860,062 |
+| Times the reference, single-threaded | 10.9 → 25.7 | 9.4 → 55.7 | 117 → 226 | 12.4 → 85.5 | 10.5 → 56.1 | 24.7 → 150 | 16.9 → 84.1 |
+
+| Instructions per MiB, aarch64, before → after | text | html | binary | PDF | OLE2 | tar | system |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Scan total | 70,821,706 → 53,698,648 | 2,321,845 → 1,193,916 | 65,848,605 → 48,836,262 | 83,798,351 → 67,215,375 | 77,436,709 → 60,578,340 | 66,965,267 → 51,310,692 | 102,720,088 → 96,818,316 |
+
+The ratchet's figures are callgrind's (the requirement's count) and the table's cachegrind's (the profile's); they agree within 1 %. The x86_64 records are not measured natively: each per-MiB record is the previous one scaled by this change's speed-up under amd64 emulation (text 140.3 M → 118.1 M per MiB emulated), and each small-object record is the emulated figure scaled by its kind's ratio of the previous record to the emulated figure before this change (1.026 to 1.046; HTML 0.989), since emulation counts about 4 % fewer instructions than CI's runners. CI's figures replace them if they differ by more than the tolerance.
+
+**Not yet at fifty times: small system files** (shell scripts in the toolchain image, 4.7 KiB on average), at 26 times. Their cost is matching what they hold, not setup: real script text arms about 750 candidates an object, so verification (663,000) and the prefilter (368,000) dominate. That is the per-candidate verification lever already named for system files. On text the five mail-typing patterns, searched from every newline of the first 1,024 bytes in each of three passes, are the largest single item left (about 100,000 an object).

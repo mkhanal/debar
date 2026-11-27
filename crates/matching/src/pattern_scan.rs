@@ -760,6 +760,7 @@ pub struct PatternScan<'i, 'm, 'r> {
     first_retained: u64,
     fed: u64,
     probed_to: u64,
+    positional_placed: bool,
     positional: VecDeque<Candidate>,
     beyond_probed: VecDeque<Candidate>,
     queue: VecDeque<Candidate>,
@@ -861,7 +862,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             LayoutNeed::Executable => executable_layout(),
             LayoutNeed::NotExecutable | LayoutNeed::NeverResolved => None,
         };
-        let mut scan = Self {
+        Ok(Self {
             image,
             groups,
             kind: request.selection.kind(),
@@ -877,6 +878,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             first_retained: 0,
             fed: 0,
             probed_to: 0,
+            positional_placed: false,
             positional: VecDeque::new(),
             beyond_probed: VecDeque::new(),
             queue: VecDeque::new(),
@@ -905,9 +907,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             stop_once_past: None,
             stopped: false,
             image_fuzzy_hash: request.image_fuzzy_hash,
-        };
-        scan.place_positional()?;
-        Ok(scan)
+        })
     }
 
     #[must_use]
@@ -1021,6 +1021,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         }
         let mut whole = WholeObject::of(object)?;
         let request = PlugInRequest {
+            image: self.image,
             windows: self.report_windows,
             image_fuzzy_hash: self.image_fuzzy_hash,
             largest_object_for_regular_expressions: self
@@ -1227,8 +1228,17 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         };
         let mut placed = Vec::new();
         let mut starts = Vec::new();
+        let mut signatures = Vec::new();
         for (group_index, group) in self.groups.iter().enumerate() {
-            for id in group.view.positional() {
+            signatures.clear();
+            signatures.extend(group.view.positional());
+            group.view.placed_by_anchor_that_may_match(
+                &self.retained,
+                self.object_length,
+                &mut signatures,
+            );
+            signatures.sort_unstable();
+            for id in signatures.iter().copied() {
                 let record = group.view.signature(id)?;
                 if !self.category_is_live(record.category) {
                     continue;
@@ -1263,6 +1273,10 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
     }
 
     fn advance(&mut self) -> Result<(), PatternScanError> {
+        if !self.positional_placed {
+            self.place_positional()?;
+            self.positional_placed = true;
+        }
         let complete = self.fed == self.object_length;
         let probe_limit = if complete {
             self.fed
@@ -1593,20 +1607,15 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             first_position: self.first_retained,
             object_length: self.object_length,
         };
-        if anchor_rules_out(
-            view.program_header(candidate.program)?,
-            candidate.first_start,
-            candidate.last_start,
-            &bytes,
-        ) {
+        let header = view.program_header(candidate.program)?;
+        if anchor_rules_out(header, candidate.first_start, candidate.last_start, &bytes) {
             return Ok(());
         }
-        let program = view.program(candidate.program)?;
-        let signature = program.header.signature.get();
+        let signature = header.signature.get();
         if group.detected.contains(signature) {
             return Ok(());
         }
-        let segment = program.header.segment.get();
+        let segment = header.segment.get();
         if segment > 0 && !group.chains.contains_key(&signature) {
             return Ok(());
         }
@@ -1623,6 +1632,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         {
             return Ok(());
         }
+        let program = view.program(candidate.program)?;
         let Some(starts) = candidate_starts(group, &program, candidate) else {
             return Ok(());
         };

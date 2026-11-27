@@ -264,12 +264,17 @@ pub fn match_ends(
     if let Some(run) = program.only_run() {
         return run_ends(run, bytes, starts);
     }
-    let mut positions = PositionSet::default();
-    for start in starts.positions() {
-        if context_holds(program.before, bytes, start, Side::Before)? {
-            positions.add_position(start);
+    let mut positions = if program.before.is_some() {
+        let mut held = PositionSet::default();
+        for start in starts.positions() {
+            if context_holds(program.before, bytes, start, Side::Before)? {
+                held.add_position(start);
+            }
         }
-    }
+        held
+    } else {
+        starts.clone()
+    };
     for step in program.steps() {
         if positions.is_empty() {
             return Ok(positions);

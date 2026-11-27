@@ -418,6 +418,12 @@ impl<'m> ExpressionRecord<'m> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpressionTrigger {
+    pub signature: LogicalSignatureId,
+    pub runs_unarmed: bool,
+}
+
 #[derive(Clone, Copy)]
 pub struct PlugInSubsignatures<'m> {
     expressions: &'m [ExpressionEntry],
@@ -491,6 +497,21 @@ impl<'m> PlugInSubsignatures<'m> {
         self.expressions
             .iter()
             .map(move |entry| expression_record(entry, text, automata))
+    }
+
+    pub fn expression_triggers(&self) -> impl Iterator<Item = ExpressionTrigger> + 'm {
+        self.expressions.iter().map(|entry| ExpressionTrigger {
+            signature: LogicalSignatureId(entry.signature.get()),
+            runs_unarmed: entry.flags & (UNCONDITIONAL | TRIGGER_HOLDS_WITHOUT_MATCHES) != 0,
+        })
+    }
+
+    pub fn expression(&self, index: usize) -> Result<ExpressionRecord<'m>, PlugInsMalformed> {
+        let entry = self
+            .expressions
+            .get(index)
+            .ok_or(PlugInsMalformed::Expression)?;
+        expression_record(entry, self.text, self.automata)
     }
 
     pub fn trigger_holds(
