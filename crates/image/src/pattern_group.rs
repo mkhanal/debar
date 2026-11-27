@@ -136,6 +136,7 @@ impl PlacedByAnchorEntry {
                 bytes,
                 case,
                 displacement,
+                ..
             } => (bytes, LONG_ANCHOR_LENGTH, case, displacement),
             Anchor::Short {
                 bytes: [first, second],
@@ -552,6 +553,7 @@ impl PlacedPrograms {
                 bytes,
                 case,
                 displacement,
+                ..
             } => {
                 self.lookback = self.lookback.max(reach_before(segment, displacement));
                 let entry = LongAnchorEntry {

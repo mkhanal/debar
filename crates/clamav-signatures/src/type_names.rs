@@ -6,6 +6,9 @@ use debar_image::{
 pub const GENERIC_GROUP: SignatureGroup = SignatureGroup(0);
 pub const TYPE_RECOGNITION_GROUP: SignatureGroup = SignatureGroup(15);
 pub const TEXT_TARGET_GROUP: SignatureGroup = SignatureGroup(7);
+const WEB_PAGE_GROUP: SignatureGroup = SignatureGroup(3);
+pub const GROUPS_MATCHED_AGAINST_NORMALISED_TEXT: [SignatureGroup; 2] =
+    [WEB_PAGE_GROUP, TEXT_TARGET_GROUP];
 const TYPING_PREFIX_LENGTH: u32 = 1024;
 const MOST_FOUND_AT_OFFSETS: u32 = 10;
 const FIRST_ALWAYS_REPLACING_NUMBER: u32 = 563;
@@ -116,7 +119,7 @@ const TYPE_NUMBERS: [(&str, ObjectKind, u32); 89] = [
 const TARGET_GROUPS: [(ObjectKind, SignatureGroup); 19] = [
     (ObjectKind::WindowsExecutable, SignatureGroup(1)),
     (ObjectKind::Ole2, SignatureGroup(2)),
-    (ObjectKind::Html, SignatureGroup(3)),
+    (ObjectKind::Html, WEB_PAGE_GROUP),
     (ObjectKind::Mail, SignatureGroup(4)),
     (ObjectKind::Graphics, SignatureGroup(5)),
     (ObjectKind::Gif, SignatureGroup(5)),

@@ -1,7 +1,7 @@
 use zerocopy::little_endian::{U16, U32};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use crate::byte_rarity::{rarity_of, spread_penalty};
+use crate::byte_rarity::{MatchedContent, rarity_of, spread_penalty};
 use crate::model::{ByteSet, ContextTest, MaskedByte, Pattern, PatternElement};
 
 pub const LONG_ANCHOR_LENGTH: usize = 4;
@@ -51,6 +51,7 @@ pub enum Anchor {
         bytes: [u8; LONG_ANCHOR_LENGTH],
         case: AnchorCase,
         displacement: Displacement,
+        neighbours: AnchorNeighbours,
     },
     Short {
         bytes: [u8; SHORT_ANCHOR_LENGTH],
@@ -58,6 +59,56 @@ pub enum Anchor {
         displacement: Displacement,
     },
     Everywhere,
+}
+
+pub const MOST_NEIGHBOURS: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AnchorNeighbours {
+    pub before: [u8; MOST_NEIGHBOURS],
+    pub before_length: u8,
+    pub after: [u8; MOST_NEIGHBOURS],
+    pub after_length: u8,
+}
+
+impl AnchorNeighbours {
+    fn around(run: &[MaskedByte], start: usize, length: usize, case: AnchorCase) -> Self {
+        let mut neighbours = Self::default();
+        let fixed = |byte: &MaskedByte| neighbour_byte(*byte, case);
+        let before: Vec<u8> = run
+            .get(..start)
+            .unwrap_or_default()
+            .iter()
+            .rev()
+            .take(MOST_NEIGHBOURS)
+            .map_while(fixed)
+            .collect();
+        for (slot, byte) in neighbours.before.iter_mut().rev().zip(&before) {
+            *slot = *byte;
+        }
+        neighbours.before_length = u8::try_from(before.len()).unwrap_or(0);
+        let after: Vec<u8> = run
+            .get(start.saturating_add(length)..)
+            .unwrap_or_default()
+            .iter()
+            .take(MOST_NEIGHBOURS)
+            .map_while(fixed)
+            .collect();
+        for (slot, byte) in neighbours.after.iter_mut().zip(&after) {
+            *slot = *byte;
+        }
+        neighbours.after_length = u8::try_from(after.len()).unwrap_or(0);
+        neighbours
+    }
+}
+
+fn neighbour_byte(byte: MaskedByte, case: AnchorCase) -> Option<u8> {
+    match case {
+        AnchorCase::Exact => byte.is_exact().then_some(byte.value),
+        AnchorCase::Folded => folded_letter(byte).or_else(|| {
+            (byte.is_exact() && !byte.value.is_ascii_alphabetic()).then_some(byte.value)
+        }),
+    }
 }
 
 const CASE_BIT: u8 = 0x20;
@@ -89,6 +140,39 @@ pub struct Segment {
 
 impl Segment {
     #[must_use]
+    pub fn anchor_windows(&self) -> Vec<[u8; LONG_ANCHOR_LENGTH]> {
+        let mut windows = Vec::new();
+        for step in &self.steps {
+            if let Step::Bytes(run) = step {
+                for window in run.windows(LONG_ANCHOR_LENGTH) {
+                    let anchored: Option<Vec<u8>> = window
+                        .iter()
+                        .map(|byte| anchor_byte(*byte).map(|(value, _)| value.to_ascii_lowercase()))
+                        .collect();
+                    if let Some(bytes) =
+                        anchored.and_then(|bytes| <[u8; LONG_ANCHOR_LENGTH]>::try_from(bytes).ok())
+                    {
+                        windows.push(bytes);
+                    }
+                }
+            }
+        }
+        windows.sort_unstable();
+        windows.dedup();
+        windows
+    }
+
+    pub fn choose_anchor_again(
+        &mut self,
+        content: MatchedContent,
+        sharing_penalty: &dyn Fn(&[u8]) -> u32,
+    ) {
+        if matches!(self.anchor, Anchor::Long { .. }) {
+            self.anchor = anchor_of(&self.steps, content, sharing_penalty);
+        }
+    }
+
+    #[must_use]
     pub fn context_reach_before(&self) -> u32 {
         context_reach(self.before.as_ref())
     }
@@ -104,7 +188,10 @@ fn context_reach(test: Option<&ContextTest>) -> u32 {
     })
 }
 
-pub fn segments_of(pattern: &Pattern) -> Result<Vec<Segment>, PatternNotCompiled> {
+pub fn segments_of(
+    pattern: &Pattern,
+    content: MatchedContent,
+) -> Result<Vec<Segment>, PatternNotCompiled> {
     let mut pieces: Vec<Piece> = vec![Piece::default()];
     for element in &pattern.elements {
         match element {
@@ -148,7 +235,7 @@ pub fn segments_of(pattern: &Pattern) -> Result<Vec<Segment>, PatternNotCompiled
             return Err(PatternNotCompiled::NothingToMatch);
         }
         segments.push(Segment {
-            anchor: anchor_of(&piece.steps),
+            anchor: anchor_of(&piece.steps, content, &|_| 0),
             steps: piece.steps,
             gap_before: piece.gap_before,
             gap_most: piece.gap_most,
@@ -245,19 +332,25 @@ struct AnchorCandidate {
     bytes: Vec<u8>,
     case: AnchorCase,
     displacement: Displacement,
+    neighbours: AnchorNeighbours,
 }
 
-fn anchor_of(steps: &[Step]) -> Anchor {
-    if let Some(best) = best_window(steps, LONG_ANCHOR_LENGTH)
+fn anchor_of(
+    steps: &[Step],
+    content: MatchedContent,
+    sharing_penalty: &dyn Fn(&[u8]) -> u32,
+) -> Anchor {
+    if let Some(best) = best_window(steps, LONG_ANCHOR_LENGTH, content, sharing_penalty)
         && let Ok(bytes) = <[u8; LONG_ANCHOR_LENGTH]>::try_from(best.bytes.as_slice())
     {
         return Anchor::Long {
             bytes,
             case: best.case,
             displacement: best.displacement,
+            neighbours: best.neighbours,
         };
     }
-    if let Some(best) = best_window(steps, SHORT_ANCHOR_LENGTH)
+    if let Some(best) = best_window(steps, SHORT_ANCHOR_LENGTH, content, &|_| 0)
         && let Ok(bytes) = <[u8; SHORT_ANCHOR_LENGTH]>::try_from(best.bytes.as_slice())
     {
         return Anchor::Short {
@@ -278,7 +371,12 @@ fn anchor_byte(byte: MaskedByte) -> Option<(u8, AnchorCase)> {
 
 const FOLDED_BYTE_PENALTY: u32 = 16;
 
-fn best_window(steps: &[Step], window_length: usize) -> Option<AnchorCandidate> {
+fn best_window(
+    steps: &[Step],
+    window_length: usize,
+    content: MatchedContent,
+    sharing_penalty: &dyn Fn(&[u8]) -> u32,
+) -> Option<AnchorCandidate> {
     let mut nearest: u32 = 0;
     let mut farthest: u32 = 0;
     let mut best: Option<AnchorCandidate> = None;
@@ -315,7 +413,8 @@ fn best_window(steps: &[Step], window_length: usize) -> Option<AnchorCandidate> 
                     nearest: nearest.saturating_add(start),
                     farthest: farthest.saturating_add(start),
                 };
-                let score = rarity_of(&bytes)
+                let score = rarity_of(&bytes, content)
+                    .saturating_sub(sharing_penalty(&bytes))
                     .saturating_sub(spread_penalty(
                         displacement.farthest.saturating_sub(displacement.nearest),
                     ))
@@ -329,6 +428,12 @@ fn best_window(steps: &[Step], window_length: usize) -> Option<AnchorCandidate> 
                         bytes,
                         case,
                         displacement,
+                        neighbours: AnchorNeighbours::around(
+                            run,
+                            usize::try_from(start).unwrap_or(usize::MAX),
+                            window_length,
+                            case,
+                        ),
                     });
                 }
             }
@@ -356,12 +461,25 @@ pub struct ProgramHeader {
     pub anchor: [u8; LONG_ANCHOR_LENGTH],
     pub anchor_length: u8,
     pub anchor_case: u8,
-    pub reserved: [u8; 2],
+    pub neighbour_lengths: [u8; 2],
     pub anchor_nearest: U32,
     pub anchor_farthest: U32,
+    pub neighbours_before: [u8; MOST_NEIGHBOURS],
+    pub neighbours_after: [u8; MOST_NEIGHBOURS],
 }
 
 impl ProgramHeader {
+    #[must_use]
+    pub const fn anchor_neighbours(&self) -> AnchorNeighbours {
+        let [before_length, after_length] = self.neighbour_lengths;
+        AnchorNeighbours {
+            before: self.neighbours_before,
+            before_length,
+            after: self.neighbours_after,
+            after_length,
+        }
+    }
+
     #[must_use]
     pub fn is_armed_by_predecessor(&self) -> bool {
         self.context_flags.get() & ARMED_BY_PREDECESSOR != 0
@@ -444,13 +562,16 @@ pub fn encode(segment: &Segment, place: &ProgramPlace) -> Result<Vec<u8>, Patter
         context_flags |= ARMED_BY_PREDECESSOR;
     }
     let mut anchor = [0u8; LONG_ANCHOR_LENGTH];
+    let mut anchor_neighbours = AnchorNeighbours::default();
     let (anchor_length, anchor_case, displacement) = match segment.anchor {
         Anchor::Long {
             bytes,
             case,
             displacement,
+            neighbours,
         } => {
             anchor = bytes;
+            anchor_neighbours = neighbours;
             (LONG_ANCHOR_LENGTH, case, displacement)
         }
         Anchor::Short {
@@ -501,9 +622,14 @@ pub fn encode(segment: &Segment, place: &ProgramPlace) -> Result<Vec<u8>, Patter
             AnchorCase::Exact => CASE_EXACT,
             AnchorCase::Folded => CASE_FOLDED,
         },
-        reserved: [0; 2],
+        neighbour_lengths: [
+            anchor_neighbours.before_length,
+            anchor_neighbours.after_length,
+        ],
         anchor_nearest: U32::new(displacement.nearest),
         anchor_farthest: U32::new(displacement.farthest),
+        neighbours_before: anchor_neighbours.before,
+        neighbours_after: anchor_neighbours.after,
     };
     let mut bytes = header.as_bytes().to_vec();
     for test in [&segment.before, &segment.after].into_iter().flatten() {

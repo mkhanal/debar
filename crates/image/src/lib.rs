@@ -85,9 +85,10 @@ pub use pattern_group::{
     PatternSignatureId, PatternSignatureRecord, ProgramId, RecordedOutcome, ShortAnchorFilter,
 };
 pub use pattern_program::{
-    AnchorBytes, AnchorCase, ArmedAnchor, ContextView, Displacement, LONG_ANCHOR_LENGTH, MaskedRun,
-    PatternNotCompiled, ProgramAnchor, ProgramHeader, ProgramMalformed, ProgramView, Runs,
-    SHORT_ANCHOR_LENGTH, StepView, ascii_lowercase, set_in_sequence_contains,
+    AnchorBytes, AnchorCase, AnchorNeighbours, ArmedAnchor, ContextView, Displacement,
+    LONG_ANCHOR_LENGTH, MOST_NEIGHBOURS, MaskedRun, PatternNotCompiled, ProgramAnchor,
+    ProgramHeader, ProgramMalformed, ProgramView, Runs, SHORT_ANCHOR_LENGTH, StepView,
+    ascii_lowercase, set_in_sequence_contains,
 };
 pub use plug_in_subsignatures::{
     ComparisonRecord, ExpressionRecord, ExpressionTrigger, PlugInSubsignatures, PlugInsMalformed,

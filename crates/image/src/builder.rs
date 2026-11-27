@@ -5,7 +5,7 @@ use sha2::{Digest as _, Sha256};
 use zerocopy::IntoBytes;
 use zerocopy::little_endian::{U32, U64};
 
-use crate::byte_rarity::rarity_of;
+use crate::byte_rarity::{MatchedContent, rarity_of};
 use crate::certificate_rules::{self, CertificateRule};
 use crate::container_signatures::{self, ContainerSignaturesNotBuilt, PendingContainerSignature};
 use crate::engine_alerts::{self, EngineAlert};
@@ -36,7 +36,9 @@ use crate::object_kinds::{self, KindDescription, KindsNotBuilt, TextNormalisatio
 use crate::pattern_group::{
     self, GroupNotBuilt, PatternSignatureId, PendingPatternSignature, RecordedOutcome,
 };
-use crate::pattern_program::{Anchor, PatternNotCompiled, Segment, segments_of};
+use crate::pattern_program::{
+    Anchor, LONG_ANCHOR_LENGTH, PatternNotCompiled, Segment, segments_of,
+};
 use crate::plug_in_subsignatures::{
     self, PendingComparison, PendingExpression, PendingImageHash, PendingPlugIns, PlugInsNotBuilt,
 };
@@ -203,6 +205,7 @@ pub struct ImageBuilder {
     icon_groups: Option<IconGroups>,
     url_rules: Vec<UrlRule>,
     programs: Vec<SignatureProgram>,
+    normalised_text_groups: BTreeSet<SignatureGroup>,
 }
 
 struct PendingContainer {
@@ -256,29 +259,46 @@ struct PendingLogical {
     subsignatures: Vec<PendingSubsignature>,
     conditions: LogicalConditions,
     holds_with_no_matches: bool,
+    gated_by: Option<Expression>,
+    placed_anywhere: Vec<bool>,
 }
 
 const HITS_SCALE_BITS: u32 = 48;
 const RECORDED_STARTS_OF_A_COMPARED_SUBSIGNATURE: u32 = 1024;
 const SIXTEENTHS_PER_BIT: u32 = 16;
 
-fn expected_hits_of_anchor(anchor: &Anchor) -> u64 {
+fn expected_hits_of_anchor(
+    anchor: &Anchor,
+    content: MatchedContent,
+    sharing_penalty: &dyn Fn(&[u8]) -> u32,
+) -> u64 {
     let rarity_bits = match anchor {
-        Anchor::Long { bytes, .. } => rarity_of(bytes),
-        Anchor::Short { bytes, .. } => rarity_of(bytes),
+        Anchor::Long { bytes, .. } => {
+            rarity_of(bytes, content).saturating_sub(sharing_penalty(bytes))
+        }
+        Anchor::Short { bytes, .. } => rarity_of(bytes, content),
         Anchor::Everywhere => 0,
     } / SIXTEENTHS_PER_BIT;
     1u64.checked_shl(HITS_SCALE_BITS.saturating_sub(rarity_bits.min(HITS_SCALE_BITS)))
         .unwrap_or(u64::MAX)
 }
 
-fn expected_hits(placement: Placement, segments: &[Segment]) -> u64 {
+fn expected_hits(
+    placement: Placement,
+    segments: &[Segment],
+    content: MatchedContent,
+    sharing_penalty: &dyn Fn(&[u8]) -> u32,
+) -> u64 {
     segments
         .iter()
         .enumerate()
         .filter(|(index, _)| *index > 0 || placement == Placement::Anywhere)
         .fold(0u64, |hits, (_, segment)| {
-            hits.saturating_add(expected_hits_of_anchor(&segment.anchor))
+            hits.saturating_add(expected_hits_of_anchor(
+                &segment.anchor,
+                content,
+                sharing_penalty,
+            ))
         })
 }
 
@@ -323,17 +343,31 @@ impl ImageBuilder {
         Ok(id)
     }
 
+    pub fn match_group_against_normalised_text(&mut self, group: SignatureGroup) {
+        self.normalised_text_groups.insert(group);
+    }
+
+    fn content_matched_by(&self, group: SignatureGroup) -> MatchedContent {
+        if self.normalised_text_groups.contains(&group) {
+            MatchedContent::NormalisedText
+        } else {
+            MatchedContent::AnyBytes
+        }
+    }
+
     pub fn add_pattern_signature(
         &mut self,
         signature: &PatternSignature<'_>,
     ) -> Result<(), BuildError> {
-        let segments = segments_of(signature.pattern).map_err(|reason| BuildError::Pattern {
-            name: match signature.outcome {
-                PatternOutcome::Detection { name, .. } => name.to_owned(),
-                PatternOutcome::TypeFound(finding) => format!("{finding:?}"),
-            },
-            reason,
-        })?;
+        let content = self.content_matched_by(signature.group);
+        let segments =
+            segments_of(signature.pattern, content).map_err(|reason| BuildError::Pattern {
+                name: match signature.outcome {
+                    PatternOutcome::Detection { name, .. } => name.to_owned(),
+                    PatternOutcome::TypeFound(finding) => format!("{finding:?}"),
+                },
+                reason,
+            })?;
         let outcome = match signature.outcome {
             PatternOutcome::Detection { name, indicator } => {
                 PendingOutcome::Detection(self.add_name(name, indicator)?)
@@ -367,9 +401,10 @@ impl ImageBuilder {
                 reason,
             }
         })?;
-        let segmented = segmented_contents(signature)?;
+        let content = self.content_matched_by(signature.group);
+        let segmented = segmented_contents(signature, content)?;
         let has_plug_ins = segmented.iter().any(Option::is_none);
-        let hits = expected_hits_of_subsignatures(signature.subsignatures, &segmented);
+        let hits = expected_hits_of_subsignatures(signature.subsignatures, &segmented, content);
         let holds_without_matches = holds_with_no_matches(&steps);
         let gate = if holds_without_matches || has_plug_ins {
             None
@@ -442,6 +477,14 @@ impl ImageBuilder {
             subsignatures,
             conditions: signature.conditions.clone(),
             holds_with_no_matches: holds_without_matches,
+            gated_by: gate.is_some().then(|| signature.expression.clone()),
+            placed_anywhere: signature
+                .subsignatures
+                .iter()
+                .map(|subsignature| {
+                    matches!(subsignature, Subsignature::Content(content) if content.placement == Placement::Anywhere)
+                })
+                .collect(),
         });
         Ok(())
     }
@@ -681,11 +724,13 @@ impl ImageBuilder {
             icon_groups,
             url_rules,
             programs,
+            normalised_text_groups,
         } = self;
         let (sorted_names, name_ids) = distinct_sorted_names(&name_text, &name_spans)?;
         let categories_section = categories_section(&unwanted_categories, &sorted_names)?;
         let hash_sections = hash_sections(partitions, &withdrawn_hashes, &name_ids)?;
-        let (pattern_sections, logical_sections, anchors) = pattern_sections(groups, &name_ids)?;
+        let (pattern_sections, logical_sections, anchors) =
+            pattern_sections(groups, &name_ids, &normalised_text_groups)?;
         let selections_section = selections_section(&kinds, typing, &anchors)?;
         let containers_section = containers_section(containers, &name_ids)?;
         let mut sections = vec![databases_section(&databases)?];
@@ -743,7 +788,10 @@ impl ImageBuilder {
 
 type SegmentedContents = Vec<Option<Vec<Vec<Segment>>>>;
 
-fn segmented_contents(signature: &LogicalSignature<'_>) -> Result<SegmentedContents, BuildError> {
+fn segmented_contents(
+    signature: &LogicalSignature<'_>,
+    matched: MatchedContent,
+) -> Result<SegmentedContents, BuildError> {
     let mut segmented = Vec::with_capacity(signature.subsignatures.len());
     for subsignature in signature.subsignatures {
         let Subsignature::Content(content) = subsignature else {
@@ -752,10 +800,12 @@ fn segmented_contents(signature: &LogicalSignature<'_>) -> Result<SegmentedConte
         };
         let mut patterns = Vec::with_capacity(content.patterns.len());
         for pattern in &content.patterns {
-            patterns.push(segments_of(pattern).map_err(|reason| BuildError::Pattern {
-                name: signature.name.to_owned(),
-                reason,
-            })?);
+            patterns.push(
+                segments_of(pattern, matched).map_err(|reason| BuildError::Pattern {
+                    name: signature.name.to_owned(),
+                    reason,
+                })?,
+            );
         }
         segmented.push(Some(patterns));
     }
@@ -765,6 +815,7 @@ fn segmented_contents(signature: &LogicalSignature<'_>) -> Result<SegmentedConte
 fn expected_hits_of_subsignatures(
     subsignatures: &[Subsignature],
     segmented: &SegmentedContents,
+    matched: MatchedContent,
 ) -> Vec<u64> {
     subsignatures
         .iter()
@@ -772,7 +823,7 @@ fn expected_hits_of_subsignatures(
         .map(|(subsignature, patterns)| match (subsignature, patterns) {
             (Subsignature::Content(content), Some(patterns)) => {
                 patterns.iter().fold(0u64, |hits, segments| {
-                    hits.saturating_add(expected_hits(content.placement, segments))
+                    hits.saturating_add(expected_hits(content.placement, segments, matched, &|_| 0))
                 })
             }
             _ => u64::MAX,
@@ -1005,11 +1056,25 @@ fn hash_sections(
 fn pattern_sections(
     groups: BTreeMap<SignatureGroup, PendingGroup>,
     name_ids: &[NameId],
+    normalised_text_groups: &BTreeSet<SignatureGroup>,
 ) -> Result<PatternSections, BuildError> {
     let mut sections = Vec::with_capacity(groups.len());
     let mut logical_sections = Vec::new();
     let mut anchors = BTreeMap::new();
-    for (group, pending_group) in groups {
+    for (group, mut pending_group) in groups {
+        let content = if normalised_text_groups.contains(&group) {
+            MatchedContent::NormalisedText
+        } else {
+            MatchedContent::AnyBytes
+        };
+        let shared = windows_shared_between_segments(&pending_group.patterns);
+        let sharing_penalty = |window: &[u8]| sharing_penalty_of(&shared, window);
+        for pattern in &mut pending_group.patterns {
+            for segment in &mut pattern.segments {
+                segment.choose_anchor_again(content, &sharing_penalty);
+            }
+        }
+        choose_gates_again(&mut pending_group, content, &sharing_penalty);
         if !pending_group.logical.is_empty() {
             logical_sections.push(logical_section(group, pending_group.logical, name_ids)?);
         }
@@ -1071,6 +1136,100 @@ fn pattern_sections(
         });
     }
     Ok((sections, logical_sections, anchors))
+}
+
+const SHARING_PENALTY_PER_DOUBLING: u32 = 32;
+
+fn windows_shared_between_segments(
+    patterns: &[PendingPattern],
+) -> BTreeMap<[u8; LONG_ANCHOR_LENGTH], u32> {
+    let mut shared: BTreeMap<[u8; LONG_ANCHOR_LENGTH], u32> = BTreeMap::new();
+    for segment in patterns.iter().flat_map(|pattern| &pattern.segments) {
+        for window in segment.anchor_windows() {
+            let count = shared.entry(window).or_insert(0);
+            *count = count.saturating_add(1);
+        }
+    }
+    shared
+}
+
+fn sharing_penalty_of(shared: &BTreeMap<[u8; LONG_ANCHOR_LENGTH], u32>, window: &[u8]) -> u32 {
+    <[u8; LONG_ANCHOR_LENGTH]>::try_from(window)
+        .ok()
+        .map(|mut window| {
+            window.make_ascii_lowercase();
+            window
+        })
+        .and_then(|window| shared.get(&window))
+        .map_or(0, |count| {
+            SHARING_PENALTY_PER_DOUBLING.saturating_mul(
+                u32::BITS
+                    .saturating_sub(count.leading_zeros())
+                    .saturating_sub(1),
+            )
+        })
+}
+
+fn choose_gates_again(
+    group: &mut PendingGroup,
+    content: MatchedContent,
+    sharing_penalty: &dyn Fn(&[u8]) -> u32,
+) {
+    let patterns = &mut group.patterns;
+    for logical in &mut group.logical {
+        let Some(expression) = &logical.gated_by else {
+            continue;
+        };
+        let patterns_of = |subsignature: &PendingSubsignature| {
+            let first = subsignature
+                .pattern
+                .and_then(|id| usize::try_from(id.0).ok())
+                .unwrap_or(usize::MAX);
+            first..first.saturating_add(usize::from(subsignature.pattern_count))
+        };
+        let hits: Vec<u64> = logical
+            .subsignatures
+            .iter()
+            .map(|subsignature| {
+                patterns
+                    .get(patterns_of(subsignature))
+                    .map_or(u64::MAX, |of_subsignature| {
+                        of_subsignature.iter().fold(0u64, |hits, pattern| {
+                            hits.saturating_add(expected_hits(
+                                pattern.placement,
+                                &pattern.segments,
+                                content,
+                                sharing_penalty,
+                            ))
+                        })
+                    })
+            })
+            .collect();
+        let gate = gate_of(expression, &|index| {
+            hits.get(usize::from(index)).copied().unwrap_or(u64::MAX)
+        });
+        for (index, subsignature) in logical.subsignatures.iter_mut().enumerate() {
+            if subsignature.pattern.is_none() {
+                continue;
+            }
+            let in_gate = gate
+                .as_ref()
+                .is_none_or(|gate| u16::try_from(index).is_ok_and(|index| gate.contains(&index)));
+            let anywhere = logical.placed_anywhere.get(index).copied().unwrap_or(false);
+            let pass = if in_gate || !anywhere {
+                MatchingPass::Main
+            } else {
+                MatchingPass::Second
+            };
+            subsignature.pass = pass;
+            for pattern in patterns
+                .get_mut(patterns_of(subsignature))
+                .unwrap_or_default()
+            {
+                pattern.pass = pass;
+            }
+        }
+    }
 }
 
 type PatternSections = (

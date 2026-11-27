@@ -32,7 +32,8 @@ use crate::program_text::{
     MalformedProgram, ParsedProgram, ProgramSkip, ReadProgram, read_program,
 };
 use crate::type_names::{
-    GENERIC_GROUP, TEXT_TARGET_GROUP, TYPE_RECOGNITION_GROUP, describe_object_kinds,
+    GENERIC_GROUP, GROUPS_MATCHED_AGAINST_NORMALISED_TEXT, TEXT_TARGET_GROUP,
+    TYPE_RECOGNITION_GROUP, describe_object_kinds,
 };
 use crate::url_lines::{
     self, MalformedUrlLine, ReadUrlLine, UrlFile, shadowed_by_an_allowed_digest,
@@ -400,6 +401,9 @@ pub fn compile(
     files: &[DatabaseFile<'_>],
     image: &mut ImageBuilder,
 ) -> Result<Account, DatabaseError> {
+    for group in GROUPS_MATCHED_AGAINST_NORMALISED_TEXT {
+        image.match_group_against_normalised_text(group);
+    }
     let mut account = Account::default();
     let mut databases: Vec<(&DatabaseFile<'_>, FileKind)> = Vec::new();
     let mut detached_signatures: BTreeMap<&str, &[u8]> = BTreeMap::new();

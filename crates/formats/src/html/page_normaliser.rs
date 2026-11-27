@@ -209,27 +209,64 @@ impl PageNormaliser {
         if self.state != State::Text {
             return 0;
         }
-        let plain = bytes
-            .iter()
-            .position(|&byte| !is_plain_text(byte))
-            .unwrap_or(bytes.len());
-        let Some(run) = bytes.get(..plain).filter(|run| !run.is_empty()) else {
-            return 0;
-        };
         if self.outside_elements() {
-            for &byte in run {
-                let lowercased = byte.to_ascii_lowercase();
-                self.without_comments.write(lowercased);
-                self.without_tags.write(lowercased);
-            }
-            self.space_written = false;
+            self.normalise_plain_text_outside_elements(bytes)
         } else {
-            for &byte in run {
-                let lowercased = self.lowercased_in_element(byte);
-                self.without_comments.write(lowercased);
+            self.normalise_plain_text_in_an_element(bytes)
+        }
+    }
+
+    fn normalise_plain_text_outside_elements(&mut self, bytes: &[u8]) -> usize {
+        let mut consumed = 0;
+        while let Some(&byte) = bytes.get(consumed) {
+            if is_plain_text(byte) {
+                let rest = bytes.get(consumed..).unwrap_or_default();
+                let run = rest
+                    .iter()
+                    .position(|&byte| !is_plain_text(byte))
+                    .unwrap_or(rest.len());
+                let plain = rest.get(..run).unwrap_or_default();
+                self.without_comments.write_lowercased(plain);
+                self.without_tags.write_lowercased(plain);
+                self.space_written = false;
+                consumed = consumed.saturating_add(run);
+            } else if byte == b'\r' {
+                consumed = consumed.saturating_add(1);
+            } else if is_whitespace(byte) {
+                let run = bytes
+                    .get(consumed..)
+                    .unwrap_or_default()
+                    .iter()
+                    .take_while(|&&byte| is_whitespace(byte))
+                    .count();
+                let after = consumed.saturating_add(run);
+                if !bytes.get(after).is_some_and(|&next| is_plain_text(next)) {
+                    break;
+                }
+                if !self.space_written {
+                    self.without_tags.write(b' ');
+                }
+                self.without_comments.write(b' ');
+                consumed = after;
+            } else {
+                break;
             }
         }
-        plain
+        consumed
+    }
+
+    fn normalise_plain_text_in_an_element(&mut self, bytes: &[u8]) -> usize {
+        let mut consumed = 0;
+        while let Some(&byte) = bytes.get(consumed) {
+            if is_plain_text(byte) {
+                let lowercased = self.lowercased_in_element(byte);
+                self.without_comments.write(lowercased);
+            } else if !is_whitespace(byte) {
+                break;
+            }
+            consumed = consumed.saturating_add(1);
+        }
+        consumed
     }
 
     pub fn normalise_byte(&mut self, byte: u8) {

@@ -386,8 +386,9 @@ enum Arming {
     AlreadyAdmittedBefore(Option<u64>),
 }
 
-struct GroupProbe<'m> {
+struct GroupProbe<'g, 'm> {
     group: usize,
+    view: &'g PatternGroup<'m>,
     tables: AnchorTables<'m>,
     exact: LongAnchorTable<'m>,
     exact_filter: LongAnchorFilter<'m>,
@@ -395,12 +396,13 @@ struct GroupProbe<'m> {
     short: Option<ShortAnchorFilter<'m>>,
 }
 
-impl<'m> GroupProbe<'m> {
-    fn of(group: usize, tables: AnchorTables<'m>) -> Self {
+impl<'g, 'm> GroupProbe<'g, 'm> {
+    fn of(group: usize, view: &'g PatternGroup<'m>, tables: AnchorTables<'m>) -> Self {
         let exact = tables.exact_long();
         let folded = tables.folded_long();
         Self {
             group,
+            view,
             tables,
             exact,
             exact_filter: exact.filter(),
@@ -428,7 +430,7 @@ impl ProbedWindow<'_, '_> {
 
 fn probe_windows(
     window: &ProbedWindow<'_, '_>,
-    probes: &[GroupProbe<'_>],
+    probes: &[GroupProbe<'_, '_>],
     armed: Option<&ArmedParts>,
     hits: &mut Vec<(u64, usize, AnchoredProgram)>,
 ) {
@@ -463,7 +465,7 @@ fn probe_windows(
 
 struct PositionProbe<'p, 'w, 'm> {
     window: &'p ProbedWindow<'w, 'm>,
-    probes: &'p [GroupProbe<'m>],
+    probes: &'p [GroupProbe<'p, 'm>],
     armed: Option<&'p ArmedParts>,
     probes_long: bool,
     probes_short: bool,
@@ -590,10 +592,51 @@ fn armed_filter_holds(words: &ArmedFilter, window: u16) -> bool {
         .is_some_and(|word| word & (1u64 << (window & 63)) != 0)
 }
 
+fn neighbours_differ(program: &ProgramHeader, bytes: &[u8], anchor_at: usize) -> bool {
+    let neighbours = program.anchor_neighbours();
+    let folded = program.anchor().case == AnchorCase::Folded;
+    let differs = |expected: u8, at: Option<usize>| {
+        at.and_then(|at| bytes.get(at)).is_some_and(|&found| {
+            expected
+                != if folded {
+                    found.to_ascii_lowercase()
+                } else {
+                    found
+                }
+        })
+    };
+    let before = neighbours.before.iter().rev().enumerate();
+    for (distance, &expected) in before.take(usize::from(neighbours.before_length)) {
+        if differs(expected, anchor_at.checked_sub(distance.saturating_add(1))) {
+            return true;
+        }
+    }
+    let after_start = anchor_at.saturating_add(LONG_ANCHOR_LENGTH);
+    let after = neighbours.after.iter().enumerate();
+    for (distance, &expected) in after.take(usize::from(neighbours.after_length)) {
+        if differs(expected, after_start.checked_add(distance)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn neighbours_admit(
+    probe: &GroupProbe<'_, '_>,
+    hit: &AnchoredProgram,
+    bytes: &[u8],
+    offset: usize,
+) -> bool {
+    probe
+        .view
+        .program_header(hit.program)
+        .map_or(true, |program| !neighbours_differ(program, bytes, offset))
+}
+
 #[inline(never)]
 fn long_hits(
     window: &ProbedWindow<'_, '_>,
-    probes: &[GroupProbe<'_>],
+    probes: &[GroupProbe<'_, '_>],
     probes_folded: bool,
     offset: usize,
     long: u32,
@@ -611,6 +654,7 @@ fn long_hits(
                 probe
                     .exact
                     .anchored(long.to_le_bytes())
+                    .filter(|hit| neighbours_admit(probe, hit, window.bytes, offset))
                     .map(|hit| (position, probe.group, hit)),
             );
         }
@@ -620,6 +664,7 @@ fn long_hits(
             hits.extend(
                 folded
                     .anchored(lowered.to_le_bytes())
+                    .filter(|hit| neighbours_admit(probe, hit, window.bytes, offset))
                     .map(|hit| (position, probe.group, hit)),
             );
         }
@@ -629,7 +674,7 @@ fn long_hits(
 #[inline(never)]
 fn short_hits(
     window: &ProbedWindow<'_, '_>,
-    probes: &[GroupProbe<'_>],
+    probes: &[GroupProbe<'_, '_>],
     offset: usize,
     short: [u8; SHORT_ANCHOR_LENGTH],
     hits: &mut Vec<(u64, usize, AnchoredProgram)>,
@@ -652,7 +697,7 @@ fn short_hits(
 
 fn probe_everywhere(
     window: &ProbedWindow<'_, '_>,
-    probes: &[GroupProbe<'_>],
+    probes: &[GroupProbe<'_, '_>],
     hits: &mut Vec<(u64, usize, AnchoredProgram)>,
 ) {
     for probe in probes {
@@ -1506,14 +1551,14 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             return;
         };
         let positions = usize::try_from(pass_end.saturating_sub(self.probed_to)).unwrap_or(0);
-        let probes: Vec<GroupProbe<'m>> = if self.second_pass_search.is_some() {
+        let probes: Vec<GroupProbe<'_, 'm>> = if self.second_pass_search.is_some() {
             Vec::new()
         } else {
             self.groups
                 .iter()
                 .enumerate()
                 .filter(|(_, group)| !group.tables.is_empty())
-                .map(|(index, group)| GroupProbe::of(index, group.tables))
+                .map(|(index, group)| GroupProbe::of(index, &group.view, group.tables))
                 .collect()
         };
         let window = ProbedWindow {

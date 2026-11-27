@@ -900,3 +900,17 @@ The ratchet's figures are callgrind's (the requirement's count) and the table's 
 **Not built, recorded:** the `javascript` view (the reference's script normaliser) and its two passes; `data:` URIs written as `rfc2397` files (their effect on the page without comments is built); CSS images; Script Encoder decoding (the rewritten `<script>` tag is built); `<%@ … %>` Script Encoder blocks; UTF-16 pages (`CL_TYPE_HTML_UTF16`); `--max-htmlnormalize` and `--max-htmlnotags`, fixed at their defaults; URL collection, which only a metadata option turns on.
 
 **Ratchets.** In the harness, `debar-known-differences-web-pages.jsonl` can lose its two lines once the full target-3 job agrees; `debar-known-differences-text.jsonl` keeps its one page (normalised scripts).
+
+### 2026-11-27 — Anchors and logical gates chosen with the signatures' shared windows and a text byte table
+
+**Decision.** How the image chooses where a pattern is probed and which subsignatures gate a logical signature changes in three ways (`crates/image`, `crates/matching`):
+
+- **Groups matched only against normalised text** (web pages and text, named by the signature-format part through `ImageBuilder::match_group_against_normalised_text`) score windows with a byte-cost table measured on lowercased text: the `.rs` and `.md` files of the pinned nightly's `library` source (57,065,624 bytes; costs `-16·log2(0.99·p + 0.01/256)`, measured with a Perl counter over `find …/lib/rustlib/src/rust/library -type f \( -name '*.rs' -o -name '*.md' \) | sort | xargs cat`). Other groups keep the existing table.
+- **Every group**, once all its signatures are known, chooses each long anchor again with a penalty of two bits per doubling of the number of the group's segments that contain the window, and chooses each logical signature's gate again from expected hits counted the same way. A four-byte window that many signatures share (`<scr`, `ript`, `++){`) is one the content they were written for holds often; the per-byte table alone rated such markup among the rarest windows.
+- **A long anchor carries up to four exact bytes on each side of it** in its program header; a probed hit whose neighbouring bytes differ is dropped before it becomes a candidate.
+
+**Why.** On web pages most of the scan went to candidates the engine created and then rejected, or to genuine but frequent partial matches, on windows the byte-cost model rated rare: `++){` and `<scr` alone gave about 400,000 candidates per MiB of page, each costing about a thousand instructions.
+
+**Measured** 2026-11-27, aarch64, `scan-profile` (instructions per byte, before → after): HTML 846.7 → 545.2 (of which the normaliser about 75), text 140.2 → 134.0, binary 88.6 → 88.4, PDF 64.2 → 60.6, OLE2 57.8 → 55.1, tar 49.0 → 46.2, system 92.4 → 82.7. The throughput records for text, PDF, OLE2, tar and system and the small-object records for system, PDF and OLE2 are lowered to the figures the ratchet printed. A sample of 305 target-3 inputs (every and first match), 308 target-0, 750 target-0 logical and 664 target-7 logical inputs: no difference from before.
+
+**Open.** HTML is still 571,215,362 instructions per MiB against the twice-the-reference floor of 546,478,873 (105 %); what remains is mostly genuine matches of the many subsignatures and signature parts that are a script tag, each verified and recorded on its own. Sharing one verification between identical parts, or probing a signature by its rarest part, is the next step.

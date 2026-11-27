@@ -13,6 +13,10 @@ impl Output {
         }
     }
 
+    pub fn reserve(&mut self, length: usize) {
+        self.bytes.reserve(length);
+    }
+
     #[inline]
     pub fn write(&mut self, byte: u8) {
         self.bytes.push(byte);
@@ -21,6 +25,14 @@ impl Output {
     #[inline]
     pub fn write_all(&mut self, bytes: &[u8]) {
         self.bytes.extend_from_slice(bytes);
+    }
+
+    pub fn write_lowercased(&mut self, bytes: &[u8]) {
+        let from = self.bytes.len();
+        self.bytes.extend_from_slice(bytes);
+        if let Some(written) = self.bytes.get_mut(from..) {
+            written.make_ascii_lowercase();
+        }
     }
 
     pub fn take_back_last_byte(&mut self) {

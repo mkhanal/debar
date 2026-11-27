@@ -104,6 +104,11 @@ fn normalise(
 ) -> Result<(NormalisedView, NormalisedView), InputError> {
     let mut chunks = PageInChunks::new(page.clone(), Output::kept(), Output::kept());
     let most_held = usize::try_from(most_held).unwrap_or(usize::MAX);
+    let expected = usize::try_from(page.length())
+        .unwrap_or(usize::MAX)
+        .min(most_held.checked_div(2).unwrap_or(0));
+    chunks.output(View::WithoutComments).reserve(expected);
+    chunks.output(View::WithoutTags).reserve(expected);
     while chunks.normalise_a_chunk(Reread::No)? {
         let held_without_comments = chunks.output(View::WithoutComments).held_length();
         let held_without_tags = chunks.output(View::WithoutTags).held_length();
