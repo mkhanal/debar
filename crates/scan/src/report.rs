@@ -139,4 +139,5 @@ pub struct ScanReport {
     pub completion: Completion,
     pub limits: Vec<LimitEvent>,
     pub facts: Vec<ObjectFact>,
+    pub work_spent: u64,
 }

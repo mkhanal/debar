@@ -1,3 +1,4 @@
+use crate::work_meter::WorkMeter;
 use debar_image::{
     Assertion, BacktrackingInstruction, BacktrackingProgram, BacktrackingProgramMalformed, Greed,
     LookDirection, LookInstruction, RepeatedByte,
@@ -60,7 +61,14 @@ pub fn backtracking_search(
     anchored: bool,
     bounds: BacktrackingBounds,
 ) -> Result<BacktrackingSearch, BacktrackingProgramMalformed> {
-    search_subject(program, &mut &*subject, from, anchored, bounds)
+    search_subject(
+        program,
+        &mut &*subject,
+        from,
+        anchored,
+        bounds,
+        &mut WorkMeter::unlimited(),
+    )
 }
 
 pub(crate) fn search_subject<S: SubjectBytes>(
@@ -69,6 +77,7 @@ pub(crate) fn search_subject<S: SubjectBytes>(
     from: usize,
     anchored: bool,
     bounds: BacktrackingBounds,
+    work: &mut WorkMeter,
 ) -> Result<BacktrackingSearch, BacktrackingProgramMalformed> {
     let slot_count = usize::try_from(program.capture_groups())
         .ok()
@@ -87,6 +96,7 @@ pub(crate) fn search_subject<S: SubjectBytes>(
         steps: 0,
         choices: 0,
         fuel: 0,
+        fuel_left_in_the_scan: u64::MAX,
         most_fuel: u64::from(bounds.steps_per_start)
             .saturating_add(1)
             .saturating_mul(
@@ -109,8 +119,13 @@ pub(crate) fn search_subject<S: SubjectBytes>(
                 Some(_) | None => break,
             }
         }
-        machine.restart();
-        match machine.run(0, start, None)? {
+        machine.restart(work.left());
+        let run = machine.run(0, start, None)?;
+        work.charge(machine.fuel);
+        if work.ran_out() {
+            return Ok(BacktrackingSearch::GaveUp);
+        }
+        match run {
             Run::Matched(end) => return Ok(BacktrackingSearch::Found { start, end }),
             Run::Failed => {}
             Run::Exhausted => return Ok(BacktrackingSearch::GaveUp),
@@ -157,6 +172,7 @@ struct Machine<'p, 'm, 's, S> {
     steps: u32,
     choices: u32,
     fuel: u64,
+    fuel_left_in_the_scan: u64,
     most_fuel: u64,
     bounds: BacktrackingBounds,
 }
@@ -174,7 +190,8 @@ enum Flow {
 }
 
 impl<S: SubjectBytes> Machine<'_, '_, '_, S> {
-    fn restart(&mut self) {
+    fn restart(&mut self, fuel_left_in_the_scan: Option<u64>) {
+        self.fuel_left_in_the_scan = fuel_left_in_the_scan.unwrap_or(u64::MAX);
         self.slots.fill(UNSET);
         self.stack.clear();
         self.steps = 0;
@@ -235,7 +252,7 @@ impl<S: SubjectBytes> Machine<'_, '_, '_, S> {
         let mut at = at;
         loop {
             self.fuel = self.fuel.saturating_add(1);
-            if self.fuel > self.most_fuel {
+            if self.fuel > self.most_fuel || self.fuel > self.fuel_left_in_the_scan {
                 return Ok(Run::Exhausted);
             }
             let flow = match self.program.instruction(pc)? {
@@ -634,4 +651,49 @@ impl<S: SubjectBytes> Machine<'_, '_, '_, S> {
 
 fn is_word(byte: Option<u8>) -> bool {
     byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use debar_image::{BacktrackingProgram, ExpressionTree, compile_backtracking};
+
+    use super::{BacktrackingBounds, BacktrackingSearch, search_subject};
+    use crate::work_meter::WorkMeter;
+
+    const SUBJECT_LENGTH: u64 = 64 * 1024;
+    const ALLOWED_WORK: u64 = 1_000;
+
+    fn search_for_ab_in_as(work: &mut WorkMeter) -> BacktrackingSearch {
+        let compiled = compile_backtracking(&ExpressionTree::literal(b"ab")).unwrap();
+        let program = BacktrackingProgram::read(&compiled).unwrap();
+        let subject = vec![b'a'; usize::try_from(SUBJECT_LENGTH).unwrap()];
+        search_subject(
+            &program,
+            &mut subject.as_slice(),
+            0,
+            false,
+            BacktrackingBounds::FOR_SIGNATURES,
+            work,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn every_start_is_charged_to_the_work_meter() {
+        let mut work = WorkMeter::unlimited();
+
+        assert_eq!(search_for_ab_in_as(&mut work), BacktrackingSearch::NotFound);
+        assert!(work.spent() >= SUBJECT_LENGTH);
+    }
+
+    #[test]
+    fn a_search_gives_up_once_the_work_allowed_is_spent() {
+        let mut work = WorkMeter::allowing(ALLOWED_WORK);
+
+        assert_eq!(search_for_ab_in_as(&mut work), BacktrackingSearch::GaveUp);
+        assert!(work.ran_out());
+        assert_eq!(work.spent(), ALLOWED_WORK.saturating_add(1));
+    }
 }

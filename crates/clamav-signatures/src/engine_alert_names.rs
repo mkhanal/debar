@@ -1,6 +1,6 @@
 use debar_image::{BuildError, EngineAlert, ImageBuilder, Indicator};
 
-const ENGINE_ALERT_NAMES: [(EngineAlert, &str); 4] = [
+const ENGINE_ALERT_NAMES: [(EngineAlert, &str); 5] = [
     (
         EngineAlert::ScanSizeLimitExceeded,
         "Heuristics.Limits.Exceeded.MaxScanSize",
@@ -16,6 +16,10 @@ const ENGINE_ALERT_NAMES: [(EngineAlert, &str); 4] = [
     (
         EngineAlert::RecursionLimitExceeded,
         "Heuristics.Limits.Exceeded.MaxRecursion",
+    ),
+    (
+        EngineAlert::ScanTimeLimitExceeded,
+        "Heuristics.Limits.Exceeded.MaxScanTime",
     ),
 ];
 

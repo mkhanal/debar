@@ -1,7 +1,7 @@
 use debar_image::Image;
 use debar_matching::{
     DigestNeed, DigestsInProgress, MatchedGroups, ObjectDigests, PatternOutcomes, PatternRequest,
-    PatternScan, PatternScanError, ScanEnd, ScanProgress,
+    PatternScan, PatternScanError, ScanEnd, ScanProgress, WholeObjectEnd, WorkMeter,
 };
 
 use crate::object_bytes::{ChunkUse, ObjectBytes, ReadThrough, read_in_chunks};
@@ -18,13 +18,20 @@ pub(crate) fn match_own_bytes(
     request: PatternRequest<'_>,
     digest_need: DigestNeed,
     matched_before: &MatchedGroups,
+    work: &mut WorkMeter,
 ) -> Result<OwnBytesMatched, ScanFailure> {
     let mut scan = PatternScan::reusing(image, request, || None, matched_before)?;
     let mut digesting = (!digest_need.is_empty()).then(|| DigestsInProgress::new(digest_need));
     let mut digests_while_read = None;
     loop {
         if scan.needs_the_bytes() || digesting.is_some() {
-            let read_through = feed_the_object(&mut scan, bytes, digesting.as_mut())?;
+            let read_through = feed_the_object(&mut scan, bytes, digesting.as_mut(), work)?;
+            if work.ran_out() {
+                return Ok(OwnBytesMatched {
+                    outcomes: scan.cut_short()?,
+                    digests_while_read: None,
+                });
+            }
             if let (Some(digesting), ReadThrough::ToTheEnd) = (digesting.take(), read_through) {
                 digests_while_read = Some(digesting.finish());
             }
@@ -40,8 +47,13 @@ pub(crate) fn match_own_bytes(
             }
             ScanEnd::SecondPassNeeded(second) => scan = *second,
             ScanEnd::WholeObjectNeeded(waiting) => {
+                let outcomes = match waiting.match_whole_object_within(bytes, work)? {
+                    WholeObjectEnd::Complete(outcomes) | WholeObjectEnd::OutOfWork(outcomes) => {
+                        outcomes
+                    }
+                };
                 return Ok(OwnBytesMatched {
-                    outcomes: waiting.match_whole_object(bytes)?.into_outcomes()?,
+                    outcomes,
                     digests_while_read,
                 });
             }
@@ -53,9 +65,14 @@ fn feed_the_object(
     scan: &mut PatternScan<'_, '_, '_>,
     bytes: &dyn ObjectBytes,
     mut digesting: Option<&mut DigestsInProgress>,
+    work: &mut WorkMeter,
 ) -> Result<ReadThrough, ScanFailure> {
     let mut refused: Option<PatternScanError> = None;
     let read_through = read_in_chunks(bytes, |chunk| {
+        work.charge(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        if work.ran_out() {
+            return ChunkUse::Stop;
+        }
         if let Some(digesting) = digesting.as_deref_mut() {
             digesting.update(chunk);
         }
@@ -71,7 +88,9 @@ fn feed_the_object(
     if let Some(error) = refused {
         return Err(error.into());
     }
-    if let ReadThrough::StoppedAt(offset) = read_through {
+    if let ReadThrough::StoppedAt(offset) = read_through
+        && !work.ran_out()
+    {
         let rest = bytes.length().saturating_sub(offset);
         scan.skip(usize::try_from(rest).unwrap_or(usize::MAX))?;
     }

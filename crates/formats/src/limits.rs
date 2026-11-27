@@ -1,5 +1,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Limit {
+    ScanTime,
     LargestFile,
     LargestScan,
     MostFiles,
@@ -8,6 +9,7 @@ pub enum Limit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Room {
+    pub scan_time_spent: bool,
     pub largest_file: Option<u64>,
     pub scan_bytes_left: Option<u64>,
     pub files_left: Option<u64>,
@@ -15,6 +17,9 @@ pub struct Room {
 
 impl Room {
     pub fn admit(&self, needed: u64) -> Result<(), Limit> {
+        if self.scan_time_spent {
+            return Err(Limit::ScanTime);
+        }
         if self.scan_bytes_left.is_some_and(|left| needed > left) {
             return Err(Limit::LargestScan);
         }

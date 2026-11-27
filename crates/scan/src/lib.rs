@@ -8,6 +8,7 @@ mod object_bytes;
 mod own_bytes;
 mod report;
 mod scan;
+mod scan_time;
 mod settings;
 mod typing;
 
@@ -21,6 +22,7 @@ pub use scan::{
     FinishedObject, LARGEST_OBJECT_LEFT_UNSCANNED, MOST_PRODUCED_BYTES_HELD,
     MOST_UNCOUNTED_MODULE_OUTPUTS, ObjectObserver, Unobserved, scan, scan_with_modules,
 };
+pub use scan_time::{DEFAULT_LONGEST_SCAN, ScanTime};
 pub use settings::{
     DEFAULT_DEEPEST_LEVEL, DEFAULT_LARGEST_FILE, DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS,
     DEFAULT_LARGEST_SCAN, DEFAULT_MOST_FILES, Facts, Limits, Matching, ScanSettings,

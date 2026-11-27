@@ -21,6 +21,7 @@ use crate::plug_in_matching::{PlugInRequest, match_plug_ins};
 use crate::second_pass_search::{ArmedGroup, SecondPassSearch};
 use crate::verification::{PositionSet, RetainedBytes, anchor_rules_out, earliest_end};
 use crate::whole_object::WholeObject;
+use crate::work_meter::WorkMeter;
 
 const POSITIONS_PER_PASS: u64 = 4096;
 const CHUNK_LENGTH: usize = 128 * 1024;
@@ -205,6 +206,11 @@ impl ScanEnd<'_, '_, '_> {
             Self::WholeObjectNeeded(_) => Err(PatternScanError::WholeObjectNotGiven),
         }
     }
+}
+
+pub enum WholeObjectEnd {
+    Complete(PatternOutcomes),
+    OutOfWork(PatternOutcomes),
 }
 
 pub fn scan_object(
@@ -969,11 +975,23 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         Ok(ScanEnd::Complete(self.outcomes()?))
     }
 
-    #[inline(never)]
     pub fn match_whole_object(
-        mut self,
+        self,
         object: &dyn ObjectBytes,
     ) -> Result<ScanEnd<'i, 'm, 'r>, PatternScanError> {
+        match self.match_whole_object_within(object, &mut WorkMeter::unlimited())? {
+            WholeObjectEnd::Complete(outcomes) | WholeObjectEnd::OutOfWork(outcomes) => {
+                Ok(ScanEnd::Complete(outcomes))
+            }
+        }
+    }
+
+    #[inline(never)]
+    pub fn match_whole_object_within(
+        mut self,
+        object: &dyn ObjectBytes,
+        work: &mut WorkMeter,
+    ) -> Result<WholeObjectEnd, PatternScanError> {
         let length = object.length();
         if length != self.object_length {
             return Err(PatternScanError::FewerBytesThanDeclared {
@@ -998,10 +1016,18 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         };
         for group in &mut self.groups {
             if let (Some(plug_ins), Some(state)) = (&group.plug_ins, group.logical.as_mut()) {
-                match_plug_ins(group.id, plug_ins, state, &request, &mut whole)?;
+                match_plug_ins(group.id, plug_ins, state, &request, &mut whole, work)?;
+            }
+            if work.ran_out() {
+                return Ok(WholeObjectEnd::OutOfWork(self.cut_short()?));
             }
         }
-        Ok(ScanEnd::Complete(self.outcomes()?))
+        Ok(WholeObjectEnd::Complete(self.outcomes()?))
+    }
+
+    pub fn cut_short(mut self) -> Result<PatternOutcomes, PatternScanError> {
+        self.stopped = true;
+        self.outcomes()
     }
 
     fn layout_state(&self) -> LayoutState<'_> {

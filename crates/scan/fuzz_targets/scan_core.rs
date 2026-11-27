@@ -11,7 +11,7 @@ use cap::Cap;
 use debar_formats::FormatModule;
 use debar_image::Image;
 use debar_scan::{
-    Facts, FinishedObject, FormatModules, Limits, Matching, ObjectObserver, ScanSettings,
+    Facts, FinishedObject, FormatModules, Limits, Matching, ObjectObserver, ScanSettings, ScanTime,
     scan_with_modules,
 };
 use libfuzzer_sys::fuzz_target;
@@ -73,6 +73,7 @@ fuzz_target!(|input: &[u8]| {
         rest.to_vec()
     };
     let limits = Limits {
+        longest_scan: Some(ScanTime::from_milliseconds(u64::from(files))),
         largest_file: Some(FILE_SIZE_STEP.saturating_mul(u64::from(file_steps) + 1)),
         largest_scan: Some(SCAN_SIZE_STEP.saturating_mul(u64::from(scan_steps) + 1)),
         most_files: Some(u64::from(files % 64) + 1),

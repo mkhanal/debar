@@ -1,5 +1,7 @@
 use debar_matching::{HashSettings, UnwantedCategories};
 
+use crate::scan_time::{DEFAULT_LONGEST_SCAN, ScanTime};
+
 const MEBIBYTE: u64 = 1024 * 1024;
 pub const DEFAULT_LARGEST_FILE: u64 = 100 * MEBIBYTE;
 pub const DEFAULT_LARGEST_SCAN: u64 = 400 * MEBIBYTE;
@@ -24,6 +26,7 @@ pub enum Facts {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
+    pub longest_scan: Option<ScanTime>,
     pub largest_file: Option<u64>,
     pub largest_scan: Option<u64>,
     pub most_files: Option<u64>,
@@ -33,6 +36,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
+            longest_scan: Some(DEFAULT_LONGEST_SCAN),
             largest_file: Some(DEFAULT_LARGEST_FILE),
             largest_scan: Some(DEFAULT_LARGEST_SCAN),
             most_files: Some(DEFAULT_MOST_FILES),

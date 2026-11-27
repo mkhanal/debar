@@ -16,6 +16,7 @@ mod second_pass_search;
 pub use second_pass_search::largest_armed_search_bytes;
 mod verification;
 mod whole_object;
+mod work_meter;
 
 pub use backtracking_search::{BacktrackingBounds, BacktrackingSearch, backtracking_search};
 pub use container_entries::{ContainerEntry, ContainerEntryError, container_entry_detections};
@@ -30,5 +31,7 @@ pub use hash_lookup::{
 pub use logical_state::{LogicalEvent, LogicalFindings, ObjectContext, UnwantedCategories};
 pub use pattern_scan::{
     GroupSelection, MatchedGroups, PatternDetection, PatternOutcomes, PatternRequest, PatternScan,
-    PatternScanError, PatternSettings, ScanEnd, ScanProgress, TypeFound, scan_object,
+    PatternScanError, PatternSettings, ScanEnd, ScanProgress, TypeFound, WholeObjectEnd,
+    scan_object,
 };
+pub use work_meter::WorkMeter;

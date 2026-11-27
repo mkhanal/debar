@@ -6,8 +6,8 @@ use debar_image::{
     EngineAlert, Image, Indicator, KindView, ObjectKind, OffsetAction, OwnBytes, TypingRules,
 };
 use debar_matching::{
-    GroupSelection, LogicalEvent, MatchedGroups, ObjectContext, PatternRequest, PatternSettings,
-    Trust, TypeFound, container_entry_detections, whole_object_detections,
+    GroupSelection, LogicalEvent, MatchedGroups, ObjectContext, PatternDetection, PatternRequest,
+    PatternSettings, Trust, TypeFound, container_entry_detections, whole_object_detections,
     whole_object_digest_need, whole_object_trust, whole_object_trust_digest_need,
 };
 
@@ -544,13 +544,18 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
             ancestors: &ancestors,
             retyped: self.current().arrival == Arrival::Retyped,
         };
+        let missing_digests = self.current().digests.missing_from(digest_need);
         let matched = match_own_bytes(
             self.image,
             &bytes,
             self.pattern_request(selection, length, context),
-            self.current().digests.missing_from(digest_need),
+            missing_digests,
             matched_before,
+            self.ledger.work(),
         )?;
+        if self.ledger.scan_time_spent() {
+            return self.stopped_by_the_scan_time_limit(matched.outcomes.detections);
+        }
         if let Some(digests) = matched.digests_while_read {
             let layer = self.current_mut();
             layer.digests = layer.digests.joined_with(digests);
@@ -599,6 +604,19 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
             types_found: outcomes.types_found,
             matched_groups,
         })
+    }
+
+    fn stopped_by_the_scan_time_limit(
+        &mut self,
+        found_before: Vec<PatternDetection>,
+    ) -> Result<PassEnd, ScanFailure> {
+        for detection in found_before {
+            if self.alert(detection.name, detection.indicator)? == Flow::Abort {
+                return Ok(PassEnd::Aborted);
+            }
+        }
+        self.limit_reached(Limit::ScanTime)?;
+        Ok(PassEnd::Aborted)
     }
 
     fn pattern_request<'q>(
@@ -689,6 +707,16 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
             self.limits.push(reached);
         }
         self.layers.mark_each_from_the_current_up_not_to_be_cached();
+        let flow = self.alert_the_limit(limit)?;
+        Ok(match limit {
+            Limit::ScanTime => Flow::Abort,
+            Limit::LargestFile | Limit::LargestScan | Limit::MostFiles | Limit::DeepestLevel => {
+                flow
+            }
+        })
+    }
+
+    fn alert_the_limit(&mut self, limit: Limit) -> Result<Flow, ScanFailure> {
         if !self.settings.alert_on_limits || self.limit_alerted {
             return Ok(Flow::Continue);
         }
@@ -757,6 +785,7 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
             completion,
             limits: self.limits,
             facts: self.facts,
+            work_spent: self.ledger.work_spent(),
         }
     }
 
@@ -786,6 +815,7 @@ fn checked_extent(from: Object<'_>, length: u64) -> Object<'_> {
 
 const fn exceeded(limit: Limit) -> EngineAlert {
     match limit {
+        Limit::ScanTime => EngineAlert::ScanTimeLimitExceeded,
         Limit::LargestScan => EngineAlert::ScanSizeLimitExceeded,
         Limit::LargestFile => EngineAlert::FileSizeLimitExceeded,
         Limit::MostFiles => EngineAlert::FileCountLimitExceeded,

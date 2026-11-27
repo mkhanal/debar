@@ -367,6 +367,7 @@ mod tests {
     use super::{search_in_place, search_lazily};
     use crate::backtracking_search::{BacktrackingBounds, backtracking_search, search_subject};
     use crate::whole_object::ObjectPages;
+    use crate::work_meter::WorkMeter;
 
     const PATTERNS: [&str; 14] = [
         "ab",
@@ -549,8 +550,15 @@ mod tests {
                 let bytes = &object;
                 let mut pages = ObjectPages::new(bytes, page_length, 2);
                 let mut subject = pages.subject(subject_start as u64, object.len() as u64);
-                let through_pages =
-                    search_subject(&program, &mut subject, from, anchored, bounds).unwrap();
+                let through_pages = search_subject(
+                    &program,
+                    &mut subject,
+                    from,
+                    anchored,
+                    bounds,
+                    &mut WorkMeter::unlimited(),
+                )
+                .unwrap();
                 assert_eq!(
                     through_pages, expected,
                     "{haystack:?} from {from}, pages of {page_length}"

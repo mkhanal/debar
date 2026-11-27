@@ -9,7 +9,7 @@ use regex_automata::dfa::regex::Regex;
 use regex_automata::{Anchored, Input, Match};
 
 use crate::backtracking_search::{
-    BacktrackingBounds, BacktrackingSearch, SubjectBytes, backtracking_search, search_subject,
+    BacktrackingBounds, BacktrackingSearch, SubjectBytes, search_subject,
 };
 use zerocopy::IntoBytes;
 
@@ -19,6 +19,7 @@ use crate::logical_state::{CountedMatches, LogicalState};
 use crate::paged_expression_search::{PagedSearchFailure, search_in_place, search_lazily};
 use crate::pattern_scan::PatternScanError;
 use crate::whole_object::{ObjectPages, PagedSubject, WholeObject};
+use crate::work_meter::WorkMeter;
 
 const START_WRAPPED_TO_ANYWHERE: u32 = u32::MAX;
 const START_WRAPPED_TO_NOWHERE: u32 = u32::MAX - 1;
@@ -41,6 +42,7 @@ pub(crate) fn match_plug_ins(
     state: &mut LogicalState<'_>,
     request: &PlugInRequest<'_>,
     object: &mut WholeObject<'_>,
+    work: &mut WorkMeter,
 ) -> Result<(), PatternScanError> {
     let object_length = object.length();
     let windows = Windows::of(
@@ -73,6 +75,9 @@ pub(crate) fn match_plug_ins(
         return Ok(());
     }
     for record in plug_ins.expressions() {
+        if work.ran_out() {
+            return Ok(());
+        }
         let record = record.map_err(|reason| malformed(group, reason))?;
         let may_run = record.unconditional
             || record.trigger_holds_without_matches
@@ -89,11 +94,11 @@ pub(crate) fn match_plug_ins(
             continue;
         }
         let starts =
-            expression_starts(&record, request, object).map_err(|failure| match failure {
+            expression_starts(&record, request, object, work).map_err(|failure| match failure {
                 ExpressionFailure::Malformed => malformed(group, PlugInsMalformed::Expression),
                 ExpressionFailure::Input(error) => PatternScanError::Input(error),
             })?;
-        if !starts.is_empty() {
+        if !starts.is_empty() && !work.ran_out() {
             state.count(
                 record.signature,
                 record.subsignature,
@@ -286,6 +291,7 @@ fn expression_starts(
     record: &ExpressionRecord<'_>,
     request: &PlugInRequest<'_>,
     object: &mut WholeObject<'_>,
+    work: &mut WorkMeter,
 ) -> Result<Vec<u64>, ExpressionFailure> {
     let object_length = usize::try_from(object.length()).unwrap_or(usize::MAX);
     let Some(subject) = subject_of(record, request, object_length) else {
@@ -297,8 +303,8 @@ fn expression_starts(
         Anchored::No
     };
     let relative_starts = match object {
-        WholeObject::Held(held) => held_starts(record, &subject, held, anchored)?,
-        WholeObject::Paged(pages) => paged_starts(record, &subject, pages, anchored)?,
+        WholeObject::Held(held) => held_starts(record, &subject, held, anchored, work)?,
+        WholeObject::Paged(pages) => paged_starts(record, &subject, pages, anchored, work)?,
     };
     let base = u64::try_from(subject.start).unwrap_or(u64::MAX);
     Ok(relative_starts
@@ -323,6 +329,7 @@ fn held_starts(
     subject: &Subject,
     held: &[u8],
     anchored: Anchored,
+    work: &mut WorkMeter,
 ) -> Result<Vec<usize>, ExpressionFailure> {
     let haystack = held.get(subject.start..subject.end).unwrap_or_default();
     let automaton_search = |found: Option<Match>| found.map(|found| (found.start(), found.end()));
@@ -335,19 +342,23 @@ fn held_starts(
             let forward = in_place(forward_bytes, &mut forward_copy)?;
             let reverse = in_place(reverse_bytes, &mut reverse_copy)?;
             let regex = Regex::builder().build_from_dfas(forward, reverse);
-            matched_starts(record, subject, haystack.len(), |from| {
+            matched_starts(record, subject, haystack.len(), work, |from, work| {
                 let input = Input::new(haystack).range(from..).anchored(anchored);
-                regex
+                let found = regex
                     .try_search(&input)
                     .map(automaton_search)
-                    .map_err(|_| ExpressionFailure::Malformed)
+                    .map_err(|_| ExpressionFailure::Malformed)?;
+                charge_searched(work, from, found, haystack.len());
+                Ok(found)
             })?
         }
         RecordedForm::Text => {
             let regex = compile_text(record.text().map_err(|_| AutomatonMalformed)?)?;
-            matched_starts(record, subject, haystack.len(), |from| {
+            matched_starts(record, subject, haystack.len(), work, |from, work| {
                 let input = Input::new(haystack).range(from..).anchored(anchored);
-                Ok(automaton_search(regex.search(&input)))
+                let found = automaton_search(regex.search(&input));
+                charge_searched(work, from, found, haystack.len());
+                Ok(found)
             })?
         }
         RecordedForm::Backtracking(bytes) => {
@@ -356,12 +367,14 @@ fn held_starts(
                 record,
                 subject,
                 haystack.len(),
-                |from| match backtracking_search(
+                work,
+                |from, work| match search_subject(
                     &program,
-                    haystack,
+                    &mut &*haystack,
                     from,
                     subject.anchored,
                     BacktrackingBounds::FOR_SIGNATURES,
+                    work,
                 )
                 .map_err(|_| AutomatonMalformed)?
                 {
@@ -378,6 +391,7 @@ fn paged_starts(
     subject: &Subject,
     pages: &mut ObjectPages<'_>,
     anchored: Anchored,
+    work: &mut WorkMeter,
 ) -> Result<Vec<usize>, ExpressionFailure> {
     let mut searched_bytes: PagedSubject<'_, '_> = pages.subject(
         u64::try_from(subject.start).unwrap_or(u64::MAX),
@@ -392,38 +406,33 @@ fn paged_starts(
             let (mut forward_copy, mut reverse_copy) = (Vec::new(), Vec::new());
             let forward = in_place(forward_bytes, &mut forward_copy)?;
             let reverse = in_place(reverse_bytes, &mut reverse_copy)?;
-            matched_starts(record, subject, length, |from| {
-                Ok(search_in_place(
-                    &forward,
-                    &reverse,
-                    &mut searched_bytes,
-                    from,
-                    anchored,
-                )?)
+            matched_starts(record, subject, length, work, |from, work| {
+                let found =
+                    search_in_place(&forward, &reverse, &mut searched_bytes, from, anchored)?;
+                charge_searched(work, from, found, length);
+                Ok(found)
             })?
         }
         RecordedForm::Text => {
             let expression = compile_text_lazily(record.text().map_err(|_| AutomatonMalformed)?)?;
             let mut cache = expression.create_cache();
-            matched_starts(record, subject, length, |from| {
-                Ok(search_lazily(
-                    &expression,
-                    &mut cache,
-                    &mut searched_bytes,
-                    from,
-                    anchored,
-                )?)
+            matched_starts(record, subject, length, work, |from, work| {
+                let found =
+                    search_lazily(&expression, &mut cache, &mut searched_bytes, from, anchored)?;
+                charge_searched(work, from, found, length);
+                Ok(found)
             })?
         }
         RecordedForm::Backtracking(bytes) => {
             let program = BacktrackingProgram::read(bytes).map_err(|_| AutomatonMalformed)?;
-            matched_starts(record, subject, length, |from| {
+            matched_starts(record, subject, length, work, |from, work| {
                 let searched = search_subject(
                     &program,
                     &mut searched_bytes,
                     from,
                     subject.anchored,
                     BacktrackingBounds::FOR_SIGNATURES,
+                    work,
                 )
                 .map_err(|_| AutomatonMalformed)?;
                 searched_bytes
@@ -442,11 +451,14 @@ fn matched_starts(
     record: &ExpressionRecord<'_>,
     subject: &Subject,
     haystack_length: usize,
-    mut search: impl FnMut(usize) -> Result<Option<(usize, usize)>, ExpressionFailure>,
+    work: &mut WorkMeter,
+    mut search: impl FnMut(usize, &mut WorkMeter) -> Result<Option<(usize, usize)>, ExpressionFailure>,
 ) -> Result<Vec<usize>, ExpressionFailure> {
     let mut starts = Vec::new();
     let mut from = 0usize;
-    while let Some((start, end)) = search(from)? {
+    while !work.ran_out()
+        && let Some((start, end)) = search(from, work)?
+    {
         if !record.bounded_by_shift && subject.shift > 0 && start > subject.shift {
             break;
         }
@@ -462,4 +474,15 @@ fn matched_starts(
         }
     }
     Ok(starts)
+}
+
+fn charge_searched(
+    work: &mut WorkMeter,
+    from: usize,
+    found: Option<(usize, usize)>,
+    haystack_length: usize,
+) {
+    let searched_to = found.map_or(haystack_length, |(_, end)| end);
+    let searched = searched_to.saturating_sub(from).max(1);
+    work.charge(u64::try_from(searched).unwrap_or(u64::MAX));
 }

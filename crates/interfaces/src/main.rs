@@ -8,7 +8,7 @@ use debar_interfaces::{measure_scan, write_comparison_report};
 use debar_matching::UnwantedCategories;
 use debar_platform::command_line::arguments;
 use debar_scan::{
-    DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS, Facts, Limits, Matching, ScanSettings,
+    DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS, Facts, Limits, Matching, ScanSettings, ScanTime,
 };
 
 const DEFAULT_RECURSION_LEVELS: u32 = 17;
@@ -24,12 +24,14 @@ const USAGE: &str = "usage: debar comparison-report --image IMAGE [--every-match
   --unwanted-category-not-containing TEXT to keep only those whose category does or does not\n\
   contain TEXT. LIMIT is --largest-regular-expression-object BYTES: regular expressions are\n\
   not matched in an object larger than BYTES (default 104857600; 0 matches them in any object).\n\
-  SCAN LIMIT is --max-files COUNT, --max-scan-size BYTES, --max-file-size BYTES (0 switches each\n\
-  off), --max-recursion LEVELS (0 is the default of 17, at most 100), or --alert-exceeds-max,\n\
-  which reports the first limit reached as a potentially unwanted detection.\n\
+  SCAN LIMIT is --max-scan-time MILLISECONDS (default 120000, counted as work done, never on a\n\
+  clock), --max-files COUNT, --max-scan-size BYTES, --max-file-size BYTES (0 switches each off),\n\
+  --max-recursion LEVELS (0 is the default of 17, at most 100), or --alert-exceeds-max, which\n\
+  reports the first limit reached as a potentially unwanted detection.\n\
        debar measure-scan --image IMAGE PATH...\n\
   Scans every regular file under each PATH as a top-level object and prints how many bytes\n\
-  were scanned and how fast, as JSON. It is for measuring throughput, not for users.";
+  were scanned, how fast, and how much of the scan time limit's work they took, as JSON. It is\n\
+  for measuring throughput, not for users.";
 
 enum Unwanted {
     Off,
@@ -201,6 +203,9 @@ fn scan_limits_from(mut options: &[OsString]) -> Option<(ScanLimits, &[OsString]
                 let limit = (number != 0).then_some(number);
                 let limits = &mut scan_limits.limits;
                 match flag.to_str()? {
+                    "--max-scan-time" => {
+                        limits.longest_scan = limit.map(ScanTime::from_milliseconds);
+                    }
                     "--max-files" => limits.most_files = limit,
                     "--max-scan-size" => limits.largest_scan = limit,
                     "--max-file-size" => limits.largest_file = limit,

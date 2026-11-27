@@ -42,3 +42,15 @@ What a scan leaves unscanned because of a size, and what it reports for it.
 - With limit alerts asked for, the first limit reached is reported as a potentially unwanted detection named for that limit.
 - A second limit reached in the same scan reports nothing more.
 - Without limit alerts asked for, a limit reached reports nothing.
+
+## A Scan's Time Limit Gives The Same Verdict At Any Machine Speed
+
+- The scan time limit is counted in the work a scan does, never on a clock.
+- The same file, databases and settings give the same report on every run, however fast or busy the machine.
+
+## A Scan That Would Exceed Its Time Limit Stops, Keeps What It Found, And Alerts Only When Asked
+
+- The whole scan stops where its time limit is reached; nothing after that point is scanned.
+- Detections found before it stopped are reported, and the scan completes with its verdict.
+- With limit alerts asked for, it is reported as a potentially unwanted detection named for the scan time limit; without, it reports nothing more.
+- A scan time limit of 0 switches it off.

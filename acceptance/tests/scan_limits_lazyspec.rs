@@ -250,3 +250,132 @@ fn at_most_one_limit_alert_is_reported_and_only_when_asked_for() {
     );
     assert_eq!(quiet, ["Test.Top.UNOFFICIAL"], "{REQUIREMENT}");
 }
+
+const FIRST_MARK: &[u8] = b"FIRSTMARK";
+const LAST_MARK: &[u8] = b"LASTMARK";
+const MARKS_DATABASE: &str = "Test.First:0:0:46495253544d41524b\nTest.Last:0:*:4c4153544d41524b\n";
+const MARKED_LENGTH: usize = 16 * 1024 * 1024;
+const SCAN_TIME_REACHED_IN_THE_MIDDLE: &str = "100";
+const BUSY_THREADS: usize = 8;
+
+fn marked_at_both_ends(test: &str) -> (PathBuf, CompiledImage, PathBuf) {
+    let directory = scratch_directory(test).unwrap();
+    let databases = directory.join("databases");
+    std::fs::create_dir(&databases).unwrap();
+    write_file(&databases.join("local.ndb"), MARKS_DATABASE.as_bytes()).unwrap();
+    let compiled = compile(&databases, &directory, "marks").unwrap();
+    let mut contents = vec![b'.'; MARKED_LENGTH];
+    contents[..FIRST_MARK.len()].copy_from_slice(FIRST_MARK);
+    contents[MARKED_LENGTH.saturating_sub(LAST_MARK.len())..].copy_from_slice(LAST_MARK);
+    let input = directory.join("input");
+    write_file(&input, &contents).unwrap();
+    (directory, compiled, input)
+}
+
+fn time_limited_report(image: &Path, input: &Path, into: &Path) -> Value {
+    std::fs::create_dir_all(into).unwrap();
+    comparison_report_with(
+        image,
+        &[
+            "--every-match",
+            "--max-scan-time",
+            SCAN_TIME_REACHED_IN_THE_MIDDLE,
+            "--alert-exceeds-max",
+        ],
+        input,
+        into,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_scans_time_limit_gives_the_same_verdict_at_any_machine_speed() {
+    const REQUIREMENT: &str = "A Scan's Time Limit Gives The Same Verdict At Any Machine Speed";
+    let (directory, compiled, input) = marked_at_both_ends("scan-time-any-speed");
+    let quiet: Vec<Value> = (0..3)
+        .map(|run| {
+            time_limited_report(
+                &compiled.image,
+                &input,
+                &directory.join(format!("quiet-{run}")),
+            )
+        })
+        .collect();
+
+    let busy = std::sync::atomic::AtomicBool::new(true);
+    let loaded: Vec<Value> = std::thread::scope(|scope| {
+        for _ in 0..BUSY_THREADS {
+            scope.spawn(|| {
+                let mut spun = 0u64;
+                while busy.load(std::sync::atomic::Ordering::Relaxed) {
+                    spun = std::hint::black_box(spun.wrapping_add(1));
+                }
+            });
+        }
+        let scans: Vec<_> = (0..3)
+            .map(|run| {
+                let into = directory.join(format!("loaded-{run}"));
+                let (image, input) = (&compiled.image, &input);
+                scope.spawn(move || time_limited_report(image, input, &into))
+            })
+            .collect();
+        let reports = scans.into_iter().map(|scan| scan.join().unwrap()).collect();
+        busy.store(false, std::sync::atomic::Ordering::Relaxed);
+        reports
+    });
+
+    assert_eq!(
+        detections(&quiet[0]),
+        [
+            "Test.First.UNOFFICIAL",
+            "Heuristics.Limits.Exceeded.MaxScanTime"
+        ],
+        "{REQUIREMENT}"
+    );
+    for report in quiet.iter().chain(&loaded) {
+        assert_eq!(report, &quiet[0], "{REQUIREMENT}");
+    }
+}
+
+#[test]
+fn a_scan_that_would_exceed_its_time_limit_stops_keeps_what_it_found_and_alerts_only_when_asked() {
+    const REQUIREMENT: &str = "A Scan That Would Exceed Its Time Limit Stops, Keeps What It Found, And Alerts Only When Asked";
+    let (directory, compiled, input) = marked_at_both_ends("scan-time-stops");
+    let scanned = |options: &[&str]| {
+        comparison_report_with(&compiled.image, options, &input, &directory).unwrap()
+    };
+
+    let quiet = scanned(&[
+        "--every-match",
+        "--max-scan-time",
+        SCAN_TIME_REACHED_IN_THE_MIDDLE,
+    ]);
+    let alerted = scanned(&[
+        "--every-match",
+        "--max-scan-time",
+        SCAN_TIME_REACHED_IN_THE_MIDDLE,
+        "--alert-exceeds-max",
+    ]);
+    let switched_off = scanned(&["--every-match", "--max-scan-time", "0"]);
+
+    assert_eq!(
+        detections(&quiet),
+        ["Test.First.UNOFFICIAL"],
+        "{REQUIREMENT}"
+    );
+    assert_eq!(quiet["verdict"], "strong_indicator", "{REQUIREMENT}");
+    assert_eq!(
+        detections(&alerted),
+        [
+            "Test.First.UNOFFICIAL",
+            "Heuristics.Limits.Exceeded.MaxScanTime"
+        ],
+        "{REQUIREMENT}"
+    );
+    assert_eq!(alerted["verdict"], "strong_indicator", "{REQUIREMENT}");
+    assert_eq!(
+        detections(&switched_off),
+        ["Test.First.UNOFFICIAL", "Test.Last.UNOFFICIAL"],
+        "{REQUIREMENT}"
+    );
+}

@@ -5,7 +5,7 @@ use debar_platform::filesystem::{FilesystemError, regular_files_under};
 use debar_platform::input::{InputError, ScannedFile};
 use debar_platform::mapped_file::{MappedFile, MappingError};
 use debar_platform::stopwatch::Stopwatch;
-use debar_scan::{Completion, ScanFailure, ScanSettings, Unobserved, scan};
+use debar_scan::{Completion, Limit, ScanFailure, ScanSettings, Unobserved, scan};
 use serde_json::{Value, json};
 
 use crate::comparison_report::{ReadyImageError, ready_image};
@@ -43,6 +43,8 @@ pub fn measure_scan(image_path: &Path, inputs: &[PathBuf]) -> Result<Value, Scan
     let settings = ScanSettings::default();
     let mut scanned_bytes: u64 = 0;
     let mut detections: usize = 0;
+    let mut work_units: u64 = 0;
+    let mut cut_by_the_scan_time_limit: usize = 0;
     let stopwatch = Stopwatch::start();
     for path in &files {
         let file = ScannedFile::open(path, settings.read_allowance())
@@ -55,6 +57,14 @@ pub fn measure_scan(image_path: &Path, inputs: &[PathBuf]) -> Result<Value, Scan
             });
         }
         detections = detections.saturating_add(report.reported.len());
+        work_units = work_units.saturating_add(report.work_spent);
+        if report
+            .limits
+            .iter()
+            .any(|reached| reached.limit == Limit::ScanTime)
+        {
+            cut_by_the_scan_time_limit = cut_by_the_scan_time_limit.saturating_add(1);
+        }
         scanned_bytes = scanned_bytes.saturating_add(file.length());
     }
     let scanning = stopwatch.elapsed().as_secs_f64();
@@ -65,5 +75,7 @@ pub fn measure_scan(image_path: &Path, inputs: &[PathBuf]) -> Result<Value, Scan
         "scanning_seconds": scanning,
         "mebibytes_per_second": mebibytes / scanning.max(f64::EPSILON),
         "detections": detections,
+        "work_units": work_units,
+        "cut_by_the_scan_time_limit": cut_by_the_scan_time_limit,
     }))
 }

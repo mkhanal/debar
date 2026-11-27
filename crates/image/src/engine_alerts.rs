@@ -9,6 +9,7 @@ pub enum EngineAlert {
     FileSizeLimitExceeded,
     FileCountLimitExceeded,
     RecursionLimitExceeded,
+    ScanTimeLimitExceeded,
 }
 
 impl EngineAlert {
@@ -18,6 +19,7 @@ impl EngineAlert {
             Self::FileSizeLimitExceeded => 2,
             Self::FileCountLimitExceeded => 3,
             Self::RecursionLimitExceeded => 4,
+            Self::ScanTimeLimitExceeded => 5,
         }
     }
 }
