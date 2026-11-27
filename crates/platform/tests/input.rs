@@ -59,6 +59,37 @@ fn every_read_is_counted_against_the_allowance() {
 }
 
 #[test]
+fn a_read_again_is_counted_apart_from_the_allowance() {
+    let file = ScannedFile::open(&scanned_file("read-again", b"0123456789"), 10).unwrap();
+    let mut read = [0u8; 10];
+
+    file.read_at(0, &mut read).unwrap();
+    file.read_again_at(0, &mut read).unwrap();
+    file.read_again_at(0, &mut read).unwrap();
+
+    assert_eq!(read.as_slice(), b"0123456789");
+    assert_eq!(file.bytes_read(), 10);
+    assert_eq!(file.bytes_read_again(), 20);
+}
+
+#[test]
+fn a_read_again_beyond_the_length_when_opened_is_refused() {
+    let file = ScannedFile::open(&scanned_file("again-beyond", b"0123456789"), u64::MAX).unwrap();
+    let mut read = [0u8; 4];
+
+    let refused = file.read_again_at(8, &mut read);
+
+    assert!(matches!(
+        refused,
+        Err(InputError::BeyondTheEnd {
+            offset: 8,
+            wanted: 4,
+            length: 10
+        })
+    ));
+}
+
+#[test]
 fn a_file_cut_short_while_scanned_is_a_failure_not_a_shorter_object() {
     let path = scanned_file("truncated", b"0123456789");
     let file = ScannedFile::open(&path, u64::MAX).unwrap();

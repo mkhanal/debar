@@ -57,7 +57,19 @@ impl ObjectBytes for Object<'_> {
     }
 
     fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError> {
-        let wanted = u64::try_from(into.len()).unwrap_or(u64::MAX);
+        let at = self.within_the_whole(offset, into.len())?;
+        self.whole.read_at(at, into)
+    }
+
+    fn read_again_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError> {
+        let at = self.within_the_whole(offset, into.len())?;
+        self.whole.read_again_at(at, into)
+    }
+}
+
+impl Object<'_> {
+    fn within_the_whole(&self, offset: u64, wanted: usize) -> Result<u64, InputError> {
+        let wanted = u64::try_from(wanted).unwrap_or(u64::MAX);
         let beyond_the_end = || InputError::BeyondTheEnd {
             offset,
             wanted,
@@ -69,8 +81,7 @@ impl ObjectBytes for Object<'_> {
         {
             return Err(beyond_the_end());
         }
-        let at = self.start.checked_add(offset).ok_or_else(beyond_the_end)?;
-        self.whole.read_at(at, into)
+        self.start.checked_add(offset).ok_or_else(beyond_the_end)
     }
 }
 

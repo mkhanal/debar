@@ -57,7 +57,7 @@ impl<'o> WholeObject<'o> {
                     return Ok(None);
                 }
                 let mut read = vec![0u8; length];
-                pages.object.read_at(start, &mut read)?;
+                pages.object.read_again_at(start, &mut read)?;
                 Ok(Some(Cow::Owned(read)))
             }
         }
@@ -149,7 +149,7 @@ impl<'o> ObjectPages<'o> {
         }
         .map_or_else(Vec::new, |page| page.bytes);
         reused.resize(length, 0);
-        self.object.read_at(start, &mut reused)?;
+        self.object.read_again_at(start, &mut reused)?;
         self.pages.insert(
             0,
             HeldPage {

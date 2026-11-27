@@ -25,6 +25,7 @@ use crate::work_meter::WorkMeter;
 
 const START_WRAPPED_TO_ANYWHERE: u32 = u32::MAX;
 const START_WRAPPED_TO_NOWHERE: u32 = u32::MAX - 1;
+const BYTES_SEARCHED_PER_WORK_UNIT: usize = 256;
 
 pub(crate) struct PlugInRequest<'l, 'm> {
     pub image: &'l Image<'m>,
@@ -514,6 +515,9 @@ fn charge_searched(
     haystack_length: usize,
 ) {
     let searched_to = found.map_or(haystack_length, |(_, end)| end);
-    let searched = searched_to.saturating_sub(from).max(1);
-    work.charge(u64::try_from(searched).unwrap_or(u64::MAX));
+    let units = searched_to
+        .saturating_sub(from)
+        .div_ceil(BYTES_SEARCHED_PER_WORK_UNIT)
+        .max(1);
+    work.charge(u64::try_from(units).unwrap_or(u64::MAX));
 }

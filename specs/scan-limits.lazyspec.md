@@ -29,6 +29,12 @@ What a scan leaves unscanned because of a size, and what it reports for it.
 - A file of 17 MiB holding the trigger of 400 logical signatures with a regular expression, each with a container condition the file does not meet, completes with its verdict and the detection at its last bytes.
 - Those signatures add nothing to the work the scan time limit counts.
 
+## A File Is Scanned To Its End However Many Regular Expressions It Triggers
+
+- With the default limits, a file of 100 MiB holding at its last bytes a match for each of 200 logical signatures' regular expressions, each searched over the whole file, reports all 200 asked for every detection, and the scan completes.
+- The scan takes less than a tenth of the default scan time limit's work.
+- Scanning it holds at most 32 MiB of memory.
+
 ## An Object Deeper Than The Recursion Limit Is Not Scanned
 
 - With a recursion limit of N, the deepest object scanned is at level N − 1, the top-level file being level 0.

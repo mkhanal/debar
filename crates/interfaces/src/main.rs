@@ -31,9 +31,9 @@ const USAGE: &str = "usage: debar comparison-report --image IMAGE [--every-match
   reports the first limit reached as a potentially unwanted detection.\n\
        debar measure-scan --image IMAGE [--threads COUNT] PATH...\n\
   Scans every regular file under each PATH as a top-level object, COUNT files at once (default\n\
-  1), and prints how many bytes were scanned, how fast, how much of the scan time limit's work\n\
-  they took, and the verdict and detections of every file with any, as JSON. It is for\n\
-  measuring throughput, not for users.";
+  1), and prints how many bytes were scanned, how many were read and read again, how fast, how\n\
+  much of the scan time limit's work they took, and the verdict and detections of every file\n\
+  with any, as JSON. It is for measuring throughput, not for users.";
 
 enum Unwanted {
     Off,

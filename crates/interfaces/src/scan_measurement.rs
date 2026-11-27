@@ -57,18 +57,27 @@ pub fn measure_scan(
         let report = scan(&image, &file, &settings, &mut Unobserved);
         Ok(FileScan {
             bytes: file.length(),
+            bytes_read: file.bytes_read(),
+            bytes_read_again: file.bytes_read_again(),
             report,
         })
     })
     .map_err(ScanMeasurementError::Threads)?;
     let scanning = stopwatch.elapsed().as_secs_f64();
     let mut scanned_bytes: u64 = 0;
+    let mut bytes_read: u64 = 0;
+    let mut bytes_read_again: u64 = 0;
     let mut detections: usize = 0;
     let mut work_units: u64 = 0;
     let mut cut_by_the_scan_time_limit: usize = 0;
     let mut detected = Vec::new();
     for (path, scanned) in files.iter().zip(scans) {
-        let FileScan { bytes, report } = scanned?;
+        let FileScan {
+            bytes,
+            bytes_read: read,
+            bytes_read_again: read_again,
+            report,
+        } = scanned?;
         if let Completion::Incomplete(error) = report.completion {
             return Err(ScanMeasurementError::Scan {
                 path: path.clone(),
@@ -85,6 +94,8 @@ pub fn measure_scan(
             cut_by_the_scan_time_limit = cut_by_the_scan_time_limit.saturating_add(1);
         }
         scanned_bytes = scanned_bytes.saturating_add(bytes);
+        bytes_read = bytes_read.saturating_add(read);
+        bytes_read_again = bytes_read_again.saturating_add(read_again);
         if !report.reported.is_empty() || report.verdict != Verdict::NothingFound {
             detected.push(json!({
                 "path": path.to_string_lossy(),
@@ -102,6 +113,8 @@ pub fn measure_scan(
         "threads": threads.get(),
         "files": files.len(),
         "bytes": scanned_bytes,
+        "bytes_read": bytes_read,
+        "bytes_read_again": bytes_read_again,
         "scanning_seconds": scanning,
         "mebibytes_per_second": mebibytes / scanning.max(f64::EPSILON),
         "detections": detections,
@@ -113,5 +126,7 @@ pub fn measure_scan(
 
 struct FileScan {
     bytes: u64,
+    bytes_read: u64,
+    bytes_read_again: u64,
     report: ScanReport,
 }

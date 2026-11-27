@@ -735,3 +735,17 @@ The ratchet's figures are callgrind's (the requirement's count) and the table's 
 **Why.** Each search reads a large object again through the input gate, so a few hundred searches that could never report used up the read allowance and the work budget of a scan whose verdict they could not change.
 
 **Consequence.** "A File Is Scanned To Its End However Many Signatures It Triggers That Cannot Report In It" holds this. Searches that can report still each read a large object once more; a file over 4 MiB that triggers about 200 such expressions would still reach the read allowance.
+
+### 2026-11-27 — Whole-object searches read again outside the read allowance, and are charged as the reference spends on them
+
+**Decision.** A large object's regular-expression searches no longer end its scan `Incomplete`, whatever number can report in it:
+
+- **Reads by whole-object matching are reads again.** The input gate's `ObjectBytes::read_again_at` reads within the length fixed when the file was opened, like `read_at`, and is counted apart (`ScannedFile::bytes_read_again`), not against the read allowance. The page pool and byte comparisons on an object over 4 MiB read through it; an object of at most 4 MiB is still read once, counted, and held. `debar measure-scan` prints `bytes_read` and `bytes_read_again`.
+- **The read allowance keeps its meaning:** each byte the scan-size limit counts is read a fixed number of times by the passes. Whole-object searches read an object once each, which no fixed multiple can bound; what bounds them is the work they are charged, the image's number of expressions and the file-size limit.
+- **A byte an automaton searches costs 1/256 of a work unit** (at least one unit a search), not one unit. The reference spends about 12 ms on one expression over 100 MiB (study knowledge "Many regular expressions over one large object"), 0.0036 units a byte at 31,590 units a millisecond; at one unit a byte, Debar's budget stopped after about 36 such searches a scan the reference finishes in 7 s with 400. A backtracking expression is still charged one unit an instruction.
+
+**Not chosen: one shared read for every search.** Stepping every search over each page in turn would read the object once, but a lazy automaton's cache and a backtracking search cannot be held for hundreds of expressions within 32 MiB, and an expression's trigger may read the count of one searched before it, so the order would have to be kept by a second walk. Reads again cost the system time measured below, which is where this case's speed is first to be won.
+
+**Measured** in the toolchain image on an arm64 Mac, one thread, a 100 MiB file matching 200 reportable expressions at its last bytes, the default limits: before, `scanning read more than the 3355443200 bytes this scan is allowed to read` after 2.5 s; after, all 200 reported, 17.5 s (11.5 s user, 6.0 s system), 104,858,624 bytes read and 20,971,520,000 read again, 186,776,705 work units (4.9 % of the default budget), peak heap 4.9 MiB above a run that scans nothing (`valgrind --tool=massif`). The reference takes 2.7 to 4.7 s for the same case.
+
+**Consequence.** "A File Is Scanned To Its End However Many Regular Expressions It Triggers" holds this. The time limit now binds on whole-object searches only after about 9,000 searches of 100 MiB, more than the image's expressions.

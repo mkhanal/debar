@@ -87,6 +87,10 @@ pub trait ObjectBytes {
     fn length(&self) -> u64;
 
     fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError>;
+
+    fn read_again_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError> {
+        self.read_at(offset, into)
+    }
 }
 
 impl ObjectBytes for [u8] {
@@ -117,6 +121,10 @@ impl<T: ObjectBytes + ?Sized> ObjectBytes for &T {
     fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError> {
         T::read_at(self, offset, into)
     }
+
+    fn read_again_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError> {
+        T::read_again_at(self, offset, into)
+    }
 }
 
 impl ObjectBytes for ScannedFile {
@@ -126,6 +134,10 @@ impl ObjectBytes for ScannedFile {
 
     fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError> {
         ScannedFile::read_at(self, offset, into)
+    }
+
+    fn read_again_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError> {
+        ScannedFile::read_again_at(self, offset, into)
     }
 }
 
@@ -141,6 +153,7 @@ pub struct ScannedFile {
     length: u64,
     remaining_allowance: Cell<u64>,
     allowance: u64,
+    bytes_read_again: Cell<u64>,
 }
 
 impl ScannedFile {
@@ -168,6 +181,7 @@ impl ScannedFile {
             length,
             remaining_allowance: Cell::new(allowance),
             allowance,
+            bytes_read_again: Cell::new(0),
         })
     }
 
@@ -184,7 +198,31 @@ impl ScannedFile {
 
     #[inline(never)]
     pub fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError> {
-        let wanted = u64::try_from(into.len()).unwrap_or(u64::MAX);
+        let wanted = self.within_the_length(offset, into.len())?;
+        let remaining = self.remaining_allowance.get().checked_sub(wanted).ok_or(
+            InputError::AllowanceSpent {
+                allowance: self.allowance,
+            },
+        )?;
+        self.remaining_allowance.set(remaining);
+        self.read_content(offset, into)
+    }
+
+    #[inline(never)]
+    pub fn read_again_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError> {
+        let wanted = self.within_the_length(offset, into.len())?;
+        self.bytes_read_again
+            .set(self.bytes_read_again.get().saturating_add(wanted));
+        self.read_content(offset, into)
+    }
+
+    #[must_use]
+    pub fn bytes_read_again(&self) -> u64 {
+        self.bytes_read_again.get()
+    }
+
+    fn within_the_length(&self, offset: u64, wanted: usize) -> Result<u64, InputError> {
+        let wanted = u64::try_from(wanted).unwrap_or(u64::MAX);
         offset
             .checked_add(wanted)
             .filter(|end| *end <= self.length)
@@ -193,12 +231,11 @@ impl ScannedFile {
                 wanted,
                 length: self.length,
             })?;
-        let remaining = self.remaining_allowance.get().checked_sub(wanted).ok_or(
-            InputError::AllowanceSpent {
-                allowance: self.allowance,
-            },
-        )?;
-        self.remaining_allowance.set(remaining);
+        Ok(wanted)
+    }
+
+    fn read_content(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError> {
+        let wanted = u64::try_from(into.len()).unwrap_or(u64::MAX);
         let file = match &self.content {
             Content::File(file) => file,
             Content::HeldStream(held) => {

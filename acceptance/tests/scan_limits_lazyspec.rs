@@ -2,13 +2,14 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use acceptance::largest_file::{LARGEST_FILE, expressions_to_the_end, matched_only_to_the_end};
 use acceptance::{
     CompiledImage, comparison_report, comparison_report_objects, comparison_report_with, compile,
-    detections, release_binaries, run, scratch_directory, write_file,
+    detections, peak_heap_bytes_to_scan, release_binaries, run, scratch_directory, write_file,
 };
 use serde_json::Value;
 
@@ -162,6 +163,73 @@ fn a_file_is_scanned_to_its_end_however_many_signatures_it_triggers_that_cannot_
     assert!(
         work < MOST_WORK_FOR_THE_TRIGGERED_FILE,
         "{REQUIREMENT}: {work} work units for {TRIGGERED_FILE_LENGTH} bytes"
+    );
+}
+
+const REPORTABLE_EXPRESSIONS: usize = 200;
+const DEFAULT_SCAN_TIME_WORK: u64 = 120_000 * 31_590;
+const SCAN_MEMORY_BOUND_BYTES: u64 = 32 * 1024 * 1024;
+
+fn reportable_expressions(directory: &Path) -> CompiledImage {
+    let databases = directory.join("databases");
+    std::fs::create_dir_all(&databases).unwrap();
+    let mut expressions = String::new();
+    for index in 0..REPORTABLE_EXPRESSIONS {
+        writeln!(
+            expressions,
+            "Test.Many{index};Target:0;0&1;4d41524b;0/MANY{index}X[0-9]+END/"
+        )
+        .unwrap();
+    }
+    write_file(&databases.join("local.ldb"), expressions.as_bytes()).unwrap();
+    compile(&databases, directory, "reportable-expressions").unwrap()
+}
+
+fn matching_every_expression_at_its_end(directory: &Path) -> PathBuf {
+    let mut contents = vec![b'.'; LARGEST_FILE];
+    contents[..4].copy_from_slice(b"MARK");
+    let mut ending = Vec::new();
+    for index in 0..REPORTABLE_EXPRESSIONS {
+        write!(ending, " MANY{index}X1END").unwrap();
+    }
+    contents[LARGEST_FILE.checked_sub(ending.len()).unwrap()..].copy_from_slice(&ending);
+    let input = directory.join("matching-every-expression");
+    write_file(&input, &contents).unwrap();
+    input
+}
+
+#[test]
+fn a_file_is_scanned_to_its_end_however_many_regular_expressions_it_triggers() {
+    const REQUIREMENT: &str =
+        "A File Is Scanned To Its End However Many Regular Expressions It Triggers";
+    let directory = scratch_directory("many-regular-expressions").unwrap();
+    let compiled = reportable_expressions(&directory);
+    let input = matching_every_expression_at_its_end(&directory);
+    let unscanned = directory.join("unscanned");
+    write_file(&unscanned, b"MARK").unwrap();
+
+    let every =
+        comparison_report_with(&compiled.image, &["--every-match"], &input, &directory).unwrap();
+    let work = work_units_to_scan(&compiled.image, &input);
+    let scanning = peak_heap_bytes_to_scan(&compiled.image, &input, &directory).unwrap();
+    let not_scanning = peak_heap_bytes_to_scan(&compiled.image, &unscanned, &directory).unwrap();
+
+    let mut reported = detections(&every);
+    reported.sort();
+    let mut expected: Vec<String> = (0..REPORTABLE_EXPRESSIONS)
+        .map(|index| format!("Test.Many{index}.UNOFFICIAL"))
+        .collect();
+    expected.sort();
+    assert_eq!(reported, expected, "{REQUIREMENT}");
+    assert_eq!(every["verdict"], "strong_indicator", "{REQUIREMENT}");
+    assert!(
+        work < DEFAULT_SCAN_TIME_WORK / 10,
+        "{REQUIREMENT}: {work} work units"
+    );
+    let held_for_the_scan = scanning.saturating_sub(not_scanning);
+    assert!(
+        held_for_the_scan <= SCAN_MEMORY_BOUND_BYTES,
+        "{REQUIREMENT}: {held_for_the_scan} bytes"
     );
 }
 
