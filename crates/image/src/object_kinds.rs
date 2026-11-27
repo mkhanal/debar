@@ -74,6 +74,15 @@ pub struct RecognitionRank {
     pub ends_recognition: bool,
 }
 
+impl RecognitionRank {
+    #[must_use]
+    pub fn replaces(self, winning_priority: Option<u32>) -> bool {
+        self.ends_recognition
+            || self.always_replaces
+            || winning_priority.is_none_or(|priority| self.priority > priority)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnBytes {
     NotMatched,

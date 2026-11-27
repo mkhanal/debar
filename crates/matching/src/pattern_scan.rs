@@ -40,6 +40,7 @@ pub enum GroupSelection {
     ForKind(ObjectKind),
     ForKindRecognisingTypes(ObjectKind),
     TypeRecognitionOnly(ObjectKind),
+    TypeRecognitionAtEveryOffset(ObjectKind),
 }
 
 impl GroupSelection {
@@ -47,7 +48,8 @@ impl GroupSelection {
         match self {
             Self::ForKind(kind)
             | Self::ForKindRecognisingTypes(kind)
-            | Self::TypeRecognitionOnly(kind) => kind,
+            | Self::TypeRecognitionOnly(kind)
+            | Self::TypeRecognitionAtEveryOffset(kind) => kind,
         }
     }
 }
@@ -769,9 +771,16 @@ pub struct PatternScan<'i, 'm, 'r> {
     matched_before: Vec<(usize, LogicalFindings)>,
     types_found: Vec<TypeFound>,
     types_found_at_every_offset: bool,
+    type_weighing: TypeWeighing,
     stop_once_past: Option<u64>,
     stopped: bool,
     image_fuzzy_hash: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypeWeighing {
+    NotWeighed,
+    Weighed { winning_priority: Option<u32> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -881,7 +890,18 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             types_found_at_every_offset: matches!(
                 request.selection,
                 GroupSelection::ForKindRecognisingTypes(_)
+                    | GroupSelection::TypeRecognitionAtEveryOffset(_)
             ),
+            type_weighing: if matches!(
+                request.selection,
+                GroupSelection::TypeRecognitionAtEveryOffset(_)
+            ) {
+                TypeWeighing::Weighed {
+                    winning_priority: None,
+                }
+            } else {
+                TypeWeighing::NotWeighed
+            },
             stop_once_past: None,
             stopped: false,
             image_fuzzy_hash: request.image_fuzzy_hash,
@@ -1734,9 +1754,41 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
                         kind: finding.found,
                         offset: candidate.first_start,
                     });
+                    self.weigh_type_found(candidate.group, signature, finding.found)?;
                 }
             }
             RecordedOutcome::Subsignature { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn weigh_type_found(
+        &mut self,
+        group: usize,
+        signature: u32,
+        found: ObjectKind,
+    ) -> Result<(), PatternScanError> {
+        let TypeWeighing::Weighed { winning_priority } = self.type_weighing else {
+            return Ok(());
+        };
+        let Some(rank) = self
+            .image
+            .object_kinds()?
+            .map(|kinds| kinds.describe(found))
+            .transpose()
+            .map_err(PatternScanError::Kinds)?
+            .flatten()
+            .map(|description| description.recognition)
+        else {
+            return Ok(());
+        };
+        if rank.replaces(winning_priority) {
+            self.type_weighing = TypeWeighing::Weighed {
+                winning_priority: Some(rank.priority),
+            };
+            if let Some(group) = self.groups.get_mut(group) {
+                group.chains.remove(&signature);
+            }
         }
         Ok(())
     }
@@ -1792,7 +1844,8 @@ fn selected_groups<'m>(
     };
     let mut wanted: Vec<SignatureGroup> = Vec::new();
     let layout = match selection {
-        GroupSelection::TypeRecognitionOnly(_) => {
+        GroupSelection::TypeRecognitionOnly(_)
+        | GroupSelection::TypeRecognitionAtEveryOffset(_) => {
             wanted.push(recognition_group()?);
             LayoutNeed::NeverResolved
         }

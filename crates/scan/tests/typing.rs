@@ -62,6 +62,7 @@ fn image() -> Vec<u8> {
         (b"PK\x03\x04", ObjectKind::ZipSelfExtracting),
         (b"%PDF-", ObjectKind::Pdf),
         (b"/RGB\nID", ObjectKind::Ignored),
+        (b"PE\x00\x00", ObjectKind::WindowsExecutable),
     ] {
         builder
             .add_pattern_signature(&PatternSignature {
@@ -83,10 +84,20 @@ fn image() -> Vec<u8> {
         ObjectKind::BinaryData,
         ObjectKind::TextUtf16BigEndian,
         ObjectKind::TextUtf16LittleEndian,
-        ObjectKind::WindowsExecutable,
     ] {
         describe(&mut builder, kind, rank(500), Vec::new());
     }
+    describe(
+        &mut builder,
+        ObjectKind::WindowsExecutable,
+        RecognitionRank {
+            priority: 506,
+            always_replaces: true,
+            left_for_the_full_scan: false,
+            ends_recognition: false,
+        },
+        Vec::new(),
+    );
     describe(&mut builder, ObjectKind::Pdf, rank(536), Vec::new());
     describe(
         &mut builder,
@@ -181,6 +192,22 @@ fn a_recognised_type_in_the_first_bytes_replaces_text_unless_it_is_left_for_the_
     );
     assert_eq!(kind_of(b"\x00\x01binary %PDF-1.4"), ObjectKind::Pdf);
     assert_eq!(kind_of(b"/RGB\nID\n<html>"), ObjectKind::Ignored);
+}
+
+#[test]
+fn every_offset_of_a_recognised_type_in_the_first_bytes_is_weighed_in_order() {
+    assert_eq!(
+        kind_of(b"From: x\nthen PE\x00\x00 and From: y\n"),
+        ObjectKind::Mail
+    );
+    assert_eq!(
+        kind_of(b"PK\x03\x04 then PE\x00\x00 and PK\x03\x04 again"),
+        ObjectKind::BinaryData
+    );
+    assert_eq!(
+        kind_of(b"From: x\nthen PE\x00\x00 and nothing more\n"),
+        ObjectKind::WindowsExecutable
+    );
 }
 
 #[test]

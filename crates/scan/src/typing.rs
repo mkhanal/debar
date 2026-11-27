@@ -179,8 +179,25 @@ fn recognition_winner(
     if kinds.typing_rules().recognition_group.is_none() {
         return Ok(None);
     }
+    let first_offsets = types_found_in(image, bytes, GroupSelection::TypeRecognitionOnly(current))?;
+    if !holds_a_kind_that_always_replaces(kinds, &first_offsets)? {
+        return winning_kind(kinds, &first_offsets);
+    }
+    let every_offset = types_found_in(
+        image,
+        bytes,
+        GroupSelection::TypeRecognitionAtEveryOffset(current),
+    )?;
+    winning_kind(kinds, &every_offset)
+}
+
+fn types_found_in(
+    image: &Image<'_>,
+    bytes: &[u8],
+    selection: GroupSelection,
+) -> Result<Vec<TypeFound>, TypingError> {
     let request = PatternRequest {
-        selection: GroupSelection::TypeRecognitionOnly(current),
+        selection,
         settings: PatternSettings {
             potentially_unwanted: false,
             unwanted_categories: UnwantedCategories::Every,
@@ -193,7 +210,23 @@ fn recognition_winner(
     };
     let mut scan = PatternScan::new(image, request, || None)?;
     scan.feed(bytes)?;
-    winning_kind(kinds, &scan.finish()?.into_outcomes()?.types_found)
+    Ok(scan.finish()?.into_outcomes()?.types_found)
+}
+
+fn holds_a_kind_that_always_replaces(
+    kinds: &ObjectKinds<'_>,
+    types_found: &[TypeFound],
+) -> Result<bool, TypingError> {
+    for found in types_found {
+        let always_replaces = kinds
+            .describe(found.kind)
+            .map_err(TypingError::Kinds)?
+            .is_some_and(|description| description.recognition.always_replaces);
+        if always_replaces {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn winning_kind(
@@ -209,8 +242,7 @@ fn winning_kind(
         if rank.ends_recognition {
             return Ok(Some(found.kind));
         }
-        let outranks = winner.is_none_or(|(_, priority)| rank.priority > priority);
-        if outranks || rank.always_replaces {
+        if rank.replaces(winner.map(|(_, priority)| priority)) {
             winner = Some((found.kind, rank.priority));
         }
     }

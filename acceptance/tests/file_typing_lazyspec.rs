@@ -4,8 +4,8 @@
 use std::path::{Path, PathBuf};
 
 use acceptance::{
-    CompiledImage, comparison_report, compile, detections, lowercase_hex, scratch_directory,
-    write_file,
+    CompiledImage, comparison_report, compile, detections, lowercase_hex, official_image,
+    scratch_directory, write_file,
 };
 use md5::Md5;
 use serde_json::Value;
@@ -65,6 +65,70 @@ fn a_file_is_typed_from_its_first_bytes_as_the_file_type_database_says() {
     ] {
         assert_eq!(
             type_of(contents),
+            expected,
+            "{REQUIREMENT}: {contents:02x?}"
+        );
+    }
+}
+
+fn utf16_little_endian(narrow: &[u8]) -> Vec<u8> {
+    narrow.iter().flat_map(|byte| [*byte, 0]).collect()
+}
+
+#[test]
+fn every_mark_in_a_files_first_bytes_is_weighed_in_the_order_it_is_found() {
+    const REQUIREMENT: &str =
+        "Every Mark In A File's First Bytes Is Weighed In The Order It Is Found";
+    let official = official_image().unwrap();
+    let directory = scratch_directory("typing-every-mark").unwrap();
+    let filler: &[u8] = b"xxxxxxxxxx";
+    let xdp: &[u8] = b"<xdp:xdp";
+    let nsis: &[u8] = b"\xef\xbe\xad\xdeNullsoftInst";
+    let html: &[u8] = b"<html>";
+    let mut pe = b"MZ".to_vec();
+    pe.extend([0u8; 60]);
+    pe.extend(b"PE\x00\x00");
+    let pe = pe.as_slice();
+    let between = |marks: &[&[u8]]| {
+        let mut contents = filler.to_vec();
+        for mark in marks {
+            contents.extend_from_slice(mark);
+            contents.extend_from_slice(filler);
+        }
+        contents
+    };
+    let mail_around = |content_type_after_pe: bool| {
+        let mut contents = b"x\nFrom: a@b\n".to_vec();
+        contents.extend_from_slice(xdp);
+        contents.extend_from_slice(b"\nContent-Type: a\n");
+        contents.extend_from_slice(pe);
+        if content_type_after_pe {
+            contents.extend_from_slice(b"\nContent-Type: b\n");
+        }
+        contents.extend_from_slice(filler);
+        contents
+    };
+
+    for (contents, expected) in [
+        (between(&[xdp, nsis, xdp]), "CL_TYPE_XDP"),
+        (between(&[nsis, xdp, nsis]), "CL_TYPE_NULSFT"),
+        (between(&[xdp, nsis]), "CL_TYPE_NULSFT"),
+        (between(&[nsis, xdp]), "CL_TYPE_XDP"),
+        (between(&[pe, xdp, pe]), "CL_TYPE_MSEXE"),
+        (between(&[pe, xdp, b"PE\x00\x00"]), "CL_TYPE_XDP"),
+        (mail_around(true), "CL_TYPE_MAIL"),
+        (mail_around(false), "CL_TYPE_MSEXE"),
+        (
+            utf16_little_endian(&between(&[html, xdp, pe, html])),
+            "CL_TYPE_HTML_UTF16",
+        ),
+        (
+            utf16_little_endian(&between(&[html, xdp, pe])),
+            "CL_TYPE_BINARY_DATA",
+        ),
+    ] {
+        assert_eq!(
+            report(&directory, &official.image, &contents)["type"],
             expected,
             "{REQUIREMENT}: {contents:02x?}"
         );
