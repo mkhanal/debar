@@ -18,6 +18,8 @@ Each kind of thing has one home. Look there, and put new material there.
 | Decisions and why they were made | `architecture-overview/DECISIONS.md` |
 | Where requirements live | `lazyspec.md` |
 | Work set aside for later | `DEFERRED.md` |
+| Work to do, who holds it, and its state | GitHub issues on the "Debar" board, https://github.com/users/mkhanal/projects/2 |
+| How a task runs, step by step | `.claude/skills/<name>/SKILL.md`; the catalogue is `.claude/README.md` |
 | Everything about a reference scanner | `study/<format>/`, never committed |
 
 ## The study folder
@@ -58,6 +60,10 @@ Use these words in code, specifications and documents, and no second word for th
 
 ## How work proceeds
 
+Every task runs through the repository's skills; each `SKILL.md` carries its own steps and stop conditions, and any agent reads it by path (Claude also runs it as `/<name>`). `.claude/skills/work/SKILL.md` routes a task to its lane: `explore` (read-only), `fix` (a defect), `build` (net-new behaviour inside an agreed design), or a person's decision. `autofix` runs a lane unattended on the next Open issue.
+
+- **Work starts by claiming its issue.** No change starts until its GitHub issue is claimed: find it (the work in hand, open issues, open pull requests) or create one, then `./in-toolchain cargo xtask claim <issue>...` (with `GH_TOKEN` exported). One branch holds an issue at a time; exit 3 means someone else holds it: stop, report the holder, never take over their branch. Steps: `.claude/skills/claim/SKILL.md` (Claude: `/claim`).
+- **Handing work in follows `.claude/skills/pr/SKILL.md`** (Claude: `/pr`), for a pull request or a push to `main`: it closes the issues the branch holds.
 - One piece at a time, in the order in `architecture-overview/ROADMAP.md`.
 - A piece starts with its design agreed with a person and recorded in `architecture-overview/DECISIONS.md`.
 - Requirements are written through `/lazyspec`, each married to its test. Before finishing any task, run `/lazyspec-validate`.
@@ -69,6 +75,8 @@ Use these words in code, specifications and documents, and no second word for th
 When work is split between agents, each task is sized so its agent can judge its own result, and briefed as a colleague would be, not handed a sliver.
 
 - **A task is one outcome a reviewer can check end to end**: a requirement passes, a measurement moves, a harness count changes, a note answers a question. Never a function or a file.
+- **An issue states the problem or outcome, its evidence and how we will know it is met, never the solution**; the solution is decided while building and recorded in DECISIONS or the pull request.
+- **Each task is an issue on the board**, claimed by the branch of the worktree that does it before it starts, so parallel agents never take the same work.
 - **Too small** when the brief dictates how (signatures, file layout, steps), when the agent cannot tell whether its result is right without someone else's piece, or when nothing checkable stands alone. Merge it into a larger task.
 - **Too big** when it holds two outcomes that could be checked separately, when it would outgrow one agent's context, or when it reaches into the internals of more than about two crates. Split it into tasks that each meet the first rule.
 - **Every brief carries** why (the decision, requirement or aim it serves), where it sits (the roadmap piece, neighbouring work in flight, the interfaces they expose or expect), what is settled and what is the agent's to decide and record, how it will be checked, and where to start reading. Pointing at sections is a starting place, not a fence: the agent may read anything it needs.
@@ -102,6 +110,7 @@ Everything builds and runs inside the toolchain image, on CI and on a developer 
 | record a faster scan in the throughput ratchet | lower the kind's figure in `acceptance/best-scan-speed.json` to the one the failing ratchet test prints; never raise one without a person's decision recorded in DECISIONS |
 | bound the per-scan logical state of an image | `./in-toolchain cargo run --release --locked -p debar-matching --example logical_state_bound -- IMAGE` |
 | check that a release may be cut | `./in-toolchain cargo xtask release-check` |
+| claim an issue, classify it, take the next Open one, hand one back, record a pull request's size | `export GH_TOKEN="$(gh auth token)"`, then `./in-toolchain cargo xtask claim`, `classify-work`, `claim-next`, `check-claim`, `issue-brief`, `hand-back`, `record-pull-request-size` or `ready-for-review` (`.claude/README.md`; the token needs the `project` scope) |
 | format the code | `./in-toolchain cargo fmt --all` |
 | open a shell in the image | `./in-toolchain` |
 

@@ -10,7 +10,9 @@ use xtask::lint_tables::{
 };
 use xtask::reference_mentions::mentions;
 use xtask::requirements::{TextFile, is_married_test, is_specification, requirement_findings};
+use xtask::task_outcome::{TaskError, TaskReport};
 use xtask::workspace::Workspace;
+use xtask::{autofix, claiming};
 
 const NIGHTLY_TOOLCHAIN_FILE: &str = "rust-toolchain-nightly";
 const ROADMAP: &str = "architecture-overview/ROADMAP.md";
@@ -101,8 +103,42 @@ impl<T: Display> From<T> for Failure {
     }
 }
 
+type BoardTask = fn(&[String]) -> Result<TaskReport, TaskError>;
+
+const BOARD_TASKS: [(&str, BoardTask); 8] = [
+    ("claim", claiming::claim),
+    ("check-claim", claiming::check_claim),
+    ("classify-work", claiming::classify_work),
+    (
+        "record-pull-request-size",
+        claiming::record_pull_request_size,
+    ),
+    ("ready-for-review", claiming::ready_for_review),
+    ("claim-next", autofix::claim_next),
+    ("hand-back", autofix::hand_back),
+    ("issue-brief", autofix::issue_brief),
+];
+
+const BOARD_TASK_USAGE: &str =
+    "board tasks (the issue claim workflow, .claude/skills/claim/SKILL.md):
+  claim <issue>... [--branch <branch>]
+  check-claim <issue>...
+  classify-work <issue> [--theme <x>] [--kind <x>] [--area <x>] [--impact <x>] [--why <sentence>]
+  classify-work --options
+  classify-work --add-area <name> --area-description <sentence>
+  record-pull-request-size
+  ready-for-review
+  claim-next [<issue> [--include-blocked]] | claim-next --peek
+  hand-back <issue> (--body-file <comment.md> | --release-only)
+  issue-brief <issue>";
+
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if let Some((task, rest)) = arguments.split_first()
+        && let Some((_, run)) = BOARD_TASKS.iter().find(|(name, _)| name == task)
+    {
+        return run_board_task(task, *run, rest);
+    }
     let outcome = repository_root().and_then(|root| match arguments.as_slice() {
         [task] if task == "check" => run_every_change_check(&root),
         [task] if task == "miri" => run_miri(&root),
@@ -127,10 +163,26 @@ fn main() -> ExitCode {
     }
 }
 
+fn run_board_task(name: &str, task: BoardTask, arguments: &[String]) -> ExitCode {
+    match task(arguments) {
+        Ok(report) => {
+            print!("{}", report.output);
+            ExitCode::from(report.exit.code())
+        }
+        Err(error) => {
+            eprintln!("{name}: {error}");
+            if let TaskError::Usage(_) = error {
+                eprintln!("{BOARD_TASK_USAGE}");
+            }
+            ExitCode::from(error.code())
+        }
+    }
+}
+
 fn usage() -> Failure {
     let checks: Vec<&str> = EVERY_CHANGE.iter().map(|check| check.name()).collect();
     Failure(format!(
-        "usage: cargo xtask <task>\n  check          run every check below\n  {}\n  miri           run the platform crate's tests under Miri\n  fuzz [SECONDS] run every fuzz target for SECONDS each (default {FUZZ_SECONDS_PER_TARGET})\n  release-check  fail while architecture-overview/ROADMAP.md lists a borrowed piece",
+        "usage: cargo xtask <task>\n  check          run every check below\n  {}\n  miri           run the platform crate's tests under Miri\n  fuzz [SECONDS] run every fuzz target for SECONDS each (default {FUZZ_SECONDS_PER_TARGET})\n  release-check  fail while architecture-overview/ROADMAP.md lists a borrowed piece\n{BOARD_TASK_USAGE}",
         checks.join("\n  ")
     ))
 }

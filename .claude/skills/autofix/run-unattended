@@ -1,0 +1,104 @@
+#!/bin/sh
+set -eu
+
+usage="usage: .claude/skills/autofix/run-unattended [--issues N] -- <agent command...>"
+issues=4
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --issues) issues="$2"; shift 2 ;;
+        --) shift; break ;;
+        *) echo "$usage" >&2; exit 2 ;;
+    esac
+done
+case "$issues" in
+    '' | *[!0-9]* | 0) echo "run-unattended: --issues takes a whole number from 1, got \"$issues\"" >&2; exit 2 ;;
+esac
+if [ "$#" -eq 0 ]; then
+    echo "$usage" >&2
+    exit 2
+fi
+
+common_directory="$(git rev-parse --path-format=absolute --git-common-dir)"
+main_checkout="$(dirname "$common_directory")"
+runs="$common_directory/autofix-runs"
+mkdir -p "$runs"
+
+lock="$runs/running.pid"
+if ! (set -C; echo "$$" > "$lock") 2>/dev/null; then
+    holder="$(cat "$lock")"
+    if kill -0 "$holder" 2>/dev/null; then
+        echo "run-unattended: a run is already going on this machine (pid $holder)" >&2
+        exit 5
+    fi
+    echo "$$" > "$lock"
+fi
+trap 'rm -f "$lock"' EXIT
+
+if [ -z "${GH_TOKEN:-}" ]; then
+    GH_TOKEN="$(gh auth token)"
+    export GH_TOKEN
+fi
+
+default_branch="$(git -C "$main_checkout" ls-remote --symref origin HEAD | sed -n 's|^ref: refs/heads/\([^[:space:]]*\).*|\1|p')"
+if [ -z "$default_branch" ]; then
+    echo "run-unattended: origin does not name a default branch" >&2
+    exit 1
+fi
+base="origin/$default_branch"
+
+worked=0
+while [ "$worked" -lt "$issues" ]; do
+    peek_status=0
+    (cd "$main_checkout" && ./in-toolchain cargo xtask claim-next --peek) > /dev/null || peek_status=$?
+    case "$peek_status" in
+        0) ;;
+        4) echo "run-unattended: no Open issue is waiting; $worked worked"; exit 0 ;;
+        *) echo "run-unattended: claim-next --peek exited $peek_status" >&2; exit 1 ;;
+    esac
+
+    stamp="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+    name="autofix $(date +'%Y-%m-%d %H:%M')"
+    log="$runs/$stamp.log"
+    worktree="$main_checkout-autofix/$stamp"
+    echo "run-unattended: $name, log $log"
+
+    git -C "$main_checkout" -c credential.helper= -c 'credential.helper=!gh auth git-credential' fetch --quiet origin >> "$log" 2>&1
+    git -C "$main_checkout" worktree add --detach "$worktree" "$base" >> "$log" 2>&1
+
+    agent_status=0
+    (
+        cd "$worktree"
+        for argument in "$@"; do
+            shift
+            set -- "$@" "$(printf '%s' "$argument" | sed "s/{run}/$name/g")"
+        done
+        AUTOFIX_RUN="$stamp" "$@"
+    ) >> "$log" 2>&1 || agent_status=$?
+    echo "run-unattended: agent exited $agent_status"
+
+    branch="$(git -C "$worktree" branch --show-current)"
+    case "$branch" in
+        autofix/*)
+            if git -C "$worktree" ls-remote --exit-code --heads origin "$branch" > /dev/null 2>&1; then
+                git -C "$worktree" fetch --quiet origin "$branch"
+                unpushed="$(git -C "$worktree" rev-list --count "FETCH_HEAD..$branch")"
+            else
+                unpushed="$(git -C "$worktree" rev-list --count "$base..$branch")"
+            fi
+            ;;
+        *) unpushed=0 ;;
+    esac
+    if [ "$unpushed" -gt 0 ]; then
+        echo "run-unattended: $branch has $unpushed unpushed commit(s); the worktree is kept at $worktree" >&2
+        exit 1
+    fi
+    git -C "$main_checkout" worktree remove --force "$worktree" >> "$log" 2>&1
+    case "$branch" in
+        autofix/*) git -C "$main_checkout" branch -D "$branch" >> "$log" 2>&1 ;;
+    esac
+    if [ "$agent_status" -ne 0 ]; then
+        exit "$agent_status"
+    fi
+    worked=$((worked + 1))
+done
+echo "run-unattended: worked $issues, the limit for one run"

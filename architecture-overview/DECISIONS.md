@@ -435,3 +435,26 @@ On x86_64 (emulated) the same slices run 1.33 times the aarch64 instructions on 
 **Why.** Each is the smallest form of the agreed design that the top-level object needs, and leaves the stack, the ledger and the report shaped for children, modules, the work budget and the cache.
 
 **Consequence.** The comparison runs without every match as well as with it. Without it the reference and Debar disagree on which name to report on 74 of the 40,001 target-0 built inputs, where two plain bodies start at the same byte, recorded in the harness's first-match ratchet until the reference's order for them is known.
+
+### 2026-11-27 — Work is tracked as claimed GitHub issues, as in the owner's other product
+
+**Decision.** At the owner's request, Debar tracks work the way the owner's other product does, with the same semantics, so several agents can work in parallel without taking the same work:
+
+- **Issues and the board.** Work is GitHub issues of type Task, Bug or Feature, in this repository and the comparison harness's, on one project, "Debar" (https://github.com/users/mkhanal/projects/2), linked to both. Its Status is Open, In Progress, In Review or Done; the board sets Open when an item is added and Done when it closes or its pull request merges. Its fields are Branch, Lines changed, Files changed, Why it matters, and the single-select Theme, Kind, Area and Impact, whose options and definitions are Debar's own, held on the board and chosen by `.claude/skills/claim/work-classification.md`. An issue states the problem or outcome, its evidence and how we will know it is met, never the solution.
+- **Claims.** An issue is held by the branch in its Branch field while that branch exists on GitHub, or by an open pull request that closes it; one branch may hold many issues, and an issue one branch at a time. Claiming publishes the branch, records it with the status from the branch's pull request, makes the claimant the only assignee, then reads the board again and reports `lost` if a simultaneous claim overwrote it. An unattended run claims by creating `autofix/<n>` on GitHub, which only one run can create. A hand-back labels the issue `agent-blocked`, keeps pushed work on `autofix/<n>-draft` and returns it to Open. The `assign-issue-creator` workflow assigns every new issue to whoever opened it.
+- **Skills** `work`, `explore`, `fix`, `build`, `claim`, `pr`, `autofix`, `autofix-schedule`, `worktree` and `work-status`, catalogued in `.claude/README.md`. Debar's lanes replace the other product's: design agreed and recorded here, requirements through `/lazyspec`, tests first, the `signature-expert` for anything about a reference scanner, `cargo xtask check` and the comparison.
+- **The scripts are `xtask` tasks in Rust**: `claim`, `check-claim`, `classify-work`, `record-pull-request-size`, `ready-for-review`, `claim-next`, `hand-back` and `issue-brief`, with the claim, queue, board-item, size, classification and brief rules as pure functions tested in `xtask/tests/`, and every GitHub call made through `gh` with the caller's `GH_TOKEN`. They run in the toolchain image like everything else, so the image now carries `gh` (Debian's 2.46.0). Steps that are a few `gh` or `git` commands (`worktree`, `work-status`, scheduling with launchd, cron or T3 Code) are instructions in their skill. The host-side runner a schedule starts, which creates worktrees and starts agent processes outside the image, is a short POSIX shell script, `.claude/skills/autofix/run-unattended`, like `in-toolchain`.
+
+**Where Debar differs, on purpose.**
+
+- **A push to `main` may land claimed work** without a pull request, when whoever directs the work asks for it (AGENTS.md, "Handing work to an agent"): the commit carries the `Closes` lines and the branch is deleted after the push.
+- **`needs-decision`** labels an issue that waits on a person's decision; unattended runs pass it over like `agent-blocked`. The other product has no such label; its product labels are not copied.
+- **The board does not add issues by itself.** A user-owned project's auto-add workflow cannot be configured through the API, so issues are created with `--project Debar`, and a claim or classification adds any issue that is missing. The other built-in workflows were copied with the board.
+- **No local cache** of the board's fields and item ids: each task reads them from GitHub, a few calls more for the same answers.
+- **No diagram evidence gate** in `ready-for-review` and no screenshot rules in `pr`: Debar has no diagrams directory or screens; its evidence is text.
+- **The T3 Code schedule loops in its own conversation** rather than through a runner script, since `t3` runs on the host; launchd and cron run `run-unattended`.
+- **Lockfiles** left out of a pull request's size are `Cargo.lock` files.
+
+**Why.** Parallel agents in separate worktrees need one place that says who holds what, checked and changed atomically enough that two never start the same work; the owner chose the workflow already proven on the other product.
+
+**Consequence.** AGENTS.md: work starts by claiming its issue, and hands in through the `pr` skill. Harness issues are claimed on the board by hand until the harness repository has the tasks.

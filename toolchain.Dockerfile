@@ -31,6 +31,7 @@ FROM ${RUST_IMAGE}
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         g++=4:14.2.0-1 \
+        gh=2.46.0-3 \
         git \
         valgrind=1:3.24.0-3 \
     && rm -rf /var/lib/apt/lists/* \
