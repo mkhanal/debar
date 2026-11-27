@@ -9,6 +9,7 @@ mod mail;
 mod module;
 mod object;
 mod ole2;
+mod pdf;
 mod plain_text;
 mod zip;
 
@@ -26,12 +27,14 @@ pub use object::Object;
 
 pub use html::{HTML_PAGES, HtmlPages, LARGEST_PAGE_NORMALISED, LARGEST_PAGE_WITHOUT_TAGS};
 pub use ole2::{OLE2_DOCUMENTS, Ole2Documents};
+pub use pdf::{PDF_DOCUMENTS, PdfDocuments};
 pub use plain_text::{LARGEST_TEXT_NORMALISED, PLAIN_TEXT, PlainText, SCRIPT_TEXT, ScriptText};
 pub use zip::{ZIP_ARCHIVES, ZipArchives};
 
 pub const BUILT_IN_MODULES: &[&dyn FormatModule] = &[
     &ZIP_ARCHIVES,
     &OLE2_DOCUMENTS,
+    &PDF_DOCUMENTS,
     &HTML_PAGES,
     &MAIL_MESSAGES,
     &PLAIN_TEXT,

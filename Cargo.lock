@@ -141,6 +141,7 @@ dependencies = [
  "debar-image",
  "debar-platform",
  "flate2",
+ "memchr",
 ]
 
 [[package]]

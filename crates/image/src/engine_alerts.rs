@@ -11,6 +11,7 @@ pub enum EngineAlert {
     RecursionLimitExceeded,
     ScanTimeLimitExceeded,
     OverlappingParts,
+    ObfuscatedNames,
 }
 
 impl EngineAlert {
@@ -22,6 +23,7 @@ impl EngineAlert {
             Self::RecursionLimitExceeded => 4,
             Self::ScanTimeLimitExceeded => 5,
             Self::OverlappingParts => 6,
+            Self::ObfuscatedNames => 7,
         }
     }
 }

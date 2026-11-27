@@ -924,6 +924,7 @@ fn checked_extent(from: Object<'_>, length: u64) -> Object<'_> {
 const fn alerted_for(fact: Fact) -> Option<EngineAlert> {
     match fact {
         Fact::OverlappingParts => Some(EngineAlert::OverlappingParts),
+        Fact::ObfuscatedNames => Some(EngineAlert::ObfuscatedNames),
         Fact::Macros(_)
         | Fact::Script(_)
         | Fact::ExecutableContent

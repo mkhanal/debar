@@ -15,6 +15,7 @@ pub enum Fact {
         produced: u64,
     },
     OverlappingParts,
+    ObfuscatedNames,
     BrokenStructure {
         at: u64,
     },
