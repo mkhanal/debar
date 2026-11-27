@@ -171,6 +171,12 @@ const NOT_RECOGNISING_TYPES_IN_FULL_SCAN: [ObjectKind; 11] = [
 
 const MATCHED_AS: [(ObjectKind, ObjectKind); 1] = [(ObjectKind::Text, ObjectKind::Untyped)];
 
+const MATCHED_AGAIN_AS: [(ObjectKind, ObjectKind); 3] = [
+    (ObjectKind::BinaryData, ObjectKind::Other),
+    (ObjectKind::PythonCompiled, ObjectKind::Other),
+    (ObjectKind::AiModel, ObjectKind::Other),
+];
+
 const RETYPED_WHEN_FOUND: [(ObjectKind, &[ObjectKind]); 2] = [
     (ObjectKind::Html, &[ObjectKind::Text, ObjectKind::Gif]),
     (ObjectKind::Mail, &[ObjectKind::Text]),
@@ -241,6 +247,10 @@ fn description(name: &str, kind: ObjectKind, number: u32) -> KindDescription {
             ends_recognition: ENDING_RECOGNITION.contains(&kind),
         },
         own_bytes,
+        matched_again_as: MATCHED_AGAIN_AS
+            .iter()
+            .find(|(matched, _)| *matched == kind)
+            .map(|(_, again_as)| *again_as),
         found_in_full_scan_retypes: RETYPED_WHEN_FOUND
             .iter()
             .find(|(found, _)| *found == kind)

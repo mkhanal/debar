@@ -436,6 +436,23 @@ On x86_64 (emulated) the same slices run 1.33 times the aarch64 instructions on 
 
 **Consequence.** The comparison runs without every match as well as with it. Without it the reference and Debar disagree on which name to report on 74 of the 40,001 target-0 built inputs, where two plain bodies start at the same byte, recorded in the harness's first-match ratchet until the reference's order for them is known.
 
+### 2026-11-27 — The scan core's passes per kind
+
+**Decision.** Build step 2 of the scan core is built, with these choices:
+
+- **The image says which kinds are matched again, and as what.** Each kind in the object-kinds section may name a kind its own bytes are matched again as, after its own pass; the part names other data for binary data, compiled Python and AI models. The engine knows no kind by name for this (Constitution §11).
+- **The extra pass is chosen by the kind typed from the first bytes**, not by a kind the object's own pass re-types it to, as in the reference.
+- **Every pass is a full pass:** patterns of the named kind's groups, then whole-object hashes, then logical outcomes, each alert checked for trust and able to end a first-match scan. The extra pass recognises no types. Digests are taken once per object and reused by each pass that needs them.
+- **Each signature is reported at most once per pass**, so a generic signature or a listed hash on binary data is reported twice under every match, as the reference reports it.
+- **Kinds whose own bytes are never matched** (HTML typed from its first bytes, ignored kinds) are neither matched nor hash-checked; both rules are now requirements.
+- **Not built:** the reference's mail-target pass over text that its own pass re-types to mail, which comes with the mail parser and the script normaliser in piece 6, and runs after the normaliser there.
+
+**Why.** Each reproduces how many times, and as which kind, the reference matches an object's own bytes, which a signature observes through its report count and through signatures for other data (Constitution §2).
+
+**Consequence: two throughput records are raised**, because the reference does the same work. The slices for binary data and tar hold files typed as binary data (every 1 KiB tar slice file is cut short of a full archive), which now get their second full pass; on small files that is the whole matching cost again. Instructions per MiB, aarch64: binary 96,193,508 → 98,252,603, tar 97,169,301 → 104,644,572; x86_64, scaled from CI's calibrated records by the aarch64 ratio since emulation counts fewer instructions than CI: binary 140,131,592 → 143,131,215, tar 141,218,852 → 152,082,872 (CI's figure replaces these if it differs by more than the tolerance). Every kind stays within twice the reference. Taking the second pass's generic-group results from the first instead of matching them again is a matching change for the performance track.
+
+**Measured** in the toolchain image on an Apple Silicon Mac, with the harness's 40,001 built target-0 inputs and its fixtures, with and without every match: no new difference; 75 lines of `debar-known-differences.jsonl` (a generic signature reported twice by the reference and once by Debar on binary data) no longer occur.
+
 ### 2026-11-27 — Work is tracked as claimed GitHub issues, as in the owner's other product
 
 **Decision.** At the owner's request, Debar tracks work the way the owner's other product does, with the same semantics, so several agents can work in parallel without taking the same work:

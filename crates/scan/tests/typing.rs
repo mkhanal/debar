@@ -46,6 +46,7 @@ fn describe(
                 as_kind: None,
                 recognising_types: true,
             },
+            matched_again_as: None,
             found_in_full_scan_retypes: retypes,
             executable: false,
         },

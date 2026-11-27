@@ -202,6 +202,7 @@ impl Model {
                     as_kind: None,
                     recognising_types: false,
                 },
+                matched_again_as: None,
                 found_in_full_scan_retypes: Vec::new(),
                 executable: false,
             },

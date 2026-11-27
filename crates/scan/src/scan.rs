@@ -1,7 +1,8 @@
-use debar_image::{Image, Indicator, ObjectKind, OwnBytes};
+use debar_image::{Image, Indicator, KindView, ObjectKind, OwnBytes};
 use debar_matching::{
-    GroupSelection, ObjectContext, PatternRequest, PatternSettings, Trust, whole_object_detections,
-    whole_object_digest_need, whole_object_trust, whole_object_trust_digest_need,
+    GroupSelection, ObjectContext, PatternRequest, PatternSettings, Trust, TypeFound,
+    whole_object_detections, whole_object_digest_need, whole_object_trust,
+    whole_object_trust_digest_need,
 };
 
 use crate::evidence::{Alert, Alerting};
@@ -63,6 +64,11 @@ enum Flow {
     Abort,
 }
 
+enum PassEnd {
+    Finished { types_found: Vec<TypeFound> },
+    Aborted,
+}
+
 struct Scan<'i, 'm, 's, 'o, 'b> {
     image: &'i Image<'m>,
     settings: &'s ScanSettings<'s>,
@@ -73,7 +79,7 @@ struct Scan<'i, 'm, 's, 'o, 'b> {
     observer: &'b mut dyn ObjectObserver,
 }
 
-impl<'s, 'o> Scan<'_, '_, 's, 'o, '_> {
+impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
     fn scan_top_level(&mut self) -> Result<Flow, ScanFailure> {
         let flow = self.top_level_steps();
         self.finish_layer();
@@ -108,28 +114,45 @@ impl<'s, 'o> Scan<'_, '_, 's, 'o, '_> {
         }
         let kind = self.kind_from_first_bytes()?;
         self.current_mut().kind = Some(kind);
-        match self.own_bytes_rule(kind)? {
-            OwnBytes::NotMatched => Ok(Flow::Continue),
-            OwnBytes::Matched {
-                as_kind,
-                recognising_types,
-            } => {
-                let matched_as = as_kind.unwrap_or(kind);
-                let selection = if recognising_types {
-                    GroupSelection::ForKindRecognisingTypes(matched_as)
-                } else {
-                    GroupSelection::ForKind(matched_as)
-                };
-                self.own_bytes(kind, selection)
-            }
+        if self.own_bytes(kind)? == Flow::Abort {
+            return Ok(Flow::Abort);
         }
+        self.extra_pass(kind)
     }
 
-    fn own_bytes(
-        &mut self,
-        kind: ObjectKind,
-        selection: GroupSelection,
-    ) -> Result<Flow, ScanFailure> {
+    fn own_bytes(&mut self, kind: ObjectKind) -> Result<Flow, ScanFailure> {
+        let OwnBytes::Matched {
+            as_kind,
+            recognising_types,
+        } = self.description(kind)?.own_bytes
+        else {
+            return Ok(Flow::Continue);
+        };
+        let matched_as = as_kind.unwrap_or(kind);
+        let selection = if recognising_types {
+            GroupSelection::ForKindRecognisingTypes(matched_as)
+        } else {
+            GroupSelection::ForKind(matched_as)
+        };
+        let PassEnd::Finished { types_found } = self.pass(selection)? else {
+            return Ok(Flow::Abort);
+        };
+        let kind = kind_after_full_scan(self.image, kind, &types_found)?;
+        self.current_mut().kind = Some(kind);
+        Ok(Flow::Continue)
+    }
+
+    fn extra_pass(&mut self, typed_from_first_bytes: ObjectKind) -> Result<Flow, ScanFailure> {
+        let Some(again_as) = self.description(typed_from_first_bytes)?.matched_again_as else {
+            return Ok(Flow::Continue);
+        };
+        Ok(match self.pass(GroupSelection::ForKind(again_as))? {
+            PassEnd::Finished { .. } => Flow::Continue,
+            PassEnd::Aborted => Flow::Abort,
+        })
+    }
+
+    fn pass(&mut self, selection: GroupSelection) -> Result<PassEnd, ScanFailure> {
         let length = self.current().bytes.length();
         let hashes = self.settings.hashes();
         let digest_need = whole_object_digest_need(self.image, length, hashes)?;
@@ -137,31 +160,32 @@ impl<'s, 'o> Scan<'_, '_, 's, 'o, '_> {
             self.image,
             self.current().bytes,
             self.pattern_request(selection, length),
-            digest_need,
+            self.current().digests.missing_from(digest_need),
         )?;
         if let Some(digests) = matched.digests_while_read {
-            self.current_mut().digests = digests;
+            let layer = self.current_mut();
+            layer.digests = layer.digests.joined_with(digests);
         }
         let outcomes = matched.outcomes;
         for detection in outcomes.detections {
             if self.alert(detection.name, detection.indicator)? == Flow::Abort {
-                return Ok(Flow::Abort);
+                return Ok(PassEnd::Aborted);
             }
         }
         let digests = self.current_mut().digests(digest_need)?;
         for detection in whole_object_detections(self.image, length, &digests, hashes)? {
             if self.alert(detection.name, detection.indicator)? == Flow::Abort {
-                return Ok(Flow::Abort);
+                return Ok(PassEnd::Aborted);
             }
         }
         for detection in outcomes.logical.detections {
             if self.alert(detection.name, detection.indicator)? == Flow::Abort {
-                return Ok(Flow::Abort);
+                return Ok(PassEnd::Aborted);
             }
         }
-        let kind = kind_after_full_scan(self.image, kind, &outcomes.types_found)?;
-        self.current_mut().kind = Some(kind);
-        Ok(Flow::Continue)
+        Ok(PassEnd::Finished {
+            types_found: outcomes.types_found,
+        })
     }
 
     fn pattern_request(&self, selection: GroupSelection, length: u64) -> PatternRequest<'s> {
@@ -244,13 +268,12 @@ impl<'s, 'o> Scan<'_, '_, 's, 'o, '_> {
         Ok(kind_from_first_bytes(self.image, &first_bytes)?)
     }
 
-    fn own_bytes_rule(&self, kind: ObjectKind) -> Result<OwnBytes, ScanFailure> {
+    fn description(&self, kind: ObjectKind) -> Result<KindView<'m>, ScanFailure> {
         let kinds = self.image.object_kinds()?.ok_or(TypingError::NoKinds)?;
-        Ok(kinds
+        kinds
             .describe(kind)
             .map_err(TypingError::Kinds)?
-            .ok_or(ScanFailure::KindNotDescribed(kind))?
-            .own_bytes)
+            .ok_or(ScanFailure::KindNotDescribed(kind))
     }
 
     fn record_limit(&mut self, limit: Limit) {

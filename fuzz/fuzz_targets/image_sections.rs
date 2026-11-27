@@ -230,6 +230,7 @@ fn valid_image() -> Vec<u8> {
                 as_kind: None,
                 recognising_types: true,
             },
+            matched_again_as: None,
             found_in_full_scan_retypes: vec![ObjectKind::Text],
             executable: true,
         },

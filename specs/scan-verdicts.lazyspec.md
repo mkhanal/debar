@@ -33,3 +33,13 @@ Which of a file's detections a scan reports, in what order, and the verdict it g
 
 - A file detected by a pattern signature is reported with no detection when a false-positive list holds its hash, even when no hash signature is loaded.
 - The verdict is trusted.
+
+## Binary Data Is Matched Twice, As Itself And As Other Data
+
+- With every match, a generic signature or a listed hash matching a file of binary data is reported twice: once from the file's own pass, once from its pass as other data.
+- A signature for other data is detected on a file of binary data, and not on text.
+- Compiled Python and AI models are matched twice in the same way.
+
+## A Page Typed As HTML From Its First Bytes Is Never Detected By The Hash Of Its Own Bytes
+
+- A file the file-type database types as HTML from its first bytes is reported with no detection when a hash signature lists it.

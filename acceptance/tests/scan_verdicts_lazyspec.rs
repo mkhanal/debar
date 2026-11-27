@@ -179,3 +179,111 @@ fn a_file_whose_hash_is_listed_as_a_false_positive_is_trusted_whatever_detected_
         assert_eq!(trusted["verdict"], "trusted", "{REQUIREMENT}");
     }
 }
+
+const GENERIC_BODY: &[u8] = b"GENERICBODY";
+const OTHER_DATA_BODY: &[u8] = b"OTHERDATABODY";
+
+const PASS_DATABASE: &str = "\
+Test.Generic:0:*:47454e45524943424f4459
+Test.OtherData:14:*:4f5448455244415441424f4459
+";
+
+const PASS_FILE_TYPES: &str = "\
+0:0:3c68746d6c3e:HTML data:CL_TYPE_ANY:CL_TYPE_HTML
+0:0:5059434f4d50:compiled Python:CL_TYPE_ANY:CL_TYPE_PYTHON_COMPILED
+0:0:41494d4f44454c:AI model:CL_TYPE_ANY:CL_TYPE_AI_MODEL
+";
+
+fn holding(start: &[u8], separator: &[u8], bodies: &[&[u8]]) -> Vec<u8> {
+    let mut contents = start.to_vec();
+    for body in bodies {
+        contents.extend_from_slice(separator);
+        contents.extend_from_slice(body);
+    }
+    contents.extend_from_slice(separator);
+    contents
+}
+
+fn binary_holding(start: &[u8], bodies: &[&[u8]]) -> Vec<u8> {
+    holding(start, b" \x00\x00\x00\x00 ", bodies)
+}
+
+fn listing_hash_of(contents: &[u8]) -> String {
+    format!(
+        "{}:{}:Test.Hash\n",
+        lowercase_hex(&Md5::digest(contents)),
+        contents.len()
+    )
+}
+
+#[test]
+fn binary_data_is_matched_twice_as_itself_and_as_other_data() {
+    const REQUIREMENT: &str = "Binary Data Is Matched Twice, As Itself And As Other Data";
+    let both_bodies: [&[u8]; 2] = [GENERIC_BODY, OTHER_DATA_BODY];
+    let binary = binary_holding(b"\x00\x00\x00\x00binary", &both_bodies);
+    let python = binary_holding(b"PYCOMP", &both_bodies);
+    let model = binary_holding(b"AIMODEL", &both_bodies);
+    let text = holding(b"plain text", b" .... ", &both_bodies);
+    let hashes: String = [&binary, &python, &model, &text]
+        .iter()
+        .map(|contents| listing_hash_of(contents))
+        .collect();
+    let (directory, compiled) = loose_databases(
+        "passes-per-kind",
+        &[
+            ("local.ndb", PASS_DATABASE),
+            ("local.hdb", hashes.as_str()),
+            ("types.ftm", PASS_FILE_TYPES),
+        ],
+    );
+    let twice = [
+        "Test.Generic.UNOFFICIAL",
+        "Test.Hash.UNOFFICIAL",
+        "Test.OtherData.UNOFFICIAL",
+        "Test.Generic.UNOFFICIAL",
+        "Test.Hash.UNOFFICIAL",
+    ];
+
+    for contents in [&binary, &python, &model] {
+        let every = report(&directory, &compiled.image, &["--every-match"], contents);
+        assert_eq!(
+            detections(&every),
+            twice,
+            "{REQUIREMENT}: {}",
+            every["type"]
+        );
+    }
+    let text_report = report(&directory, &compiled.image, &["--every-match"], &text);
+    assert_eq!(
+        detections(&text_report),
+        ["Test.Generic.UNOFFICIAL", "Test.Hash.UNOFFICIAL"],
+        "{REQUIREMENT}: text"
+    );
+    let other_only = binary_holding(b"\x00\x00\x00\x00binary", &[OTHER_DATA_BODY]);
+    assert_eq!(
+        detections(&report(&directory, &compiled.image, &[], &other_only)),
+        ["Test.OtherData.UNOFFICIAL"],
+        "{REQUIREMENT}: without every match"
+    );
+}
+
+#[test]
+fn a_page_typed_as_html_from_its_first_bytes_is_never_detected_by_the_hash_of_its_own_bytes() {
+    const REQUIREMENT: &str =
+        "A Page Typed As HTML From Its First Bytes Is Never Detected By The Hash Of Its Own Bytes";
+    let page = b"<html><body>a page a database lists by its hash</body></html>\n";
+    let (directory, compiled) = loose_databases(
+        "html-own-hash",
+        &[
+            ("local.hdb", listing_hash_of(page).as_str()),
+            ("types.ftm", PASS_FILE_TYPES),
+        ],
+    );
+
+    for options in [&[][..], &["--every-match"][..]] {
+        let scanned = report(&directory, &compiled.image, options, page);
+
+        assert_eq!(scanned["type"], "CL_TYPE_HTML", "{REQUIREMENT}");
+        assert!(detections(&scanned).is_empty(), "{REQUIREMENT}");
+    }
+}
