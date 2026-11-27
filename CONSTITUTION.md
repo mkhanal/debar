@@ -95,6 +95,15 @@ Code, tests, specifications and names say what the system is now, not how it got
 - **The journey lives in** commit messages, pull-request descriptions, `architecture-overview/DECISIONS.md` and `architecture-overview/ROADMAP.md`.
 
 <!-- lazyspec:begin -->
+## 18. Memory Safe, And Visibly So
+
+Debar is memory safe. No input, image, setting, schedule or other process can make it read or write memory it does not own, read memory that changes beneath a shared reference, or behave in a way the language leaves undefined.
+
+- Every crate outside the platform layer forbids unsafe code in its own root, where a reader opening it sees the promise, as well as in the workspace lint table.
+- In the platform layer, each unsafe operation lives in one small type whose public interface is safe. The facts it relies on are carried by types (ownership, lifetimes, immutability), never by a caller's care. Each block performs one unsafe operation and states the facts it relies on in a `// SAFETY:` line, and is run under Miri where Miri can run and fuzzed where outside data reaches it.
+- Memory shared with the outside, such as a mapped file, is accepted only in a form no other party can change or shorten while it is mapped.
+- A dependency's own unsafe code is accepted only when it has been reviewed and the review recorded.
+
 ## Specifications
 
 Requirements live in `*.lazyspec.md`. Read `lazyspec.md` first if there is
