@@ -151,7 +151,7 @@ fn report_lines(
     let attributed: Vec<Option<LayerId>> = scanned
         .reported
         .iter()
-        .map(|reported| records.nearest_reached(reported.layer))
+        .map(|reported| records.nearest_reached(reported.object))
         .collect();
     let mut lines = String::new();
     for record in records.0.into_iter().filter(ObjectRecord::is_reached) {

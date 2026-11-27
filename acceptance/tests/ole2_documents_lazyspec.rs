@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use acceptance::ole2_document::{
     Layout, Node, directory_entry_offset, ole2_document, ole2_document_with_layout, sector_offset,
 };
+use acceptance::vba_project::{Module, compressed, dir_stream, minimal_vba_project_stream};
 use acceptance::{
     CompiledImage, comparison_report_objects, compile, detections, lowercase_hex,
     scratch_directory, write_file,
@@ -34,10 +35,16 @@ const SECTOR_SHIFT_FIELD: usize = 0x1e;
 const FIRST_FAT_SECTOR_OFFSET: usize = 512;
 
 fn databases(test: &str) -> (PathBuf, CompiledImage) {
+    databases_with(test, &[])
+}
+
+fn databases_with(test: &str, more: &[(&str, &str)]) -> (PathBuf, CompiledImage) {
     let directory = scratch_directory(test).unwrap();
     let databases = directory.join("databases");
     std::fs::create_dir(&databases).unwrap();
-    for (name, contents) in [("types.ftm", FILE_TYPES), ("local.ndb", BODIES)] {
+    let mut files = vec![("types.ftm", FILE_TYPES), ("local.ndb", BODIES)];
+    files.extend_from_slice(more);
+    for (name, contents) in files {
         write_file(&databases.join(name), contents.as_bytes()).unwrap();
     }
     let compiled = compile(&databases, &directory, "loose").unwrap();
@@ -384,4 +391,93 @@ fn an_ole2_document_with_an_invalid_header_is_matched_on_its_own_bytes_only() {
             "{REQUIREMENT}"
         );
     }
+}
+
+const MODULE_SOURCE: &[u8] =
+    b"Attribute VB_Name = \"Module1\"\r\nSub AutoOpen()\r\n    MsgBox  \"Hello World\"\r\nEnd Sub\r\n";
+const PROJECT_TEXT: &[u8] = b"REM VBA project extracted from Microsoft Office document\n\n\
+REM PROJECTSYSKIND: Windows 32 bit\n\
+REM PROJECTLCID: 0x00000409\n\
+REM PROJECTLCIDINVOKE: 0x00000409\n\
+REM PROJECTCODEPAGE: 0x04e4\n\
+REM PROJECTNAME: VBAProject\n\
+REM PROJECTDOCSTRING: \n\
+REM PROJECTDOCSTRINGUNICODE: \n\
+REM PROJECTHELPFILEPATH: \n\
+REM PROJECTHELPFILEPATH2: \n\
+REM PROJECTHELPCONTEXT: 0x0000\n\
+REM PROJECTLIBFLAGS: 0x0000\n\
+REM PROJECTVERSION: 1545223467.18\n\
+REM PROJECTMODULES: 1\n\
+REM PROJECTCOOKIE: 0xffff\n\
+\n\nREM MODULENAME: Module1\
+\nREM MODULENAMEUNICODE: Module1\
+\nREM MODULESTREAMNAME: Module1\
+\nREM MODULESTREAMNAMEUNICODE: Module1\
+\nREM MODULEDOCSTRING: \
+\nREM MODULEDOCSTRINGUNICODE: \
+\nREM MODULEOFFSET: 0x00000000\
+\nREM MODULEHELPCONTEXT: 0x00000000\
+\nREM MODULECOOKIE: 0xffff\
+\nREM MODULETYPE: Procedural\
+\nREM ##################################################\n\
+attribute vb_name = \"Module1\"\r\nsub autoopen()\r\n msgbox \"Hello World\"\r\nend sub\r\n";
+
+fn md5_line(bytes: &[u8], name: &str) -> String {
+    use md5::{Digest as _, Md5};
+    format!(
+        "{}:{}:{name}\n",
+        lowercase_hex(&Md5::digest(bytes)),
+        bytes.len()
+    )
+}
+
+fn project_storage(source: &[u8]) -> Node {
+    let module = Module {
+        name: "Module1".to_owned(),
+        source: source.to_vec(),
+    };
+    Node::storage(
+        "VBA",
+        vec![
+            Node::stream("_VBA_PROJECT", &minimal_vba_project_stream()),
+            Node::stream("dir", &compressed(&dir_stream("VBAProject", &[module]))),
+            Node::stream("Module1", &compressed(source)),
+        ],
+    )
+}
+
+#[test]
+fn an_ole2_documents_vba_project_is_matched_as_its_project_text() {
+    const REQUIREMENT: &str = "An OLE2 Document's VBA Project Is Matched As Its Project Text";
+    let hashes = md5_line(PROJECT_TEXT, "Test.ProjectText");
+    let patterns = "Test.Normalised:0:*:6d7367626f78202248656c6c6f20576f726c6422\n";
+    let (directory, compiled) = databases_with(
+        "ole2-vba",
+        &[("local.hdb", hashes.as_str()), ("text.ndb", patterns)],
+    );
+    let document = ole2_document(&[project_storage(MODULE_SOURCE)]);
+
+    let found = objects(&directory, &compiled.image, &document, &[]);
+
+    let names = detections(&found[0]);
+    let count = |wanted: &str| names.iter().filter(|name| name.as_str() == wanted).count();
+    assert_eq!(
+        count("Test.ProjectText.UNOFFICIAL"),
+        2,
+        "{REQUIREMENT}: {names:?}"
+    );
+    assert_eq!(
+        count("Test.Normalised.UNOFFICIAL"),
+        2,
+        "{REQUIREMENT}: {names:?}"
+    );
+    let streams = children_of(&found, &found[0]["id"]);
+    assert!(
+        streams
+            .iter()
+            .all(|object| object["sha256"] != sha256(PROJECT_TEXT)),
+        "{REQUIREMENT}"
+    );
+    assert_eq!(streams.len(), 6, "{REQUIREMENT}");
 }

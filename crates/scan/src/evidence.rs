@@ -11,6 +11,7 @@ pub(crate) struct Alert {
     pub(crate) name: String,
     pub(crate) alerting: Alerting,
     pub(crate) layer: LayerId,
+    pub(crate) object: LayerId,
 }
 
 #[derive(Debug, Default)]

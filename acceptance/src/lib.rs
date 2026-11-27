@@ -15,6 +15,7 @@ pub mod largest_file;
 pub mod ole2_document;
 pub mod scan_speed;
 pub mod small_object_cost;
+pub mod vba_project;
 pub mod zip_archive;
 
 pub const PINNED_DATABASES: [&str; 3] = ["bytecode.cvd", "daily.cvd", "main.cvd"];

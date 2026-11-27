@@ -109,6 +109,15 @@ impl<'o> Layers<'o> {
         Some(popped)
     }
 
+    pub(crate) fn nearest_object(&self) -> LayerId {
+        self.nested
+            .iter()
+            .rev()
+            .find(|layer| layer.arrival != Arrival::View)
+            .unwrap_or(&self.top_level)
+            .id
+    }
+
     pub(crate) fn ancestor_kinds(&self) -> Vec<ObjectKind> {
         let below_current = self.nested.len().saturating_sub(1);
         self.nested

@@ -41,3 +41,10 @@ What a scan finds inside an OLE2 compound file (a legacy Word, Excel or PowerPoi
 ## An OLE2 Document With An Invalid Header Is Matched On Its Own Bytes Only
 
 - A sector shift outside 6 to 28, or a mini-sector shift of 0 or above the sector shift, leaves every stream unscanned.
+
+## An OLE2 Document's VBA Project Is Matched As Its Project Text
+
+- In a document whose streams are scanned once per storage holding them, each `dir` stream's project is written out as text: a `REM` banner, a `REM` line for each project and module record, and each module's source.
+- A module's source is its compressed container decompressed, converted from the project's codepage to UTF-8, with letters outside strings lower-cased, runs of spaces and tabs made one space and lines continued with ` _` joined.
+- The text is matched as a script; its detections are reported on the document, and it is not an object of its own.
+- A project inside `k` nested storages is matched `k + 1` times.

@@ -717,16 +717,19 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
             return Ok(Flow::Continue);
         }
         let layer = self.current().id;
+        let object = self.layers.nearest_object();
         if alerting == Alerting::Strong {
             self.reported.push(Reported {
                 name: name.clone(),
                 layer,
+                object,
             });
         }
         self.current_mut().evidence.record(Alert {
             name,
             alerting,
             layer,
+            object,
         });
         let ends_the_scan =
             alerting == Alerting::Strong && self.settings.matching == Matching::FirstMatch;
@@ -861,6 +864,7 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
             .map(|alert| Reported {
                 name: alert.name.clone(),
                 layer: alert.layer,
+                object: alert.object,
             });
         match self.settings.matching {
             Matching::EveryMatch => reported.extend(deferred),

@@ -22,6 +22,7 @@ pub enum Verdict {
 pub struct Reported {
     pub name: String,
     pub layer: LayerId,
+    pub object: LayerId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

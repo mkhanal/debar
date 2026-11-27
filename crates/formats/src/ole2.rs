@@ -1,7 +1,11 @@
+mod codepages;
+mod compressed_container;
 mod directory;
 mod findings;
 mod folders;
 mod header;
+mod normalised_source;
+mod project_text;
 mod sectors;
 mod stream_bytes;
 mod streams;

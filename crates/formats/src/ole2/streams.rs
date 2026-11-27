@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+use debar_image::ObjectKind;
 use debar_platform::input::{InputError, ObjectBytes};
 
 use crate::context::{ModuleContext, PartOutcome};
@@ -8,13 +9,15 @@ use crate::facts::{EncryptedContent, Fact, MacroLanguage};
 use crate::limits::Limit;
 use crate::module::{ModuleError, ModuleOutput, Part, PartBytes, PartRole, PartSource};
 use crate::object::Object;
+use crate::ole2::compressed_container::decompressed;
 use crate::ole2::directory::DirectoryEntry;
 use crate::ole2::findings::Findings;
-use crate::ole2::folders::{FolderScan, Folders};
+use crate::ole2::folders::{FolderOutput, FolderScan, FolderSteps, Folders};
 use crate::ole2::header::{Header, header_of};
+use crate::ole2::project_text::{ModuleSources, project_text};
 use crate::ole2::sectors::Sectors;
 use crate::ole2::stream_bytes::{ChainedStream, StreamChain};
-use crate::ole2::walk::{Visit, Walk, WalkEnd};
+use crate::ole2::walk::{FolderId, Visit, Walk, WalkEnd};
 use crate::ole2::zlib_stream::{Inflated, Inflation, inflate};
 
 const COMPRESSED_STREAM_MARK_AT: u64 = 4;
@@ -190,7 +193,7 @@ impl<'o> Pass<'o> {
         while let Some(visit) = self.next_visit(context)? {
             match visit {
                 Visit::Stream { entry, folder } => match self.admission(&entry, context) {
-                    Admission::Counted => folders.add_stream(folder, entry.chain),
+                    Admission::Counted => folders.add_stream(folder, entry.chain, entry.name),
                     Admission::Skipped => {}
                     Admission::Stopped => break,
                 },
@@ -205,7 +208,10 @@ impl<'o> Pass<'o> {
         Ok(Phase::Folders(FolderPass {
             sectors: self.sectors,
             findings: self.findings,
-            scan: folders.scan_order(self.findings.folder_is_scanned()),
+            scan: folders.scan_order(FolderSteps {
+                projects_are_read: self.findings.project.names_a_macro_stream,
+                streams_are_scanned: self.findings.folder_is_scanned(),
+            }),
         }))
     }
 
@@ -302,13 +308,90 @@ impl<'o> FolderPass<'o> {
         if context.last_part() == Some(PartOutcome::Refused(Limit::MostFiles)) {
             return Ok(false);
         }
-        let Some(chain) = self.scan.next() else {
-            return Ok(false);
-        };
-        let stream = ChainedStream::measured(Rc::clone(&self.sectors), chain)?;
-        pending.push_back(child(PartBytes::Regenerable(Box::new(stream))));
-        Ok(true)
+        while let Some(output) = self.scan.next() {
+            match output {
+                FolderOutput::Stream(chain) => {
+                    let stream = ChainedStream::measured(Rc::clone(&self.sectors), chain)?;
+                    pending.push_back(child(PartBytes::Regenerable(Box::new(stream))));
+                    return Ok(true);
+                }
+                FolderOutput::ProjectText { dir, folder } => {
+                    if let Some(text) = self.project_text(dir, folder, context)? {
+                        pending.push_back(ModuleOutput::Part(Part {
+                            bytes: PartBytes::Produced(text),
+                            role: PartRole::View {
+                                matched_as: ObjectKind::Script,
+                            },
+                        }));
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
     }
+
+    fn project_text(
+        &self,
+        dir: StreamChain,
+        folder: FolderId,
+        context: &ModuleContext,
+    ) -> Result<Option<Vec<u8>>, InputError> {
+        let room = usize::try_from(context.room_to_produce()).unwrap_or(usize::MAX);
+        let Some(compressed) = whole_stream(&self.sectors, dir, room)? else {
+            return Ok(None);
+        };
+        let Some(records) = decompressed(&compressed, 0, room) else {
+            return Ok(None);
+        };
+        let mut sources = FolderSources {
+            sectors: &self.sectors,
+            scan: &self.scan,
+            folder,
+            room,
+        };
+        let text = project_text(&records, &mut sources)?;
+        Ok(text.filter(|text| text.len() <= room))
+    }
+}
+
+struct FolderSources<'s, 'o> {
+    sectors: &'s Rc<Sectors<'o>>,
+    scan: &'s FolderScan,
+    folder: FolderId,
+    room: usize,
+}
+
+impl ModuleSources for FolderSources<'_, '_> {
+    fn source(&mut self, stream_name: &str, offset: u32) -> Result<Option<Vec<u8>>, InputError> {
+        let from = usize::try_from(offset).unwrap_or(usize::MAX);
+        for chain in self.scan.streams_named(self.folder, stream_name) {
+            let Some(stored) = whole_stream(self.sectors, chain, self.room)? else {
+                continue;
+            };
+            if let Some(source) = decompressed(&stored, from, self.room) {
+                return Ok(Some(source));
+            }
+        }
+        Ok(None)
+    }
+}
+
+fn whole_stream(
+    sectors: &Rc<Sectors<'_>>,
+    chain: StreamChain,
+    room: usize,
+) -> Result<Option<Vec<u8>>, InputError> {
+    let stream = ChainedStream::measured(Rc::clone(sectors), chain)?;
+    let Ok(length) = usize::try_from(stream.length()) else {
+        return Ok(None);
+    };
+    if length > room {
+        return Ok(None);
+    }
+    let mut bytes = vec![0u8; length];
+    stream.read_at(0, &mut bytes)?;
+    Ok(Some(bytes))
 }
 
 fn most_storage_levels(context: &ModuleContext) -> u32 {
