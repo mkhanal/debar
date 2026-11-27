@@ -947,3 +947,27 @@ Also built with it: the scan no longer copies a pattern group's view for each ca
 **Measured** 2026-11-28, locally (aarch64, toolchain image, official pinned databases), comparison harness at `0cf7156` with its observer: 36 hand-written cases (multipart kinds, encodings, nesting, CR, LF and CRLF lines, 999-byte lines, uuencode, mailboxes), 16 more for the rules the reading turned up, 3 for text found to be mail, the acceptance inputs and 800 messages from a random generator mixing every construct above: with every match and without, and under `--max-files 2`, `--max-recursion 1` and `--max-file-size 20` with alerts and `--raw-only`, the differences left are the ones listed below and a limit alert raised on an HTML part's normalised child (HTML normalisation, #47). A sample of 305 inputs built from target-4 signatures: no difference. Fuzzing `mail_messages` (limits from the input, 32 MiB of heap): 457,916 runs in 600 s from 292 seeds, no finding. Throughput on 200 generated messages (28 MiB: text, HTML and a base64 attachment each), one thread: Debar 1.48 s (`debar measure-scan`), the reference 6.1 s (its command-line scanner, less its database load).
 
 **Not in this slice, recorded:** bounces found by typing a body line with the file-type rules (`From `/`>From ` lines and lines the rules type as mail, in a text body or a part), which needs typing inside a module; the phishing check's detections; `message/partial` reassembly (off in the reference's default options); the email heuristics' alerts under `--alert-exceeds-max` (the parse stops at the same points, without the alert); the reference's uninitialised bytes after a uuencoded line shorter than its count (Debar writes zeros); MHTML's libxml2 metadata, which hands nothing to matching.
+
+### 2026-11-28 — The reference's speed re-measured with the parsers Debar has
+
+**Decision.** The reference rates behind the twice-the-reference requirement (`CALIBRATIONS` in `acceptance/src/scan_speed.rs`) and the reference's time per small object (`SMALL_OBJECT_KINDS` in `acceptance/src/small_object_cost.rs`) are re-measured with every parser and normaliser Debar now has switched on at the reference's defaults (ZIP, OLE2, plain-text and HTML normalisation, mail, PDF), and every one it does not have still off (study, knowledge "Baseline: scan speed", "Scan with the parsers Debar has", which gives the options, the switch file and the three passes). This follows the baseline's existing design, which has always been like-for-like: every parser, normaliser and signature program that Debar does not yet have switched off. It raises no budget. The floor is re-measured the same way whenever Debar gains a parser or normaliser, in the change that adds it.
+
+**Why.** The earlier figures were measured with every parser off, when Debar had none. Since then Debar has gained six, and each kind's floor compared Debar's full scan with the reference's raw one.
+
+**Measured** 2026-11-28, the study's scripts, three passes on a quiet host (median MiB/s; least microseconds per small object). Instructions per MiB allowed on aarch64 at twice the reference, against Debar's current records:
+
+| Kind | Reference MiB/s, before → now | Limit per MiB, before → now | Change | Debar's record, share of the new limit |
+| --- | --- | --- | --- | --- |
+| system | 16.1 → 13.2 | 437,267,081 → 533,333,333 | +22 % | 77,206,577, 14.5 % |
+| text | 30.5 → 14.3 | 239,180,328 → 510,139,860 | +113 % | 135,734,200, 26.6 % |
+| html | 14.2 → 9.8 | 546,478,873 → 791,836,735 | +45 % | 354,664,715, 44.8 % |
+| binary | 26.8 → 19.1 | 266,231,343 → 373,560,209 | +40 % | 91,444,408, 24.5 % |
+| pdf | 25.3 → 0.73 | 265,810,277 → 9,212,328,767 | ×34.7 | 61,122,796, 0.7 % |
+| ole2 | 15.9 → 5.54 | 422,641,509 → 1,212,996,390 | +187 % | 57,519,321, 4.7 % |
+| tar | 28.5 → 30.5 | 248,596,491 → 232,295,082 | −7 % | 46,892,958, 20.2 % |
+
+Tar has no parser on either side; its move is within the passes' spread, as are gzip's and tar-gzip's (not calibrated), which shows the machine ran at the same speed both days. The x86_64 limits move by the same factors.
+
+Reference microseconds per small object, before → now: system 2,513.8 → 5,270.9, text 1,587.6 → 4,677.1, html 2,126.0 → 3,543.7, binary 2,085.7 → 4,208.3, pdf 1,894.8 → 6,035.2, ole2 4,479.1 → 3,701.0, tar 3,034.8 → 2,400.8. The earlier small-object passes ran on a busy machine; ole2 and tar, whose 1 KiB objects reach no parser, are now lower. These set the fifty-times aim the scan profile reports, not a gate.
+
+**Consequence.** The ratchet records are untouched: they gate every change at 2 % whatever the floor. What the reference does that no switch reaches (the HTML normaliser's CSS image extraction, the OLE2 readers Debar lacks, which find nothing in the corpus) stays in its figures; the study records each.

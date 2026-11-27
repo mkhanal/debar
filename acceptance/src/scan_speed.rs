@@ -27,37 +27,37 @@ pub struct Calibration {
 pub const CALIBRATIONS: [Calibration; 7] = [
     Calibration {
         kind: "system",
-        reference_mebibytes_per_second: 16.1,
+        reference_mebibytes_per_second: 13.2,
         instructions_per_nanosecond: 14.08,
     },
     Calibration {
         kind: "text",
-        reference_mebibytes_per_second: 30.5,
+        reference_mebibytes_per_second: 14.3,
         instructions_per_nanosecond: 14.59,
     },
     Calibration {
         kind: "html",
-        reference_mebibytes_per_second: 14.2,
+        reference_mebibytes_per_second: 9.8,
         instructions_per_nanosecond: 15.52,
     },
     Calibration {
         kind: "binary",
-        reference_mebibytes_per_second: 26.8,
+        reference_mebibytes_per_second: 19.1,
         instructions_per_nanosecond: 14.27,
     },
     Calibration {
         kind: "pdf",
-        reference_mebibytes_per_second: 25.3,
+        reference_mebibytes_per_second: 0.73,
         instructions_per_nanosecond: 13.45,
     },
     Calibration {
         kind: "ole2",
-        reference_mebibytes_per_second: 15.9,
+        reference_mebibytes_per_second: 5.54,
         instructions_per_nanosecond: 13.44,
     },
     Calibration {
         kind: "tar",
-        reference_mebibytes_per_second: 28.5,
+        reference_mebibytes_per_second: 30.5,
         instructions_per_nanosecond: 14.17,
     },
 ];

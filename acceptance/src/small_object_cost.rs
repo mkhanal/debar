@@ -23,31 +23,31 @@ pub struct SmallObjectKind {
 pub const SMALL_OBJECT_KINDS: [SmallObjectKind; 7] = [
     SmallObjectKind {
         kind: "system",
-        reference_seconds_per_object: 0.002_513_8,
+        reference_seconds_per_object: 0.005_270_9,
     },
     SmallObjectKind {
         kind: "text",
-        reference_seconds_per_object: 0.001_587_6,
+        reference_seconds_per_object: 0.004_677_1,
     },
     SmallObjectKind {
         kind: "html",
-        reference_seconds_per_object: 0.002_126_0,
+        reference_seconds_per_object: 0.003_543_7,
     },
     SmallObjectKind {
         kind: "binary",
-        reference_seconds_per_object: 0.002_085_7,
+        reference_seconds_per_object: 0.004_208_3,
     },
     SmallObjectKind {
         kind: "pdf",
-        reference_seconds_per_object: 0.001_894_8,
+        reference_seconds_per_object: 0.006_035_2,
     },
     SmallObjectKind {
         kind: "ole2",
-        reference_seconds_per_object: 0.004_479_1,
+        reference_seconds_per_object: 0.003_701_0,
     },
     SmallObjectKind {
         kind: "tar",
-        reference_seconds_per_object: 0.003_034_8,
+        reference_seconds_per_object: 0.002_400_8,
     },
 ];
 
