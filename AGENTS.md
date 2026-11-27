@@ -77,6 +77,7 @@ When work is split between agents, each task is sized so its agent can judge its
 - **A task is one outcome a reviewer can check end to end**: a requirement passes, a measurement moves, a harness count changes, a note answers a question. Never a function or a file.
 - **An issue states the problem or outcome, its evidence and how we will know it is met, never the solution**; the solution is decided while building and recorded in DECISIONS or the pull request.
 - **Each task is an issue on the board**, claimed by the branch of the worktree that does it before it starts, so parallel agents never take the same work.
+- **No epics, sub-issue hierarchies or pre-planned backlog.** An issue is created when work is claimed or when a problem is found, never to plan future work.
 - **Too small** when the brief dictates how (signatures, file layout, steps), when the agent cannot tell whether its result is right without someone else's piece, or when nothing checkable stands alone. Merge it into a larger task.
 - **Too big** when it holds two outcomes that could be checked separately, when it would outgrow one agent's context, or when it reaches into the internals of more than about two crates. Split it into tasks that each meet the first rule.
 - **Every brief carries** why (the decision, requirement or aim it serves), where it sits (the roadmap piece, neighbouring work in flight, the interfaces they expose or expect), what is settled and what is the agent's to decide and record, how it will be checked, and where to start reading. Pointing at sections is a starting place, not a fence: the agent may read anything it needs.
@@ -98,7 +99,7 @@ Everything builds and runs inside the toolchain image, on CI and on a developer 
 | To… | Run |
 | --- | --- |
 | run every check a change must pass | `./in-toolchain cargo xtask check` |
-| run one of them | `./in-toolchain cargo xtask <check>`, where `<check>` is `format`, `lints`, `tests`, `dependencies`, `lint-tables`, `layers`, `reference-mentions`, `requirements` or `workflows` |
+| run one of them | `./in-toolchain cargo xtask <check>`, where `<check>` is `format`, `lints`, `tests`, `dependencies`, `lint-tables`, `layers`, `reference-mentions`, `requirements`, `unsafe-code` or `workflows` |
 | fetch the pinned databases the acceptance tests need, once, on the host | `crates/clamav-signatures/fetch-pinned-databases target/pinned-databases` (needs Docker; it copies them from the comparison harness's pinned image) |
 | run the platform crate's tests under Miri | `./in-toolchain cargo xtask miri` |
 | run every fuzz target | `./in-toolchain cargo xtask fuzz [SECONDS]` (60 seconds each by default) |

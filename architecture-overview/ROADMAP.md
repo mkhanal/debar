@@ -27,26 +27,28 @@ The pieces Debar is built from, their order, and what exists today. Each piece g
 
 ## The pieces, in order
 
-| # | Piece | It is done when |
-| --- | --- | --- |
-| 1 | **Foundation** | The reference is pinned, the study notes hold an inventory of everything the reference scanner does, and the workspace builds, lints and tests an empty crate with every check below in place |
-| 2 | **Comparison harness** | One command runs the reference scanner and Debar on the same input and reports any difference in what each extracted and what each detected, failing only on differences not already known. It can build a matching input from a signature, proved against the reference scanner. Until Debar can scan, its side is proved against a stand-in |
-| 3 | **Signature compiler** | Every database file of the format compiles into an image, every signature in the pinned databases is accounted for in it, and the start-time and memory budgets are requirements whose tests pass on every change |
-| 4 | **Matching engine** | Given raw bytes, it reports the same signatures the reference scanner does, and the scan-speed budget is a requirement whose test passes on every change |
-| 5 | **Scan core** | A file of a kind needing no format module is scanned end to end with the reference scanner's limits and verdicts, within every budget |
-| 6 | **Format modules** | Each module matches the reference scanner on its own inputs in the harness, within every budget, and records the facts native mode reports as findings. Built one at a time, the most common formats first |
-| 7 | **Signature programs** | Signatures that are programs run and produce the reference scanner's detections |
-| 8 | **Updater and live update** | Published databases are fetched, verified and compiled, and a running scanner switches image with no scan lost and within the memory budget |
-| 9 | **Interfaces** | Native mode is complete, with its findings, refusals, whole-file reach and confinement, and compatibility mode passes for every command, protocol message and configuration option of the scanner being replaced |
-| 10 | **Signature sources** | A deployment chooses its sources by configuration; the updater fetches and verifies each by its own rules and refuses a source whose terms forbid how it is used; every chosen source compiles into one image, and each detection names its source. Third-party sets in an already supported format load through that format's part, compared with its reference scanner loading the same files |
-| 11 | **A second signature format** | A format with a public ecosystem of rules beyond the first is a part of its own, with its own pinned reference scanner, study folder and harness, matching that reference on its own inputs, and selectable as a source |
-| 12 | **Hash and indicator feeds** | Published lists of known-bad hashes and similar indicators are sources, compiled into the image's hash tables, checked by lookup, and refreshed on the feed's own cadence |
+Each item is one line: the piece, its state (Done, In progress or Not started), and what it is done when.
+
+1. **Foundation**. Done. Done when: The reference is pinned, the study notes hold an inventory of everything the reference scanner does, and the workspace builds, lints and tests an empty crate with every check below in place.
+2. **Comparison harness**. Done. Done when: One command runs the reference scanner and Debar on the same input and reports any difference in what each extracted and what each detected, failing only on differences not already known. It can build a matching input from a signature, proved against the reference scanner. Until Debar can scan, its side is proved against a stand-in.
+3. **Signature compiler**. Done. Done when: Every database file of the format compiles into an image, every signature in the pinned databases is accounted for in it, and the start-time and memory budgets are requirements whose tests pass on every change.
+4. **Matching engine**. Done. Done when: Given raw bytes, it reports the same signatures the reference scanner does, and the scan-speed budget is a requirement whose test passes on every change.
+5. **Scan core**. In progress. Done when: A file of a kind needing no format module is scanned end to end with the reference scanner's limits and verdicts, within every budget.
+6. **Format modules**. Not started. Done when: Each module matches the reference scanner on its own inputs in the harness, within every budget, and records the facts native mode reports as findings. Built one at a time, the most common formats first.
+7. **Signature programs**. Not started. Done when: Signatures that are programs run and produce the reference scanner's detections.
+8. **Updater and live update**. Not started. Done when: Published databases are fetched, verified and compiled, and a running scanner switches image with no scan lost and within the memory budget.
+9. **Interfaces**. Not started. Done when: Native mode is complete, with its findings, refusals, whole-file reach and confinement, and compatibility mode passes for every command, protocol message and configuration option of the scanner being replaced.
+10. **Signature sources**. Not started. Done when: A deployment chooses its sources by configuration; the updater fetches and verifies each by its own rules and refuses a source whose terms forbid how it is used; every chosen source compiles into one image, and each detection names its source. Third-party sets in an already supported format load through that format's part, compared with its reference scanner loading the same files.
+11. **A second signature format**. Not started. Done when: A format with a public ecosystem of rules beyond the first is a part of its own, with its own pinned reference scanner, study folder and harness, matching that reference on its own inputs, and selectable as a source.
+12. **Hash and indicator feeds**. Not started. Done when: Published lists of known-bad hashes and similar indicators are sources, compiled into the image's hash tables, checked by lookup, and refreshed on the feed's own cadence.
 
 Pieces 10 to 12 come after the first release. Pieces 1 and 2 come first whatever else changes: every later piece is checked against the notes and the harness.
 
 ## The performance track
 
 Speed is a standing track beside the pieces, not a final slice (DECISIONS, "Aim for fifty times the reference's speed"). The aim is fifty times the reference on every corpus kind; each kind's best figure is a ratchet that only tightens. Each step profiles the stages with `scan-profile`, pulls the lever the profile shows is largest, records the before and after in DECISIONS and lowers the records.
+
+In progress.
 
 - **Done:** the ratchet, the stage profile, a call-free prefilter (86 to 93 instructions per byte down to 31 to 38), a second pass searched through a filter instead of an automaton built per scan (about 40 per byte down to 7 to 12), and cheaper verification (23 to 39 down to 9 to 26).
 - **Next, by the last profile:** digests (40 per byte on every kind; SHA-256 in hardware behind a safe platform primitive, open item A13), the prefilter (31 to 38), on real PDFs a linear-time check before the backtracking matcher (51 per byte there), the cost per anchored candidate on executables, placing the signatures tied to offsets on every object, copying each chunk into the retained buffer, and parallel scanning of independent objects.

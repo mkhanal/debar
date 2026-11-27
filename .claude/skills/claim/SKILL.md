@@ -75,14 +75,7 @@ Use **Bug** for something that should have worked and did not, **Feature** for s
 
 Classify it as soon as it exists (see [Classify what you claimed](#classify-what-you-claimed)), whether or not you claim it, so unclaimed work shows its Theme, Kind and Area too.
 
-When the issue is one of several that together deliver a larger goal, attach it as a sub-issue of the goal's parent issue, so the goal shows its parts and their progress. If the goal has no parent issue yet, create one for it first (titled with the goal's outcome, its body the done-when of the whole goal).
-
-```bash
-gh issue create --title "<outcome>" --body-file <body.md> --parent <goal issue> --project Debar   # a new issue
-gh issue edit <issue> --parent <goal issue>                                                     # an existing issue
-```
-
-An issue that delivers value on its own needs no parent.
+No epics, sub-issue hierarchies or pre-planned backlog: an issue is created when work is claimed or when a problem is found, never to plan future work.
 
 ## 3. Claim it
 
