@@ -173,7 +173,7 @@ fn text_of_more_than_20_mib_is_not_normalised() {
 fn text_found_to_be_a_web_page_is_not_matched_through_normalised_text() {
     const REQUIREMENT: &str = "Text Found To Be A Web Page Is Not Matched Through Normalised Text";
     let (directory, compiled) = databases("plain-text-page", &[]);
-    let mut page = b"Some   HELLO WORLD ".to_vec();
+    let mut page = b"Some   \xe9 HELLO WORLD ".to_vec();
     page.resize(2_000, b'.');
     page.extend_from_slice(b"<html><body>a page after all</body></html>\n");
 
