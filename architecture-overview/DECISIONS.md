@@ -528,3 +528,11 @@ A 1 KiB text object costs 2.4 M instructions beyond the scan's start, from 5.0 M
 
 **Not yet closed.** The administrator, the owning user after making the file writable, and writers outside the local kernel's permission checks (network and userspace filesystems) can still change or shorten a mapped image. The `// SAFETY:` line on the mapping says so. Issue #26 holds the problem for the owner.
 
+
+### 2026-11-27 — Parity is the verdict and the set of detections, not their order
+
+**Decision.** For the same file, databases and settings, Debar gives the reference scanner's verdict; asked for every detection, the same set of names; asked for one, a name the reference reports for that file when asked for every detection, of the same class (Constitution §1). The order detections are found in, and how often one repeats, are not part of the result. Native mode offers every detection on request.
+
+**Why.** The owner set parity as: the input is what is scanned, the output is what is wrong with it. Order never changes a verdict: whichever strong detection comes first, the file is infected and potentially unwanted findings are held back the same way. It only changes which genuine name is shown when a file matches several signatures. Reproducing the reference's order needed its load-order hashing and, for some ties, its memory addresses, which cannot be computed at all.
+
+**Replaces** the requirement of the same name in single-detection mode implied by the earlier wording of Constitution §1, and the plan to replay the reference's anchor order in the compiler.

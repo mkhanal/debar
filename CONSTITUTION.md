@@ -4,7 +4,13 @@ Numbered hard requirements. They bind all code, specifications, study notes and 
 
 ## 1. Same Signatures, Same Detections
 
-For each supported signature format, Debar loads every database file unchanged. For the same file, databases and settings it reports every detection the format's reference scanner reports, under the same signature name. The reference scanner is the program the signatures were written for, at the one version pinned in that format's study folder.
+For each supported signature format, Debar loads every database file unchanged. The reference scanner is the program the signatures were written for, at the one version pinned in that format's study folder. For the same file, databases and settings:
+
+- **The verdict is the same.**
+- **Asked for every detection**, Debar reports the same set of signature names the reference scanner reports. The order they are found in and how often one repeats are not part of the result.
+- **Asked for one detection**, the name Debar reports is one the reference scanner reports for that file when asked for every detection, and of the same class (strong or potentially unwanted).
+
+Native mode also offers every detection on request.
 
 ## 2. Match What A Signature Can Observe
 
