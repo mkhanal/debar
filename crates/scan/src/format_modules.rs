@@ -44,6 +44,19 @@ impl<'r> FormatModules<'r> {
         Ok(HeaderCheck::NotNeeded)
     }
 
+    pub(crate) fn refined_kind(
+        self,
+        typed_as: ObjectKind,
+        object: &Object<'_>,
+    ) -> Result<Option<ObjectKind>, ModuleError> {
+        for module in self.claiming(typed_as) {
+            if let Some(refined) = module.refined_kind(object, typed_as)? {
+                return Ok(Some(refined));
+            }
+        }
+        Ok(None)
+    }
+
     fn claiming(self, kind: ObjectKind) -> impl Iterator<Item = &'r dyn FormatModule> {
         self.modules
             .iter()

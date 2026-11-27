@@ -1,6 +1,6 @@
 use debar_image::{BuildError, EngineAlert, ImageBuilder, Indicator};
 
-const ENGINE_ALERT_NAMES: [(EngineAlert, &str); 5] = [
+const ENGINE_ALERT_NAMES: [(EngineAlert, &str); 6] = [
     (
         EngineAlert::ScanSizeLimitExceeded,
         "Heuristics.Limits.Exceeded.MaxScanSize",
@@ -20,6 +20,10 @@ const ENGINE_ALERT_NAMES: [(EngineAlert, &str); 5] = [
     (
         EngineAlert::ScanTimeLimitExceeded,
         "Heuristics.Limits.Exceeded.MaxScanTime",
+    ),
+    (
+        EngineAlert::OverlappingParts,
+        "Heuristics.Zip.OverlappingFiles",
     ),
 ];
 

@@ -10,6 +10,7 @@ pub enum EngineAlert {
     FileCountLimitExceeded,
     RecursionLimitExceeded,
     ScanTimeLimitExceeded,
+    OverlappingParts,
 }
 
 impl EngineAlert {
@@ -20,6 +21,7 @@ impl EngineAlert {
             Self::FileCountLimitExceeded => 3,
             Self::RecursionLimitExceeded => 4,
             Self::ScanTimeLimitExceeded => 5,
+            Self::OverlappingParts => 6,
         }
     }
 }

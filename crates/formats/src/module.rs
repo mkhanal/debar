@@ -28,6 +28,15 @@ pub trait FormatModule: Sync {
         let _ = from;
         Ok(HeaderCheck::NotNeeded)
     }
+
+    fn refined_kind(
+        &self,
+        object: &Object<'_>,
+        typed_as: ObjectKind,
+    ) -> Result<Option<ObjectKind>, ModuleError> {
+        let _ = (object, typed_as);
+        Ok(None)
+    }
 }
 
 pub trait PartSource<'o> {

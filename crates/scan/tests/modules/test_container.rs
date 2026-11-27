@@ -352,6 +352,7 @@ pub fn test_container_image_builder() -> Result<ImageBuilder, BuildError> {
             object: EmbeddedObject {
                 scanned_as: TEST_CONTAINER,
                 starts_before_the_match: 0,
+                recorded_up_to_the_file_count: false,
             },
             hosts: Hosts::NotIn(vec![TEST_CONTAINER]),
         }),

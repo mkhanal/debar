@@ -4,9 +4,20 @@ use crate::limits::{Limit, Room};
 pub struct ModuleContext {
     room: Room,
     room_to_produce: u64,
+    most_files: Option<u64>,
+    found_inside_another: bool,
     facts_wanted: bool,
     last_part: Option<PartOutcome>,
     refusals: Vec<Limit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextOfTheObject {
+    pub room: Room,
+    pub room_to_produce: u64,
+    pub most_files: Option<u64>,
+    pub found_inside_another: bool,
+    pub facts_wanted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,19 +29,35 @@ pub enum PartOutcome {
 
 impl ModuleContext {
     #[must_use]
-    pub const fn new(
-        room: Room,
-        room_to_produce: u64,
-        facts_wanted: bool,
-        last_part: Option<PartOutcome>,
-    ) -> Self {
+    pub const fn new(object: ContextOfTheObject, last_part: Option<PartOutcome>) -> Self {
         Self {
-            room,
-            room_to_produce,
-            facts_wanted,
+            room: object.room,
+            room_to_produce: object.room_to_produce,
+            most_files: object.most_files,
+            found_inside_another: object.found_inside_another,
+            facts_wanted: object.facts_wanted,
             last_part,
             refusals: Vec::new(),
         }
+    }
+
+    pub fn reached(&mut self, limit: Limit) {
+        self.refusals.push(limit);
+    }
+
+    #[must_use]
+    pub const fn largest_file(&self) -> Option<u64> {
+        self.room.largest_file
+    }
+
+    #[must_use]
+    pub const fn most_files(&self) -> Option<u64> {
+        self.most_files
+    }
+
+    #[must_use]
+    pub const fn found_inside_another(&self) -> bool {
+        self.found_inside_another
     }
 
     pub fn admit(&mut self, needed: u64) -> Result<(), Limit> {

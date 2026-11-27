@@ -140,6 +140,7 @@ version = "0.0.0"
 dependencies = [
  "debar-image",
  "debar-platform",
+ "flate2",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 use debar_formats::{
-    ContainerEntry, Fact, FormatModule, HeaderCheck, Limit, ModuleContext, ModuleError,
-    ModuleOutput, Object, Part, PartBytes, PartOutcome, PartRole, Stage,
+    ContainerEntry, ContextOfTheObject, Fact, FormatModule, HeaderCheck, Limit, ModuleContext,
+    ModuleError, ModuleOutput, Object, Part, PartBytes, PartOutcome, PartRole, Stage,
 };
 use debar_image::{
     EngineAlert, Image, Indicator, KindView, ObjectKind, OffsetAction, OwnBytes, TypingRules,
@@ -229,7 +229,7 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
         }
         let kind = match given_kind {
             Some(kind) => kind,
-            None => self.kind_from_first_bytes()?,
+            None => self.kind_of_the_object()?,
         };
         self.current_mut().kind = Some(kind);
         if self.settings.object_steps == ObjectSteps::RawOnly {
@@ -302,10 +302,7 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
                     }
                 }
                 Ok(Some(ModuleOutput::Entry(entry))) => self.container_entry(&entry)?,
-                Ok(Some(ModuleOutput::Fact(fact))) => {
-                    self.record_fact(fact);
-                    Flow::Continue
-                }
+                Ok(Some(ModuleOutput::Fact(fact))) => self.module_fact(fact)?,
             };
             if flow == Flow::Abort {
                 return Ok(Flow::Abort);
@@ -332,9 +329,13 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
 
     fn module_context(&self, last_part: Option<PartOutcome>) -> ModuleContext {
         ModuleContext::new(
-            self.ledger.room(),
-            MOST_PRODUCED_BYTES_HELD.saturating_sub(self.produced_held),
-            self.settings.facts == Facts::Gathered,
+            ContextOfTheObject {
+                room: self.ledger.room(),
+                room_to_produce: MOST_PRODUCED_BYTES_HELD.saturating_sub(self.produced_held),
+                most_files: self.settings.limits.most_files,
+                found_inside_another: self.current().arrival == Arrival::Embedded,
+                facts_wanted: self.settings.facts == Facts::Gathered,
+            },
             last_part,
         )
     }
@@ -415,6 +416,17 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
         Ok(Flow::Continue)
     }
 
+    fn module_fact(&mut self, fact: Fact) -> Result<Flow, ScanFailure> {
+        self.record_fact(fact);
+        let Some(alert) = alerted_for(fact) else {
+            return Ok(Flow::Continue);
+        };
+        let Some(name) = self.image.engine_alert_name(alert)? else {
+            return Ok(Flow::Continue);
+        };
+        self.alert(name.text, name.indicator)
+    }
+
     fn record_fact(&mut self, fact: Fact) {
         let found = ObjectFact {
             layer: self.current().id,
@@ -467,16 +479,24 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
         passed_as: ObjectKind,
         types_found: &[TypeFound],
     ) -> Result<Flow, ScanFailure> {
-        let most_recorded = self.typing_rules()?.most_found_at_offsets;
-        let mut recorded = 0u32;
+        let most_recorded = u64::from(self.typing_rules()?.most_found_at_offsets);
+        let mut recorded = 0u64;
         let mut last_taken = 0u64;
         for found in types_found {
             let description = self.description(found.kind)?;
             let Some(action) = description.offset_action else {
                 continue;
             };
-            if recorded >= most_recorded {
-                break;
+            let cap = match action {
+                OffsetAction::Embedded(embedded) if embedded.recorded_up_to_the_file_count => {
+                    self.settings.limits.most_files
+                }
+                OffsetAction::Recorded
+                | OffsetAction::RetypesTheObject
+                | OffsetAction::Embedded(_) => Some(most_recorded),
+            };
+            if cap.is_some_and(|cap| recorded >= cap) {
+                continue;
             }
             recorded = recorded.saturating_add(1);
             if found.offset <= last_taken {
@@ -747,6 +767,15 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
         Ok(kinds.typing_rules())
     }
 
+    fn kind_of_the_object(&self) -> Result<ObjectKind, ScanFailure> {
+        let typed = self.kind_from_first_bytes()?;
+        match self.modules.refined_kind(typed, &self.current().bytes) {
+            Ok(refined) => Ok(refined.unwrap_or(typed)),
+            Err(ModuleError::Damaged { .. }) => Ok(typed),
+            Err(ModuleError::Input(error)) => Err(error.into()),
+        }
+    }
+
     fn kind_from_first_bytes(&self) -> Result<ObjectKind, ScanFailure> {
         let bytes = &self.current().bytes;
         let prefix_length = u64::from(self.typing_rules()?.prefix_length).min(bytes.length());
@@ -826,6 +855,22 @@ fn checked_extent(from: Object<'_>, length: u64) -> Object<'_> {
     }
     let within = length.min(from.length());
     from.window(0, within).unwrap_or(from)
+}
+
+const fn alerted_for(fact: Fact) -> Option<EngineAlert> {
+    match fact {
+        Fact::OverlappingParts => Some(EngineAlert::OverlappingParts),
+        Fact::Macros(_)
+        | Fact::Script(_)
+        | Fact::ExecutableContent
+        | Fact::Encrypted { .. }
+        | Fact::DocumentAction(_)
+        | Fact::ExternalLink
+        | Fact::KindDisagreesWithName
+        | Fact::Expansion { .. }
+        | Fact::BrokenStructure { .. }
+        | Fact::Unsupported(_) => None,
+    }
 }
 
 const fn exceeded(limit: Limit) -> EngineAlert {

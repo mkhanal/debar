@@ -200,10 +200,11 @@ enum ActionAtAnOffset {
     RetypesAnyObject,
     RetypesTextOrBinaryData,
     EmbeddedOutsideItsOwnKind(ObjectKind),
+    EachRecordEmbeddedOutsideItsOwnKind(ObjectKind),
     EmbeddedInAnExecutable { starts_before_the_match: u16 },
 }
 
-const ACTIONS_AT_AN_OFFSET: [(ObjectKind, EngineFeature, ActionAtAnOffset); 14] = [
+const ACTIONS_AT_AN_OFFSET: [(ObjectKind, EngineFeature, ActionAtAnOffset); 15] = [
     (
         ObjectKind::Mhtml,
         EngineFeature::MailMbox,
@@ -243,6 +244,11 @@ const ACTIONS_AT_AN_OFFSET: [(ObjectKind, EngineFeature, ActionAtAnOffset); 14] 
         ObjectKind::Udf,
         EngineFeature::ArchiveUdf,
         ActionAtAnOffset::RetypesAnyObject,
+    ),
+    (
+        ObjectKind::ZipSelfExtracting,
+        EngineFeature::ArchiveZip,
+        ActionAtAnOffset::EachRecordEmbeddedOutsideItsOwnKind(ObjectKind::Zip),
     ),
     (
         ObjectKind::RarSelfExtracting,
@@ -313,6 +319,17 @@ fn found_at_an_offset(
                 object: EmbeddedObject {
                     scanned_as,
                     starts_before_the_match: 0,
+                    recorded_up_to_the_file_count: false,
+                },
+                hosts: Hosts::NotIn(vec![scanned_as]),
+            }
+        }
+        Some(ActionAtAnOffset::EachRecordEmbeddedOutsideItsOwnKind(scanned_as)) => {
+            FoundAtAnOffset::Embedded {
+                object: EmbeddedObject {
+                    scanned_as,
+                    starts_before_the_match: 0,
+                    recorded_up_to_the_file_count: true,
                 },
                 hosts: Hosts::NotIn(vec![scanned_as]),
             }
@@ -323,6 +340,7 @@ fn found_at_an_offset(
             object: EmbeddedObject {
                 scanned_as: kind,
                 starts_before_the_match,
+                recorded_up_to_the_file_count: false,
             },
             hosts: Hosts::OnlyIn(vec![ObjectKind::WindowsExecutable]),
         },

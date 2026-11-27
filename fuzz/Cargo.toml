@@ -147,3 +147,10 @@ path = "../crates/scan/fuzz_targets/scan_core.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "zip_members"
+path = "../crates/formats/fuzz_targets/zip_members.rs"
+test = false
+doc = false
+bench = false

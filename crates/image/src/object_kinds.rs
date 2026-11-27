@@ -49,6 +49,7 @@ pub enum Hosts {
 pub struct EmbeddedObject {
     pub scanned_as: ObjectKind,
     pub starts_before_the_match: u16,
+    pub recorded_up_to_the_file_count: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +63,8 @@ const NOT_RECORDED: u8 = 0;
 const RECORDED: u8 = 1;
 const RETYPES_THE_OBJECT: u8 = 2;
 const EMBEDDED: u8 = 3;
+const CAPPED_BY_THE_TYPING_RULES: u16 = 0;
+const CAPPED_BY_THE_FILE_COUNT: u16 = 1;
 const ANY_HOST: u8 = 0;
 const ONLY_IN_HOSTS: u8 = 1;
 const NOT_IN_HOSTS: u8 = 2;
@@ -154,7 +157,7 @@ struct KindEntry {
     offset_hosts: u8,
     embedded_as: U16,
     starts_before_the_match: U16,
-    reserved_after_offsets: U16,
+    offset_cap: U16,
     first_host: U32,
     host_count: U32,
 }
@@ -269,7 +272,16 @@ pub fn build(
                     .embedded
                     .map_or(0, |object| object.starts_before_the_match),
             ),
-            reserved_after_offsets: U16::new(0),
+            offset_cap: U16::new(
+                if offset
+                    .embedded
+                    .is_some_and(|object| object.recorded_up_to_the_file_count)
+                {
+                    CAPPED_BY_THE_FILE_COUNT
+                } else {
+                    CAPPED_BY_THE_TYPING_RULES
+                },
+            ),
             first_host: U32::new(count(hosts.len())?),
             host_count: U32::new(count(offset.host_kinds.len())?),
         });
@@ -457,6 +469,11 @@ impl<'m> ObjectKinds<'m> {
             EMBEDDED => Some(OffsetAction::Embedded(EmbeddedObject {
                 scanned_as: kind_or_none(entry.embedded_as.get())?.ok_or(KindsMalformed::Layout)?,
                 starts_before_the_match: entry.starts_before_the_match.get(),
+                recorded_up_to_the_file_count: match entry.offset_cap.get() {
+                    CAPPED_BY_THE_TYPING_RULES => false,
+                    CAPPED_BY_THE_FILE_COUNT => true,
+                    _ => return Err(KindsMalformed::Layout),
+                },
             })),
             _ => return Err(KindsMalformed::Layout),
         };

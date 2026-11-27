@@ -140,6 +140,7 @@ fn describe_found_at_offsets(builder: &mut ImageBuilder) {
             object: EmbeddedObject {
                 scanned_as: ObjectKind::Rar,
                 starts_before_the_match: 0,
+                recorded_up_to_the_file_count: false,
             },
             hosts: any_but_archives,
         }),
@@ -151,6 +152,7 @@ fn describe_found_at_offsets(builder: &mut ImageBuilder) {
             object: EmbeddedObject {
                 scanned_as: ObjectKind::NullsoftInstaller,
                 starts_before_the_match: INSTALLER_SHIFT,
+                recorded_up_to_the_file_count: false,
             },
             hosts: Hosts::OnlyIn(vec![ObjectKind::WindowsExecutable]),
         }),
