@@ -30,6 +30,7 @@ fn malformed(group: SignatureGroup, reason: PlugInsMalformed) -> PatternScanErro
     PatternScanError::Image(ImageError::PlugInsMalformed { group, reason })
 }
 
+#[inline(never)]
 pub(crate) fn match_plug_ins(
     group: SignatureGroup,
     plug_ins: &PlugInSubsignatures<'_>,

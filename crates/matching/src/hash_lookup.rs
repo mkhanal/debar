@@ -24,6 +24,7 @@ pub enum Trust {
     NotTrusted,
 }
 
+#[inline(never)]
 pub fn whole_object_digest_need(
     image: &Image<'_>,
     size: u64,
@@ -46,6 +47,7 @@ pub fn executable_section_digest_need(
     Ok(need_at(size, detection.iter()))
 }
 
+#[inline(never)]
 pub fn whole_object_detections(
     image: &Image<'_>,
     size: u64,
@@ -76,6 +78,7 @@ pub fn executable_section_detections(
     )
 }
 
+#[inline(never)]
 pub fn whole_object_trust(
     image: &Image<'_>,
     size: u64,

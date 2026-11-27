@@ -50,6 +50,7 @@ impl From<PatternScanError> for TypingError {
     }
 }
 
+#[inline(never)]
 pub fn kind_from_first_bytes(image: &Image<'_>, object: &[u8]) -> Result<ObjectKind, TypingError> {
     let kinds = image.object_kinds()?.ok_or(TypingError::NoKinds)?;
     let rules = kinds.typing_rules();
@@ -69,6 +70,7 @@ pub fn kind_from_first_bytes(image: &Image<'_>, object: &[u8]) -> Result<ObjectK
     Ok(wide_text_kind(image, &kinds, &rules, first_bytes)?.unwrap_or(text_kind))
 }
 
+#[inline(never)]
 pub fn kind_after_full_scan(
     image: &Image<'_>,
     kind: ObjectKind,

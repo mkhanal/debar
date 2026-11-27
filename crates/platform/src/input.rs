@@ -21,6 +21,7 @@ impl fmt::Display for UnreadableObject {
 
 impl std::error::Error for UnreadableObject {}
 
+#[inline(never)]
 pub fn read_scanned_file(path: &Path) -> Result<Vec<u8>, UnreadableObject> {
     std::fs::read(path).map_err(|reason| UnreadableObject {
         path: path.to_path_buf(),

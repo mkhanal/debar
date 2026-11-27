@@ -249,21 +249,47 @@ struct ArmedParts {
     parts: Vec<ArmedPart>,
     by_program: BTreeMap<(usize, u32), usize>,
     by_anchor: BTreeMap<[u8; SHORT_ANCHOR_LENGTH], Vec<usize>>,
-    filter: Vec<u64>,
+    filter: Option<Box<ArmedFilter>>,
 }
+
+type ArmedFilter = [u64; ARMED_FILTER_WORDS];
 
 impl ArmedParts {
     fn clear(&mut self) {
         self.parts.clear();
         self.by_program.clear();
         self.by_anchor.clear();
-        self.filter.clear();
+        self.filter = None;
     }
 
     fn may_hold(&self, window: u16) -> bool {
         self.filter
-            .get(usize::from(window >> 6))
-            .is_some_and(|word| word & (1u64 << (window & 63)) != 0)
+            .as_deref()
+            .is_some_and(|filter| armed_filter_holds(filter, window))
+    }
+
+    fn hits(
+        &self,
+        window: [u8; SHORT_ANCHOR_LENGTH],
+        lowered: [u8; SHORT_ANCHOR_LENGTH],
+        position: u64,
+        hits: &mut Vec<(u64, usize, AnchoredProgram)>,
+    ) {
+        for index in self.by_anchor.get(&lowered).into_iter().flatten() {
+            if let Some(part) = self.parts.get(*index)
+                && part.anchored_by(window)
+                && part.admits_anchor_at(position)
+            {
+                hits.push((
+                    position,
+                    part.group,
+                    AnchoredProgram {
+                        program: part.program,
+                        displacement: part.displacement,
+                    },
+                ));
+            }
+        }
     }
 
     fn arm(&mut self, part: ArmedPart) -> Arming {
@@ -286,12 +312,14 @@ impl ArmedParts {
         }
         let index = self.parts.len();
         if let Some(anchor) = part.anchor.map(ascii_lowercase) {
-            if self.filter.is_empty() {
-                self.filter.resize(ARMED_FILTER_WORDS, 0);
-            }
-            let window = u16::from_le_bytes(anchor);
-            if let Some(word) = self.filter.get_mut(usize::from(window >> 6)) {
-                *word |= 1u64 << (window & 63);
+            let filter = self
+                .filter
+                .get_or_insert_with(|| Box::new([0; ARMED_FILTER_WORDS]));
+            for variant in case_variants(anchor) {
+                let window = u16::from_le_bytes(variant);
+                if let Some(word) = filter.get_mut(usize::from(window >> 6)) {
+                    *word |= 1u64 << (window & 63);
+                }
             }
             self.by_anchor.entry(anchor).or_default().push(index);
         }
@@ -299,6 +327,15 @@ impl ArmedParts {
         self.parts.push(part);
         Arming::New
     }
+}
+
+fn case_variants(
+    lowered: [u8; SHORT_ANCHOR_LENGTH],
+) -> impl Iterator<Item = [u8; SHORT_ANCHOR_LENGTH]> {
+    let [first, second] = lowered.map(|byte| [byte, byte.to_ascii_uppercase()]);
+    first
+        .into_iter()
+        .flat_map(move |first| second.map(|second| [first, second]))
 }
 
 enum Arming {
@@ -346,52 +383,226 @@ impl ProbedWindow<'_, '_> {
     }
 }
 
-fn probe_long_windows(
+fn probe_windows(
+    window: &ProbedWindow<'_, '_>,
+    probes: &[GroupProbe<'_>],
+    armed: Option<&ArmedParts>,
+    hits: &mut Vec<(u64, usize, AnchoredProgram)>,
+) {
+    let probe = PositionProbe {
+        window,
+        probes,
+        armed,
+        probes_long: !probes.is_empty(),
+        probes_short: probes.iter().any(|probe| probe.short.is_some()),
+        probes_folded: probes.iter().any(|probe| probe.folded.is_some()),
+    };
+    let tests = probe.tests();
+    let long_positions = window
+        .positions
+        .min(window.bytes.len().saturating_sub(LONG_ANCHOR_LENGTH - 1));
+    let mut offset = 0;
+    while let Some(admitted) = tests.next_admitted(window.bytes, offset, long_positions) {
+        if let Some(bytes) = window.bytes.get(admitted..) {
+            probe.long_position(admitted, bytes, hits);
+        }
+        offset = admitted.saturating_add(1);
+    }
+    let short_positions = window
+        .positions
+        .min(window.bytes.len().saturating_sub(SHORT_ANCHOR_LENGTH - 1));
+    for offset in long_positions..short_positions {
+        if let Some(bytes) = window.bytes.get(offset..) {
+            probe.short_position(offset, bytes, hits);
+        }
+    }
+}
+
+struct PositionProbe<'p, 'w, 'm> {
+    window: &'p ProbedWindow<'w, 'm>,
+    probes: &'p [GroupProbe<'m>],
+    armed: Option<&'p ArmedParts>,
+    probes_long: bool,
+    probes_short: bool,
+    probes_folded: bool,
+}
+
+impl<'p, 'm> PositionProbe<'p, '_, 'm> {
+    fn tests(&self) -> PositionTests<'p, 'm> {
+        let selection = self.window.selection_filter;
+        let unfiltered = selection.is_none() && (self.probes_long || self.probes_short);
+        PositionTests {
+            long: selection.filter(|_| self.probes_long),
+            short: selection.filter(|_| self.probes_short),
+            armed: self.armed.and_then(|armed| armed.filter.as_deref()),
+            every_position: unfiltered,
+        }
+    }
+
+    fn long_position(
+        &self,
+        offset: usize,
+        bytes: &[u8],
+        hits: &mut Vec<(u64, usize, AnchoredProgram)>,
+    ) {
+        let Some(long) = bytes
+            .first_chunk::<LONG_ANCHOR_LENGTH>()
+            .copied()
+            .map(u32::from_le_bytes)
+        else {
+            return;
+        };
+        let selection = self.window.selection_filter;
+        if self.probes_long && selection.is_none_or(|filter| filter.may_hold_long(long)) {
+            long_hits(
+                self.window,
+                self.probes,
+                self.probes_folded,
+                offset,
+                long,
+                hits,
+            );
+        }
+        self.short_position(offset, bytes, hits);
+    }
+
+    fn short_position(
+        &self,
+        offset: usize,
+        bytes: &[u8],
+        hits: &mut Vec<(u64, usize, AnchoredProgram)>,
+    ) {
+        let Some(short) = bytes.first_chunk::<SHORT_ANCHOR_LENGTH>().copied() else {
+            return;
+        };
+        let selection = self.window.selection_filter;
+        if self.probes_short
+            && selection.is_none_or(|filter| filter.may_hold_short(u16::from_le_bytes(short)))
+        {
+            short_hits(self.window, self.probes, offset, short, hits);
+        }
+        if let Some(armed) = self.armed
+            && armed.may_hold(u16::from_le_bytes(short))
+        {
+            armed.hits(
+                short,
+                ascii_lowercase(short),
+                self.window.position(offset),
+                hits,
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PositionTests<'f, 'm> {
+    long: Option<SelectionFilter<'m>>,
+    short: Option<SelectionFilter<'m>>,
+    armed: Option<&'f ArmedFilter>,
+    every_position: bool,
+}
+
+impl PositionTests<'_, '_> {
+    fn next_admitted(&self, bytes: &[u8], from: usize, positions: usize) -> Option<usize> {
+        if from >= positions {
+            return None;
+        }
+        if self.every_position {
+            return Some(from);
+        }
+        let windows = bytes
+            .get(from..positions.saturating_add(LONG_ANCHOR_LENGTH - 1))?
+            .windows(LONG_ANCHOR_LENGTH);
+        for (index, window) in windows.enumerate() {
+            let Some(long) = window
+                .first_chunk::<LONG_ANCHOR_LENGTH>()
+                .copied()
+                .map(u32::from_le_bytes)
+            else {
+                continue;
+            };
+            if self.admits(long) {
+                return Some(from.saturating_add(index));
+            }
+        }
+        None
+    }
+
+    fn admits(&self, long: u32) -> bool {
+        let [first, second, _, _] = long.to_le_bytes();
+        let short = u16::from_le_bytes([first, second]);
+        self.long.is_some_and(|filter| filter.may_hold_long(long))
+            || self
+                .short
+                .is_some_and(|filter| filter.may_hold_short(short))
+            || self
+                .armed
+                .is_some_and(|words| armed_filter_holds(words, short))
+    }
+}
+
+fn armed_filter_holds(words: &ArmedFilter, window: u16) -> bool {
+    words
+        .get(usize::from(window >> 6))
+        .is_some_and(|word| word & (1u64 << (window & 63)) != 0)
+}
+
+#[inline(never)]
+fn long_hits(
     window: &ProbedWindow<'_, '_>,
     probes: &[GroupProbe<'_>],
     probes_folded: bool,
+    offset: usize,
+    long: u32,
     hits: &mut Vec<(u64, usize, AnchoredProgram)>,
 ) {
-    let mut value: u32 = 0;
-    for (index, byte) in window.bytes.iter().enumerate() {
-        value = (value >> 8) | (u32::from(*byte) << 24);
-        let Some(offset) = index.checked_sub(LONG_ANCHOR_LENGTH - 1) else {
-            continue;
-        };
-        if offset >= window.positions {
-            break;
+    let lowered = if probes_folded {
+        ascii_lowercase_word(long)
+    } else {
+        long
+    };
+    let position = window.position(offset);
+    for probe in probes {
+        if probe.exact_filter.may_hold(long) {
+            hits.extend(
+                probe
+                    .exact
+                    .anchored(long.to_le_bytes())
+                    .map(|hit| (position, probe.group, hit)),
+            );
         }
-        if window
-            .selection_filter
-            .is_some_and(|filter| !filter.may_hold_long(value))
+        if let Some((folded, filter)) = &probe.folded
+            && filter.may_hold(lowered)
         {
-            continue;
+            hits.extend(
+                folded
+                    .anchored(lowered.to_le_bytes())
+                    .map(|hit| (position, probe.group, hit)),
+            );
         }
-        let lowered = if probes_folded {
-            ascii_lowercase_word(value)
-        } else {
-            value
-        };
-        for probe in probes {
-            if probe.exact_filter.may_hold(value) {
-                let position = window.position(offset);
-                hits.extend(
-                    probe
-                        .exact
-                        .anchored(value.to_le_bytes())
-                        .map(|hit| (position, probe.group, hit)),
-                );
-            }
-            if let Some((folded, filter)) = &probe.folded
-                && filter.may_hold(lowered)
-            {
-                let position = window.position(offset);
-                hits.extend(
-                    folded
-                        .anchored(lowered.to_le_bytes())
-                        .map(|hit| (position, probe.group, hit)),
-                );
-            }
+    }
+}
+
+#[inline(never)]
+fn short_hits(
+    window: &ProbedWindow<'_, '_>,
+    probes: &[GroupProbe<'_>],
+    offset: usize,
+    short: [u8; SHORT_ANCHOR_LENGTH],
+    hits: &mut Vec<(u64, usize, AnchoredProgram)>,
+) {
+    let value = u16::from_le_bytes(short);
+    for probe in probes {
+        if let Some(filter) = &probe.short
+            && filter.may_hold(value)
+        {
+            let position = window.position(offset);
+            hits.extend(
+                probe
+                    .tables
+                    .short_anchored(short)
+                    .map(|hit| (position, probe.group, hit)),
+            );
         }
     }
 }
@@ -531,6 +742,7 @@ struct Found {
 }
 
 impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
+    #[inline(never)]
     pub fn new(
         image: &'i Image<'m>,
         request: PatternRequest<'r>,
@@ -678,6 +890,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         Ok(ScanEnd::Complete(self.outcomes()?))
     }
 
+    #[inline(never)]
     pub fn match_whole_object(
         mut self,
         object: &[u8],
@@ -790,6 +1003,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         })
     }
 
+    #[inline(never)]
     fn logical_findings(&self) -> Result<LogicalFindings, PatternScanError> {
         let mut findings = LogicalFindings::default();
         let layout = self.layout_state();
@@ -894,6 +1108,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
     fn probe(&mut self, pass_end: u64) -> Result<(), PatternScanError> {
         let mut hits = std::mem::take(&mut self.hits);
         hits.clear();
+        self.search_armed_signatures(pass_end, &mut hits);
         self.probe_positions(pass_end, &mut hits);
         hits.sort_by_key(|(position, group, _)| (*position, *group));
         self.probed_to = pass_end;
@@ -1066,29 +1281,12 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         self.queue.insert(at, candidate);
     }
 
+    #[inline(never)]
     fn probe_positions(&self, pass_end: u64, hits: &mut Vec<(u64, usize, AnchoredProgram)>) {
-        if pass_end <= self.probed_to {
-            return;
-        }
-        let Some(start) = self
-            .probed_to
-            .checked_sub(self.first_retained)
-            .and_then(|start| usize::try_from(start).ok())
-        else {
+        let Some(bytes) = self.unprobed_bytes(pass_end) else {
             return;
         };
         let positions = usize::try_from(pass_end.saturating_sub(self.probed_to)).unwrap_or(0);
-        let end = start
-            .saturating_add(positions)
-            .saturating_add(LONG_ANCHOR_LENGTH - 1)
-            .min(self.retained.len());
-        let Some(bytes) = self.retained.get(start..end) else {
-            return;
-        };
-        let pass = self.pass;
-        if let Some(search) = &self.second_pass_search {
-            search.search(bytes, self.probed_to, positions, hits);
-        }
         let probes: Vec<GroupProbe<'m>> = if self.second_pass_search.is_some() {
             Vec::new()
         } else {
@@ -1099,91 +1297,45 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
                 .map(|(index, group)| GroupProbe::of(index, group.tables))
                 .collect()
         };
-        let probes_folded = probes.iter().any(|probe| probe.folded.is_some());
-        let probes_short = probes.iter().any(|probe| probe.short.is_some());
-        let probes_armed = !self.armed.by_anchor.is_empty();
-        let selection_filter = self.selection_filter.filter(|_| pass == MatchingPass::Main);
         let window = ProbedWindow {
             bytes,
             positions,
             first_position: self.probed_to,
-            selection_filter,
+            selection_filter: self
+                .selection_filter
+                .filter(|_| self.pass == MatchingPass::Main),
         };
-        if !probes.is_empty() {
-            probe_long_windows(&window, &probes, probes_folded, hits);
-        }
-        if probes_short || probes_armed {
-            self.probe_short_windows(&window, &probes, probes_short, probes_armed, hits);
+        let armed = (!self.armed.by_anchor.is_empty()).then_some(&self.armed);
+        if !probes.is_empty() || armed.is_some() {
+            probe_windows(&window, &probes, armed, hits);
         }
         probe_everywhere(&window, &probes, hits);
     }
 
-    fn probe_short_windows(
+    fn search_armed_signatures(
         &self,
-        window: &ProbedWindow<'_, 'm>,
-        probes: &[GroupProbe<'m>],
-        probes_short: bool,
-        probes_armed: bool,
+        pass_end: u64,
         hits: &mut Vec<(u64, usize, AnchoredProgram)>,
     ) {
-        let mut value: u16 = 0;
-        for (index, byte) in window.bytes.iter().enumerate() {
-            value = (value >> 8) | (u16::from(*byte) << 8);
-            let Some(offset) = index.checked_sub(SHORT_ANCHOR_LENGTH - 1) else {
-                continue;
-            };
-            if offset >= window.positions {
-                break;
-            }
-            let bytes = value.to_le_bytes();
-            let short_may_hold = probes_short
-                && window
-                    .selection_filter
-                    .is_none_or(|filter| filter.may_hold_short(value));
-            for probe in probes.iter().filter(|_| short_may_hold) {
-                if let Some(short) = &probe.short
-                    && short.may_hold(value)
-                {
-                    let position = window.position(offset);
-                    hits.extend(
-                        probe
-                            .tables
-                            .short_anchored(bytes)
-                            .map(|hit| (position, probe.group, hit)),
-                    );
-                }
-            }
-            if probes_armed {
-                let lowered = ascii_lowercase(bytes);
-                if self.armed.may_hold(u16::from_le_bytes(lowered)) {
-                    self.armed_hits(bytes, lowered, window.position(offset), hits);
-                }
-            }
+        if let (Some(search), Some(bytes)) =
+            (&self.second_pass_search, self.unprobed_bytes(pass_end))
+        {
+            let positions = usize::try_from(pass_end.saturating_sub(self.probed_to)).unwrap_or(0);
+            search.search(bytes, self.probed_to, positions, hits);
         }
     }
 
-    fn armed_hits(
-        &self,
-        window: [u8; SHORT_ANCHOR_LENGTH],
-        lowered: [u8; SHORT_ANCHOR_LENGTH],
-        position: u64,
-        hits: &mut Vec<(u64, usize, AnchoredProgram)>,
-    ) {
-        for index in self.armed.by_anchor.get(&lowered).into_iter().flatten() {
-            if let Some(part) = self.armed.parts.get(*index)
-                && part.anchored_by(window)
-                && part.admits_anchor_at(position)
-            {
-                hits.push((
-                    position,
-                    part.group,
-                    AnchoredProgram {
-                        program: part.program,
-                        displacement: part.displacement,
-                    },
-                ));
-            }
+    fn unprobed_bytes(&self, pass_end: u64) -> Option<&[u8]> {
+        if pass_end <= self.probed_to {
+            return None;
         }
+        let start = usize::try_from(self.probed_to.checked_sub(self.first_retained)?).ok()?;
+        let positions = usize::try_from(pass_end.saturating_sub(self.probed_to)).unwrap_or(0);
+        let end = start
+            .saturating_add(positions)
+            .saturating_add(LONG_ANCHOR_LENGTH - 1)
+            .min(self.retained.len());
+        self.retained.get(start..end)
     }
 
     fn admit_positional_up_to(&mut self, position: u64) {
@@ -1198,6 +1350,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         }
     }
 
+    #[inline(never)]
     fn verify_ready(&mut self) -> Result<(), PatternScanError> {
         let available = self.fed;
         let complete = self.fed == self.object_length;

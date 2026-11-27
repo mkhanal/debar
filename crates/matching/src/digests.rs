@@ -24,6 +24,7 @@ pub struct ObjectDigests {
 }
 
 impl ObjectDigests {
+    #[inline(never)]
     #[must_use]
     pub fn of(bytes: &[u8], need: DigestNeed) -> Self {
         Self {

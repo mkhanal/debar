@@ -145,7 +145,7 @@ pub fn build<'a>(
 pub struct SelectionFilter<'m> {
     long: &'m [u8],
     long_bits: u32,
-    short: &'m [u8],
+    short: &'m [u8; SHORT_FILTER_BYTES],
 }
 
 impl SelectionFilter<'_> {
@@ -206,12 +206,8 @@ pub fn find<'m>(
             )
             .ok_or(FiltersMalformed)?;
         let short = data
-            .get(
-                short_start
-                    ..short_start
-                        .checked_add(SHORT_FILTER_BYTES)
-                        .ok_or(FiltersMalformed)?,
-            )
+            .get(short_start..)
+            .and_then(|rest| rest.first_chunk::<SHORT_FILTER_BYTES>())
             .ok_or(FiltersMalformed)?;
         return Ok(Some(SelectionFilter {
             long,

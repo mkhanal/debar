@@ -112,6 +112,7 @@ pub(crate) struct SecondPassSearch {
 }
 
 impl SecondPassSearch {
+    #[inline(never)]
     pub(crate) fn for_armed(
         groups: &[ArmedGroup<'_, '_>],
     ) -> Result<Option<Self>, PatternScanError> {
@@ -183,6 +184,7 @@ impl SecondPassSearch {
         }))
     }
 
+    #[inline(never)]
     pub(crate) fn search(
         &self,
         bytes: &[u8],
