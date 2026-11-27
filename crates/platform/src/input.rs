@@ -83,6 +83,52 @@ impl fmt::Display for InputError {
 
 impl std::error::Error for InputError {}
 
+pub trait ObjectBytes {
+    fn length(&self) -> u64;
+
+    fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError>;
+}
+
+impl ObjectBytes for [u8] {
+    fn length(&self) -> u64 {
+        u64::try_from(self.len()).unwrap_or(u64::MAX)
+    }
+
+    fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError> {
+        let wanted = u64::try_from(into.len()).unwrap_or(u64::MAX);
+        let held = usize::try_from(offset)
+            .ok()
+            .and_then(|start| self.get(start..start.checked_add(into.len())?))
+            .ok_or(InputError::BeyondTheEnd {
+                offset,
+                wanted,
+                length: ObjectBytes::length(self),
+            })?;
+        into.copy_from_slice(held);
+        Ok(())
+    }
+}
+
+impl<T: ObjectBytes + ?Sized> ObjectBytes for &T {
+    fn length(&self) -> u64 {
+        T::length(self)
+    }
+
+    fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError> {
+        T::read_at(self, offset, into)
+    }
+}
+
+impl ObjectBytes for ScannedFile {
+    fn length(&self) -> u64 {
+        ScannedFile::length(self)
+    }
+
+    fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError> {
+        ScannedFile::read_at(self, offset, into)
+    }
+}
+
 pub const LARGEST_STREAM_HELD: u64 = 16 * 1024 * 1024;
 
 enum Content {

@@ -385,7 +385,7 @@ Each becomes a requirement in `specs/` with its married test in the piece that f
 
 **Why.** Every rule above is one a signature can observe, kept, or one it cannot, made deterministic. Pulling parts one at a time is the only order that reproduces where the reference cuts a scan short.
 
-**Consequence.** The scan logic that grew inside the interfaces layer for the harness moves into `debar-scan`, and the input gate is rebuilt to bound its reads, before anything else. Text moves to piece 6, because it is matched through the script normaliser, the first format module. Until the matcher reads regular-expression objects through a random-access reader, an object needing that is materialised only up to 16 MiB, and a larger one is reported as an internal limit, a recorded difference. The full design, with the reference-specific reasoning, is in the study folder.
+**Consequence.** The scan logic that grew inside the interfaces layer for the harness moves into `debar-scan`, and the input gate is rebuilt to bound its reads, before anything else. Text moves to piece 6, because it is matched through the script normaliser, the first format module. Matching reads such objects through the input gate as "Whole-object matching reads through pages" below records. The full design, with the reference-specific reasoning, is in the study folder.
 
 ### 2026-11-27 — The throughput ratchet, the scan profile and a cheaper prefilter, as built
 
@@ -424,7 +424,7 @@ On x86_64 (emulated) the same slices run 1.33 times the aarch64 instructions on 
 **Decision.** Build steps 0 and 1 of the scan core are built to the agreed design, with these choices at this scale:
 
 - **The input gate** is `debar_platform::input::ScannedFile`: the length is fixed when the file is opened, every read is positional, bounded by that length and counted against an allowance, and a read that ends early is `ChangedWhileScanned`. The allowance is eight times the scan-size limit, so a scan may read each byte it counts a fixed number of times; with the limit off there is none. A file that is not a regular file (a pipe) is read once and held in memory up to 16 MiB, until streamed input is designed with piece 9. No page pool yet: the top-level object is read sequentially, pass by pass, in 128 KiB chunks, and the whole-object digests are taken on the first pass when it reads to the end.
-- **An object that needs its regular expressions, byte comparisons or image fuzzy hash matched** is held whole only up to 16 MiB; above it the scan ends `Incomplete`, with what was found standing. With the pinned databases every object needs it, so for now a file over 16 MiB is not scanned to the end. The cap goes when the matcher reads through a random-access reader.
+- **An object that needs its regular expressions, byte comparisons or image fuzzy hash matched** is handed to matching as `ObjectBytes`, which reads it as the entry "Whole-object matching reads through pages" below says.
 - **The layer stack** always holds the top level, so there is always a current layer; nested layers are pushed by the next slice. Weak indicators are dropped until the clean cache needs them.
 - **False-positive trust** needs its own digest need (`whole_object_trust_digest_need` in matching), since a database may list false positives without any hash signature.
 - **A first-match scan stops at the first strong alert that survives trust**; matching stops the pass at the same window boundary, and the scan core skips the hashes, the logical outcomes and the re-typing after it, as the reference does.
@@ -528,7 +528,6 @@ A 1 KiB text object costs 2.4 M instructions beyond the scan's start, from 5.0 M
 
 **Not yet closed.** The administrator, the owning user after making the file writable, and writers outside the local kernel's permission checks (network and userspace filesystems) can still change or shorten a mapped image. The `// SAFETY:` line on the mapping says so. Issue #26 holds the problem for the owner.
 
-
 ### 2026-11-27 — Parity is the verdict and the set of detections, not their order
 
 **Decision.** For the same file, databases and settings, Debar gives the reference scanner's verdict; asked for every detection, the same set of names; asked for one, a name the reference reports for that file when asked for every detection, of the same class (Constitution §1). The order detections are found in, and how often one repeats, are not part of the result. Native mode offers every detection on request.
@@ -544,3 +543,18 @@ A 1 KiB text object costs 2.4 M instructions beyond the scan's start, from 5.0 M
 **Why.** The owner wants other publicly available signatures usable on top of the first format's official databases, and each deployment to decide what it trusts. The engine already knows no format (Constitution §11), so a source is configuration plus, for a new format, a new part.
 
 **Consequence.** Parity (Constitution §1) holds per format against that format's reference scanner loading the same chosen sources. A source's terms are checked before it is used: some public sets allow free use but forbid redistribution, which bears on a hosted service distributing compiled images. Replaces the deferred item "More signature formats".
+
+### 2026-11-27 — Whole-object matching reads through pages
+
+**Decision.** Matching after the walk takes the object as `ObjectBytes` (the trait now lives in the platform layer's input gate, beside `ScannedFile`) instead of one in-memory slice, so a file up to the file-size limit is scanned to its end:
+
+- **An object of at most 4 MiB is read whole** into memory and matched as before, by `regex-automata`'s own search.
+- **A larger one is read through a pool of 32 pages of 128 KiB** (4 MiB), most recently used kept, owned by that one call and freed after it. Regular expressions in the image run their forward automaton over the pages and their reverse automaton back from the match end, with the same start, look-behind and end-of-input rules as `regex-automata`'s search, skipping bytes an accelerated state stays on. One compiled from its text at scan time runs as `regex-automata`'s lazy automaton the same way, with its cache never given up. The backtracking matcher reads its subject through the same pages, and a byte comparison reads its bytes from the input gate.
+- **A read that fails part-way ends the scan `Incomplete`** with the input error (`PatternScanError::Input`, reported by the scan core as `ScanFailure::Input`); none is taken as the end of the object.
+- **Every page read is counted against the scan's read allowance**, so each regular expression searching a large object to its end reads it once more. At eight times the scan-size limit, a 100 MiB file allows about thirty such searches before the scan ends `Incomplete`; none of the pinned databases' expressions came near it on the files measured.
+
+**Measured.** A 100 MiB file whose six expressions (four in the image, one compiled from its text, one backtracking) are matched to its last byte: peak heap 4.13 MiB above a run that scans nothing (`valgrind --tool=massif`), 0.47 s to scan on an arm64 Mac in the toolchain image (`debar measure-scan`, 214 MiB/s), and the reference's set of detections. The streamed searches cost about 7 instructions a byte for an automaton in the image and 20 for one compiled at scan time. The scan-speed slices are at most 2 MiB, so they take the held path and their figures do not move.
+
+**Why.** Memory mapping a scanned file was rejected (truncation raises SIGBUS), and holding the object whole costs its size in private memory. Pages keep a scan within its 32 MiB bound at any object size, and the held path keeps the measured speed of every object the benchmark corpus holds.
+
+**Consequence.** The 16 MiB cap and `ScanFailure::TooLargeToHoldWhole` are gone, which answers open item A6 of the matcher design. Two requirements now hold this: "A File Up To The File-Size Limit Is Scanned To Its End" and "Scanning One File Holds At Most 32 MiB Of Memory".

@@ -10,6 +10,8 @@ use debar_image::{
     SelectionFilter, ShortAnchorFilter, SignatureGroup, ascii_lowercase,
 };
 
+use debar_platform::input::{InputError, ObjectBytes};
+
 use crate::executable_layout::{ExecutableLayout, LayoutState, placed_starts};
 use crate::logical_state::{
     CountedMatches, LogicalFindings, LogicalState, ObjectContext, UnwantedCategories,
@@ -18,6 +20,7 @@ use crate::part_ends::RememberedEnds;
 use crate::plug_in_matching::{PlugInRequest, match_plug_ins};
 use crate::second_pass_search::{ArmedGroup, SecondPassSearch};
 use crate::verification::{PositionSet, RetainedBytes, anchor_rules_out, earliest_end};
+use crate::whole_object::WholeObject;
 
 const POSITIONS_PER_PASS: u64 = 4096;
 const CHUNK_LENGTH: usize = 128 * 1024;
@@ -88,6 +91,7 @@ pub enum PatternScanError {
     RetainedBytesLost { position: u64 },
     SecondPassNotRun,
     WholeObjectNotGiven,
+    Input(InputError),
 }
 
 impl fmt::Display for PatternScanError {
@@ -123,6 +127,7 @@ impl fmt::Display for PatternScanError {
                 formatter,
                 "the whole object must be given before its regular expressions and byte comparisons are matched"
             ),
+            Self::Input(error) => write!(formatter, "{error}"),
             Self::SecondPassNotRun => write!(
                 formatter,
                 "the object must be matched a second time before its outcomes are known"
@@ -136,6 +141,12 @@ impl std::error::Error for PatternScanError {}
 impl From<GroupMalformed> for PatternScanError {
     fn from(error: GroupMalformed) -> Self {
         Self::Group(error)
+    }
+}
+
+impl From<InputError> for PatternScanError {
+    fn from(error: InputError) -> Self {
+        Self::Input(error)
     }
 }
 
@@ -193,7 +204,7 @@ pub fn scan_object(
             ScanEnd::Complete(outcomes) => return Ok(outcomes),
             ScanEnd::SecondPassNeeded(second) => scan = *second,
             ScanEnd::WholeObjectNeeded(waiting) => {
-                return waiting.match_whole_object(object)?.into_outcomes();
+                return waiting.match_whole_object(&object)?.into_outcomes();
             }
         }
     }
@@ -891,17 +902,17 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
     #[inline(never)]
     pub fn match_whole_object(
         mut self,
-        object: &[u8],
+        object: &dyn ObjectBytes,
     ) -> Result<ScanEnd<'i, 'm, 'r>, PatternScanError> {
-        let length = u64::try_from(object.len()).unwrap_or(u64::MAX);
+        let length = object.length();
         if length != self.object_length {
             return Err(PatternScanError::FewerBytesThanDeclared {
                 declared: self.object_length,
                 fed: length,
             });
         }
+        let mut whole = WholeObject::of(object)?;
         let request = PlugInRequest {
-            object,
             windows: self.report_windows,
             image_fuzzy_hash: self.image_fuzzy_hash,
             largest_object_for_regular_expressions: self
@@ -917,7 +928,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         };
         for group in &mut self.groups {
             if let (Some(plug_ins), Some(state)) = (&group.plug_ins, group.logical.as_mut()) {
-                match_plug_ins(group.id, plug_ins, state, &request)?;
+                match_plug_ins(group.id, plug_ins, state, &request, &mut whole)?;
             }
         }
         Ok(ScanEnd::Complete(self.outcomes()?))

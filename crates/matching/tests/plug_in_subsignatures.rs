@@ -666,3 +666,105 @@ fn a_logical_signature_that_triggers_a_program_reports_the_trigger_and_no_detect
         [LogicalOutcome::RunProgram(SignatureProgramId(0))]
     );
 }
+
+const LARGE_OBJECT_LENGTH: usize = 5 * 1024 * 1024;
+const READ_BOUNDARY: usize = 12 * 128 * 1024;
+
+fn large_object(pieces: &[(usize, &[u8])]) -> Vec<u8> {
+    let mut object = vec![b'.'; LARGE_OBJECT_LENGTH];
+    object[..4].copy_from_slice(b"MARK");
+    for (offset, piece) in pieces {
+        object[*offset..*offset + piece.len()].copy_from_slice(piece);
+    }
+    object
+}
+
+fn large_object_signatures() -> Vec<Signature> {
+    let named = |name, regular| Signature {
+        name,
+        ..with_expression(leaf(1), regular)
+    };
+    let not_after_a_word_byte = ExpressionTree::Concat(vec![
+        ExpressionTree::Lookaround {
+            direction: LookDirection::Behind,
+            negated: true,
+            item: Box::new(ExpressionTree::Byte(ByteSet::of(
+                (0..=u8::MAX).filter(u8::is_ascii_alphanumeric),
+            ))),
+        },
+        ExpressionTree::literal(b"inject"),
+    ]);
+    let repeated_word = ExpressionTree::Concat(vec![
+        ExpressionTree::literal(b"var "),
+        ExpressionTree::Capture {
+            group: 1,
+            item: Box::new(word_run()),
+        },
+        ExpressionTree::literal(b"="),
+        ExpressionTree::Backreference {
+            group: 1,
+            caseless: false,
+        },
+    ]);
+    vec![
+        named("Test.Straddling", regular("TAIL[0-9]{4}END")),
+        named("Test.Unbuildable", regular("TEXT[ab]*a[ab]{15}Z")),
+        named(
+            "Test.AtTheEnd",
+            RegularExpressionSubsignature {
+                placement: Placement::BeforeEnd {
+                    distance: 12,
+                    shift: 0,
+                },
+                ..regular("LAST[0-9]{4}BYTE")
+            },
+        ),
+        named("Test.Lookbehind", backtracking(not_after_a_word_byte)),
+        named("Test.Backreference", backtracking(repeated_word)),
+        comparison(
+            4,
+            ByteEncoding::Binary(ByteOrder::Big),
+            vec![ValueComparison::Greater(512)],
+        ),
+    ]
+}
+
+#[test]
+fn an_object_too_large_to_hold_whole_is_matched_to_its_end() {
+    let image = image_of(&large_object_signatures(), None);
+    let end = LARGE_OBJECT_LENGTH;
+    let matching = large_object(&[
+        (READ_BOUNDARY - 5, b"TAIL1234END"),
+        (end - 4096, b"TEXTabbbbbbbbbbbbbbbZ"),
+        (READ_BOUNDARY * 2, b"inject"),
+        (READ_BOUNDARY + 1000, b"var abc=abc;"),
+        (end - 100, b"MARK\x02\x01"),
+        (end - 12, b"LAST1234BYTE"),
+    ]);
+    let mut found = detected_with(&image, &matching, None, None);
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            "Test.AtTheEnd",
+            "Test.Backreference",
+            "Test.Compared",
+            "Test.Lookbehind",
+            "Test.Straddling",
+            "Test.Unbuildable",
+        ]
+    );
+
+    let missing = large_object(&[
+        (READ_BOUNDARY - 5, b"TAIL12x4END"),
+        (end - 4096, b"TEXTabbbbbbbbbbbbbbbbZ"),
+        (READ_BOUNDARY * 2 - 1, b"xinject"),
+        (READ_BOUNDARY + 1000, b"var abc=abd;"),
+        (end - 100, b"MARK\x02\x00"),
+        (end - 13, b"LAST1234BYTE."),
+    ]);
+    assert_eq!(
+        detected_with(&image, &missing, None, None),
+        Vec::<String>::new()
+    );
+}

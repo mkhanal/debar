@@ -153,6 +153,7 @@ name = "debar-matching"
 version = "0.0.0"
 dependencies = [
  "debar-image",
+ "debar-platform",
  "md-5",
  "regex-automata",
  "sha1",

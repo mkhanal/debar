@@ -2,24 +2,28 @@ use debar_image::{
     AutomatonMalformed, BacktrackingProgram, ComparisonRecord, ExpressionAnchoring,
     ExpressionMatches, ExpressionRecord, ImageError, InPlaceAutomaton, MatchingPass, Placement,
     PlugInSubsignatures, PlugInsMalformed, RecordedForm, ReportWindows, SignatureGroup,
-    automaton_in_place, compile_text,
+    automaton_in_place, compile_text, compile_text_lazily,
 };
+use debar_platform::input::InputError;
 use regex_automata::dfa::regex::Regex;
 use regex_automata::{Anchored, Input, Match};
 
-use crate::backtracking_search::{BacktrackingBounds, BacktrackingSearch, backtracking_search};
+use crate::backtracking_search::{
+    BacktrackingBounds, BacktrackingSearch, SubjectBytes, backtracking_search, search_subject,
+};
 use zerocopy::IntoBytes;
 
 use crate::byte_values::comparisons_hold;
 use crate::executable_layout::{LayoutState, placed_starts};
 use crate::logical_state::{CountedMatches, LogicalState};
+use crate::paged_expression_search::{PagedSearchFailure, search_in_place, search_lazily};
 use crate::pattern_scan::PatternScanError;
+use crate::whole_object::{ObjectPages, PagedSubject, WholeObject};
 
 const START_WRAPPED_TO_ANYWHERE: u32 = u32::MAX;
 const START_WRAPPED_TO_NOWHERE: u32 = u32::MAX - 1;
 
-pub(crate) struct PlugInRequest<'o, 'l> {
-    pub object: &'o [u8],
+pub(crate) struct PlugInRequest<'l> {
     pub windows: Option<ReportWindows>,
     pub image_fuzzy_hash: Option<u64>,
     pub largest_object_for_regular_expressions: Option<u64>,
@@ -35,12 +39,17 @@ pub(crate) fn match_plug_ins(
     group: SignatureGroup,
     plug_ins: &PlugInSubsignatures<'_>,
     state: &mut LogicalState<'_>,
-    request: &PlugInRequest<'_, '_>,
+    request: &PlugInRequest<'_>,
+    object: &mut WholeObject<'_>,
 ) -> Result<(), PatternScanError> {
-    let windows = Windows::of(request.windows, request.object.len());
+    let object_length = object.length();
+    let windows = Windows::of(
+        request.windows,
+        usize::try_from(object_length).unwrap_or(usize::MAX),
+    );
     for record in plug_ins.comparisons() {
         let record = record.map_err(|reason| malformed(group, reason))?;
-        compare_bytes(&record, state, request.object, &windows)?;
+        compare_bytes(&record, state, object, &windows)?;
     }
     if let Some(hash) = request.image_fuzzy_hash {
         for (signature, subsignature) in plug_ins.image_hash_subsignatures(hash) {
@@ -57,7 +66,6 @@ pub(crate) fn match_plug_ins(
             }
         }
     }
-    let object_length = u64::try_from(request.object.len()).unwrap_or(u64::MAX);
     if request
         .largest_object_for_regular_expressions
         .is_some_and(|largest| object_length > largest)
@@ -80,8 +88,11 @@ pub(crate) fn match_plug_ins(
         if !holds {
             continue;
         }
-        let starts = expression_starts(&record, request)
-            .map_err(|_| malformed(group, PlugInsMalformed::Expression))?;
+        let starts =
+            expression_starts(&record, request, object).map_err(|failure| match failure {
+                ExpressionFailure::Malformed => malformed(group, PlugInsMalformed::Expression),
+                ExpressionFailure::Input(error) => PatternScanError::Input(error),
+            })?;
         if !starts.is_empty() {
             state.count(
                 record.signature,
@@ -135,7 +146,7 @@ impl Windows {
 fn compare_bytes(
     record: &ComparisonRecord,
     state: &mut LogicalState<'_>,
-    object: &[u8],
+    object: &mut WholeObject<'_>,
     windows: &Windows,
 ) -> Result<(), PatternScanError> {
     let comparison = &record.comparison;
@@ -163,11 +174,11 @@ fn compare_bytes(
             continue;
         }
         let read_from = start.saturating_add(position);
-        let Some(bytes) = object.get(read_from..read_from.saturating_add(length)) else {
+        let Some(bytes) = object.bytes_at(read_from, length)? else {
             continue;
         };
         if comparisons_hold(
-            bytes,
+            &bytes,
             comparison.encoding,
             comparison.exact,
             &comparison.comparisons,
@@ -193,8 +204,11 @@ struct Subject {
     anchored: bool,
 }
 
-fn subject_of(record: &ExpressionRecord<'_>, request: &PlugInRequest<'_, '_>) -> Option<Subject> {
-    let object_length = request.object.len();
+fn subject_of(
+    record: &ExpressionRecord<'_>,
+    request: &PlugInRequest<'_>,
+    object_length: usize,
+) -> Option<Subject> {
     let length = u32::try_from(object_length).unwrap_or(u32::MAX);
     let (start, shift, anywhere) = match record.placement {
         Placement::Anywhere => (0, 0, true),
@@ -248,56 +262,90 @@ pub(crate) fn aligned_copy(bytes: &[u8]) -> Vec<u32> {
     words
 }
 
+enum ExpressionFailure {
+    Malformed,
+    Input(InputError),
+}
+
+impl From<AutomatonMalformed> for ExpressionFailure {
+    fn from(_: AutomatonMalformed) -> Self {
+        Self::Malformed
+    }
+}
+
+impl From<PagedSearchFailure> for ExpressionFailure {
+    fn from(failure: PagedSearchFailure) -> Self {
+        match failure {
+            PagedSearchFailure::Unsearchable => Self::Malformed,
+            PagedSearchFailure::Input(error) => Self::Input(error),
+        }
+    }
+}
+
 fn expression_starts(
     record: &ExpressionRecord<'_>,
-    request: &PlugInRequest<'_, '_>,
-) -> Result<Vec<u64>, AutomatonMalformed> {
-    let Some(subject) = subject_of(record, request) else {
+    request: &PlugInRequest<'_>,
+    object: &mut WholeObject<'_>,
+) -> Result<Vec<u64>, ExpressionFailure> {
+    let object_length = usize::try_from(object.length()).unwrap_or(usize::MAX);
+    let Some(subject) = subject_of(record, request, object_length) else {
         return Ok(Vec::new());
     };
-    let haystack = request
-        .object
-        .get(subject.start..subject.end)
-        .unwrap_or_default();
     let anchored = if subject.anchored {
         Anchored::Yes
     } else {
         Anchored::No
     };
+    let relative_starts = match object {
+        WholeObject::Held(held) => held_starts(record, &subject, held, anchored)?,
+        WholeObject::Paged(pages) => paged_starts(record, &subject, pages, anchored)?,
+    };
+    let base = u64::try_from(subject.start).unwrap_or(u64::MAX);
+    Ok(relative_starts
+        .into_iter()
+        .map(|start| base.saturating_add(u64::try_from(start).unwrap_or(u64::MAX)))
+        .collect())
+}
+
+fn in_place<'a>(
+    bytes: &'a [u8],
+    copy: &'a mut Vec<u32>,
+) -> Result<InPlaceAutomaton<'a>, AutomatonMalformed> {
+    if let Ok(automaton) = automaton_in_place(bytes) {
+        return Ok(automaton);
+    }
+    *copy = aligned_copy(bytes);
+    automaton_in_place(copy.as_bytes())
+}
+
+fn held_starts(
+    record: &ExpressionRecord<'_>,
+    subject: &Subject,
+    held: &[u8],
+    anchored: Anchored,
+) -> Result<Vec<usize>, ExpressionFailure> {
+    let haystack = held.get(subject.start..subject.end).unwrap_or_default();
     let automaton_search = |found: Option<Match>| found.map(|found| (found.start(), found.end()));
-    let relative_starts = match record.form {
+    Ok(match record.form {
         RecordedForm::Automata {
             forward: forward_bytes,
             reverse: reverse_bytes,
         } => {
-            let forward_copy;
-            let reverse_copy;
-            let forward: InPlaceAutomaton<'_> =
-                if let Ok(automaton) = automaton_in_place(forward_bytes) {
-                    automaton
-                } else {
-                    forward_copy = aligned_copy(forward_bytes);
-                    automaton_in_place(forward_copy.as_bytes())?
-                };
-            let reverse: InPlaceAutomaton<'_> =
-                if let Ok(automaton) = automaton_in_place(reverse_bytes) {
-                    automaton
-                } else {
-                    reverse_copy = aligned_copy(reverse_bytes);
-                    automaton_in_place(reverse_copy.as_bytes())?
-                };
+            let (mut forward_copy, mut reverse_copy) = (Vec::new(), Vec::new());
+            let forward = in_place(forward_bytes, &mut forward_copy)?;
+            let reverse = in_place(reverse_bytes, &mut reverse_copy)?;
             let regex = Regex::builder().build_from_dfas(forward, reverse);
-            matched_starts(record, &subject, haystack, |from| {
+            matched_starts(record, subject, haystack.len(), |from| {
                 let input = Input::new(haystack).range(from..).anchored(anchored);
                 regex
                     .try_search(&input)
                     .map(automaton_search)
-                    .map_err(|_| AutomatonMalformed)
+                    .map_err(|_| ExpressionFailure::Malformed)
             })?
         }
         RecordedForm::Text => {
             let regex = compile_text(record.text().map_err(|_| AutomatonMalformed)?)?;
-            matched_starts(record, &subject, haystack, |from| {
+            matched_starts(record, subject, haystack.len(), |from| {
                 let input = Input::new(haystack).range(from..).anchored(anchored);
                 Ok(automaton_search(regex.search(&input)))
             })?
@@ -306,8 +354,8 @@ fn expression_starts(
             let program = BacktrackingProgram::read(bytes).map_err(|_| AutomatonMalformed)?;
             matched_starts(
                 record,
-                &subject,
-                haystack,
+                subject,
+                haystack.len(),
                 |from| match backtracking_search(
                     &program,
                     haystack,
@@ -322,20 +370,80 @@ fn expression_starts(
                 },
             )?
         }
-    };
-    let base = u64::try_from(subject.start).unwrap_or(u64::MAX);
-    Ok(relative_starts
-        .into_iter()
-        .map(|start| base.saturating_add(u64::try_from(start).unwrap_or(u64::MAX)))
-        .collect())
+    })
+}
+
+fn paged_starts(
+    record: &ExpressionRecord<'_>,
+    subject: &Subject,
+    pages: &mut ObjectPages<'_>,
+    anchored: Anchored,
+) -> Result<Vec<usize>, ExpressionFailure> {
+    let mut searched_bytes: PagedSubject<'_, '_> = pages.subject(
+        u64::try_from(subject.start).unwrap_or(u64::MAX),
+        u64::try_from(subject.end).unwrap_or(u64::MAX),
+    );
+    let length = searched_bytes.length();
+    Ok(match record.form {
+        RecordedForm::Automata {
+            forward: forward_bytes,
+            reverse: reverse_bytes,
+        } => {
+            let (mut forward_copy, mut reverse_copy) = (Vec::new(), Vec::new());
+            let forward = in_place(forward_bytes, &mut forward_copy)?;
+            let reverse = in_place(reverse_bytes, &mut reverse_copy)?;
+            matched_starts(record, subject, length, |from| {
+                Ok(search_in_place(
+                    &forward,
+                    &reverse,
+                    &mut searched_bytes,
+                    from,
+                    anchored,
+                )?)
+            })?
+        }
+        RecordedForm::Text => {
+            let expression = compile_text_lazily(record.text().map_err(|_| AutomatonMalformed)?)?;
+            let mut cache = expression.create_cache();
+            matched_starts(record, subject, length, |from| {
+                Ok(search_lazily(
+                    &expression,
+                    &mut cache,
+                    &mut searched_bytes,
+                    from,
+                    anchored,
+                )?)
+            })?
+        }
+        RecordedForm::Backtracking(bytes) => {
+            let program = BacktrackingProgram::read(bytes).map_err(|_| AutomatonMalformed)?;
+            matched_starts(record, subject, length, |from| {
+                let searched = search_subject(
+                    &program,
+                    &mut searched_bytes,
+                    from,
+                    subject.anchored,
+                    BacktrackingBounds::FOR_SIGNATURES,
+                )
+                .map_err(|_| AutomatonMalformed)?;
+                searched_bytes
+                    .take_failure()
+                    .map_err(ExpressionFailure::Input)?;
+                match searched {
+                    BacktrackingSearch::Found { start, end } => Ok(Some((start, end))),
+                    BacktrackingSearch::NotFound | BacktrackingSearch::GaveUp => Ok(None),
+                }
+            })?
+        }
+    })
 }
 
 fn matched_starts(
     record: &ExpressionRecord<'_>,
     subject: &Subject,
-    haystack: &[u8],
-    mut search: impl FnMut(usize) -> Result<Option<(usize, usize)>, AutomatonMalformed>,
-) -> Result<Vec<usize>, AutomatonMalformed> {
+    haystack_length: usize,
+    mut search: impl FnMut(usize) -> Result<Option<(usize, usize)>, ExpressionFailure>,
+) -> Result<Vec<usize>, ExpressionFailure> {
     let mut starts = Vec::new();
     let mut from = 0usize;
     while let Some((start, end)) = search(from)? {
@@ -349,7 +457,7 @@ fn matched_starts(
             break;
         }
         from = end;
-        if from >= haystack.len() {
+        if from >= haystack_length {
             break;
         }
     }

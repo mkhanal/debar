@@ -17,3 +17,9 @@ What a scan leaves unscanned because of a size, and what it reports for it.
 
 - With the default limit of 100 MiB, a larger file has no detection and no type, and the verdict is nothing found.
 - A file of exactly the limit is scanned.
+
+## A File Up To The File-Size Limit Is Scanned To Its End
+
+- A file of exactly 100 MiB has its regular expressions, those needing backtracking among them, matched over the whole file, up to its last byte and across every point inside it.
+- Asked for every detection, it reports the set of names the reference scanner reports for the same file and databases; asked for one, it reports one of them.
+- The scan completes, and the verdict is reported.

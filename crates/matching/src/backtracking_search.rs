@@ -28,9 +28,44 @@ pub enum BacktrackingSearch {
     GaveUp,
 }
 
+pub(crate) trait SubjectBytes {
+    fn length(&self) -> usize;
+
+    fn byte(&mut self, at: usize) -> Option<u8>;
+
+    fn first_from(&mut self, from: usize, wanted: impl Fn(u8) -> bool) -> Option<usize>;
+}
+
+impl SubjectBytes for &[u8] {
+    fn length(&self) -> usize {
+        self.len()
+    }
+
+    fn byte(&mut self, at: usize) -> Option<u8> {
+        self.get(at).copied()
+    }
+
+    fn first_from(&mut self, from: usize, wanted: impl Fn(u8) -> bool) -> Option<usize> {
+        self.get(from..)?
+            .iter()
+            .position(|byte| wanted(*byte))
+            .map(|found| from.saturating_add(found))
+    }
+}
+
 pub fn backtracking_search(
     program: &BacktrackingProgram<'_>,
     subject: &[u8],
+    from: usize,
+    anchored: bool,
+    bounds: BacktrackingBounds,
+) -> Result<BacktrackingSearch, BacktrackingProgramMalformed> {
+    search_subject(program, &mut &*subject, from, anchored, bounds)
+}
+
+pub(crate) fn search_subject<S: SubjectBytes>(
+    program: &BacktrackingProgram<'_>,
+    subject: &mut S,
     from: usize,
     anchored: bool,
     bounds: BacktrackingBounds,
@@ -41,6 +76,7 @@ pub fn backtracking_search(
         .and_then(|slots| slots.checked_add(usize::try_from(program.register_count()).ok()?))
         .ok_or(BacktrackingProgramMalformed)?;
     let instruction_count = u64::try_from(program.instruction_count()).unwrap_or(u64::MAX);
+    let last = if anchored { from } else { subject.length() };
     let mut machine = Machine {
         program,
         subject,
@@ -60,14 +96,18 @@ pub fn backtracking_search(
             ),
         bounds,
     };
-    let last = if anchored { from } else { subject.len() };
-    for start in from..=last {
-        if program.filters_start_bytes()
-            && !subject
-                .get(start)
-                .is_some_and(|byte| program.may_start_with(*byte))
-        {
-            continue;
+    let may_start: [bool; 256] = std::array::from_fn(|byte| {
+        u8::try_from(byte).is_ok_and(|byte| program.may_start_with(byte))
+    });
+    let mut start = from;
+    while start <= last {
+        if program.filters_start_bytes() {
+            match machine.subject.first_from(start, |byte| {
+                may_start.get(usize::from(byte)).copied().unwrap_or(false)
+            }) {
+                Some(possible) if possible <= last => start = possible,
+                Some(_) | None => break,
+            }
         }
         machine.restart();
         match machine.run(0, start, None)? {
@@ -75,6 +115,7 @@ pub fn backtracking_search(
             Run::Failed => {}
             Run::Exhausted => return Ok(BacktrackingSearch::GaveUp),
         }
+        start = start.saturating_add(1);
     }
     Ok(BacktrackingSearch::NotFound)
 }
@@ -107,9 +148,9 @@ enum Entry {
     },
 }
 
-struct Machine<'p, 'm, 's> {
+struct Machine<'p, 'm, 's, S> {
     program: &'p BacktrackingProgram<'m>,
-    subject: &'s [u8],
+    subject: &'s mut S,
     slots: Vec<usize>,
     capture_slots: usize,
     stack: Vec<Entry>,
@@ -132,7 +173,7 @@ enum Flow {
     Finished(Run),
 }
 
-impl Machine<'_, '_, '_> {
+impl<S: SubjectBytes> Machine<'_, '_, '_, S> {
     fn restart(&mut self) {
         self.slots.fill(UNSET);
         self.stack.clear();
@@ -242,8 +283,8 @@ impl Machine<'_, '_, '_> {
         let exhausted = Flow::Finished(Run::Exhausted);
         Ok(match instruction {
             BacktrackingInstruction::Match => Flow::Fail,
-            BacktrackingInstruction::Byte { set } => match self.subject.get(at) {
-                Some(byte) if self.program.set_contains(set, *byte)? => {
+            BacktrackingInstruction::Byte { set } => match self.subject.byte(at) {
+                Some(byte) if self.program.set_contains(set, byte)? => {
                     Flow::Next(next, at.saturating_add(1))
                 }
                 _ => Flow::Fail,
@@ -420,8 +461,8 @@ impl Machine<'_, '_, '_> {
         };
         let mut taken = 0usize;
         while taken < wanted {
-            match self.subject.get(at.saturating_add(taken)) {
-                Some(byte) if self.program.set_contains(set, *byte)? => {
+            match self.subject.byte(at.saturating_add(taken)) {
+                Some(byte) if self.program.set_contains(set, byte)? => {
                     taken = taken.saturating_add(1);
                 }
                 _ => break,
@@ -497,8 +538,8 @@ impl Machine<'_, '_, '_> {
                     set,
                 } => {
                     let extends = remaining != Some(0)
-                        && match self.subject.get(at) {
-                            Some(byte) => self.program.set_contains(set, *byte)?,
+                        && match self.subject.byte(at) {
+                            Some(byte) => self.program.set_contains(set, byte)?,
                             None => false,
                         };
                     if !extends {
@@ -527,29 +568,29 @@ impl Machine<'_, '_, '_> {
         Ok(Backtrack::Failed)
     }
 
-    fn holds(&self, assertion: Assertion, at: usize) -> bool {
-        let length = self.subject.len();
+    fn holds(&mut self, assertion: Assertion, at: usize) -> bool {
+        let length = self.subject.length();
         let before = at
             .checked_sub(1)
-            .and_then(|before| self.subject.get(before));
-        let after = self.subject.get(at);
+            .and_then(|before| self.subject.byte(before));
+        let after = self.subject.byte(at);
         match assertion {
             Assertion::SubjectStart => at == 0,
             Assertion::SubjectEnd => at == length,
             Assertion::SubjectEndOrBeforeFinalNewline => {
-                at == length || (at.saturating_add(1) == length && after == Some(&NEWLINE))
+                at == length || (at.saturating_add(1) == length && after == Some(NEWLINE))
             }
             Assertion::LineStartNotAtSubjectEnd => {
-                at == 0 || (before == Some(&NEWLINE) && at < length)
+                at == 0 || (before == Some(NEWLINE) && at < length)
             }
-            Assertion::LineEnd => at == length || after == Some(&NEWLINE),
+            Assertion::LineEnd => at == length || after == Some(NEWLINE),
             Assertion::WordBoundary => is_word(before) != is_word(after),
             Assertion::NotWordBoundary => is_word(before) == is_word(after),
         }
     }
 
     fn backreference_end(
-        &self,
+        &mut self,
         group: u32,
         caseless: bool,
         at: usize,
@@ -569,21 +610,28 @@ impl Machine<'_, '_, '_> {
         if start == UNSET || end == UNSET || end < start {
             return Ok(None);
         }
-        let Some(captured) = self.subject.get(start..end) else {
+        let captured_length = end.saturating_sub(start);
+        if at.saturating_add(captured_length) > self.subject.length() {
             return Ok(None);
-        };
-        let Some(candidate) = self.subject.get(at..at.saturating_add(captured.len())) else {
-            return Ok(None);
-        };
-        let same = if caseless {
-            captured.eq_ignore_ascii_case(candidate)
-        } else {
-            captured == candidate
-        };
-        Ok(same.then(|| at.saturating_add(captured.len())))
+        }
+        for offset in 0..captured_length {
+            let captured = self.subject.byte(start.saturating_add(offset));
+            let candidate = self.subject.byte(at.saturating_add(offset));
+            let same = match (captured, candidate) {
+                (Some(captured), Some(candidate)) if caseless => {
+                    captured.eq_ignore_ascii_case(&candidate)
+                }
+                (Some(captured), Some(candidate)) => captured == candidate,
+                _ => false,
+            };
+            if !same {
+                return Ok(None);
+            }
+        }
+        Ok(Some(at.saturating_add(captured_length)))
     }
 }
 
-fn is_word(byte: Option<&u8>) -> bool {
-    byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+fn is_word(byte: Option<u8>) -> bool {
+    byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }

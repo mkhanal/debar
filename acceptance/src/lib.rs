@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
+pub mod largest_file;
 pub mod scan_speed;
 
 pub const PINNED_DATABASES: [&str; 3] = ["bytecode.cvd", "daily.cvd", "main.cvd"];
@@ -392,6 +393,32 @@ pub fn median_seconds_to_scan_one_small_file(image: &Path, into: &Path) -> Outco
         .get(times.len() / 2)
         .copied()
         .ok_or_else(|| Failure("hyperfine recorded no runs".to_owned()))
+}
+
+pub fn peak_heap_bytes_to_scan(image: &Path, input: &Path, into: &Path) -> Outcome<u64> {
+    let profile = into.join("massif.out");
+    run(Command::new("valgrind")
+        .arg("--tool=massif")
+        .arg(format!("--massif-out-file={}", profile.display()))
+        .arg(&release_binaries()?.debar)
+        .arg("comparison-report")
+        .arg("--image")
+        .arg(image)
+        .arg("--every-match")
+        .arg(input)
+        .arg(into.join("report.jsonl")))?;
+    let text = fs::read_to_string(&profile)?;
+    let mut peak = None;
+    let mut useful = 0u64;
+    for line in text.lines() {
+        if let Some(bytes) = line.strip_prefix("mem_heap_B=") {
+            useful = bytes.trim().parse()?;
+        } else if let Some(bytes) = line.strip_prefix("mem_heap_extra_B=") {
+            let total = useful.saturating_add(bytes.trim().parse()?);
+            peak = Some(peak.map_or(total, |peak: u64| peak.max(total)));
+        }
+    }
+    peak.ok_or_else(|| Failure(format!("{} holds no heap snapshot", profile.display())))
 }
 
 pub fn instructions_to_measure_scan(image: &Path, inputs: &[PathBuf], into: &Path) -> Outcome<u64> {

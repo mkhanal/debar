@@ -11,7 +11,6 @@ mod settings;
 mod typing;
 
 pub use object_bytes::ObjectBytes;
-pub use own_bytes::LARGEST_OBJECT_HELD_WHOLE;
 pub use report::{
     Completion, LayerId, Limit, LimitEvent, Reported, ScanFailure, ScanReport, Verdict,
 };

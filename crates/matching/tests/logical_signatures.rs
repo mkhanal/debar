@@ -415,7 +415,7 @@ fn every_split_of_an_object_into_chunks_gives_the_same_logical_detections() {
                     ScanEnd::SecondPassNeeded(second) => scan = *second,
                     ScanEnd::WholeObjectNeeded(waiting) => {
                         break waiting
-                            .match_whole_object(&object)
+                            .match_whole_object(&object.as_slice())
                             .unwrap()
                             .into_outcomes()
                             .unwrap();

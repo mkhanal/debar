@@ -1,7 +1,7 @@
 use regex_automata::dfa::{StartKind, dense};
 use regex_automata::nfa::thompson::{self, NFA, WhichCaptures};
 use regex_automata::util::syntax;
-use regex_automata::{MatchKind, meta};
+use regex_automata::{MatchKind, hybrid, meta};
 use regex_syntax::hir::Hir;
 
 pub const LARGEST_AUTOMATON_IN_IMAGE: usize = 256 * 1024;
@@ -94,6 +94,28 @@ pub fn compile_text(text: &str) -> Result<meta::Regex, AutomatonMalformed> {
                 .nfa_size_limit(Some(LARGEST_COMPILED_EXPRESSION)),
         )
         .syntax(syntax::Config::new().unicode(false).utf8(false))
+        .build(text)
+        .map_err(|_| AutomatonMalformed)
+}
+
+pub type LazyExpression = hybrid::regex::Regex;
+
+pub fn compile_text_lazily(text: &str) -> Result<LazyExpression, AutomatonMalformed> {
+    hybrid::regex::Builder::new()
+        .syntax(syntax::Config::new().unicode(false).utf8(false))
+        .thompson(
+            thompson::Config::new()
+                .utf8(false)
+                .which_captures(WhichCaptures::None)
+                .nfa_size_limit(Some(LARGEST_COMPILED_EXPRESSION)),
+        )
+        .dfa(
+            hybrid::dfa::Config::new()
+                .match_kind(MatchKind::LeftmostFirst)
+                .byte_classes(true)
+                .minimum_cache_clear_count(None)
+                .skip_cache_capacity_check(true),
+        )
         .build(text)
         .map_err(|_| AutomatonMalformed)
 }

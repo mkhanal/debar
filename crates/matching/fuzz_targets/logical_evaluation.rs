@@ -156,7 +156,7 @@ fn detections(image: &Image<'_>, object: &[u8], chunk: usize) -> Vec<String> {
             ScanEnd::SecondPassNeeded(second) => scan = *second,
             ScanEnd::WholeObjectNeeded(waiting) => {
                 break waiting
-                    .match_whole_object(object)
+                    .match_whole_object(&object)
                     .expect("the whole object is matched")
                     .into_outcomes()
                     .expect("the scan completes");

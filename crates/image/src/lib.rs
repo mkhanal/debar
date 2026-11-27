@@ -44,8 +44,8 @@ pub use container_signatures::{
 };
 pub use engine_features::{EngineFeature, EngineFeatures, EngineFeaturesMalformed};
 pub use expression_automata::{
-    AutomatonMalformed, InPlaceAutomaton, LARGEST_AUTOMATON_IN_IMAGE, automaton_in_place,
-    compile_text,
+    AutomatonMalformed, InPlaceAutomaton, LARGEST_AUTOMATON_IN_IMAGE, LazyExpression,
+    automaton_in_place, compile_text, compile_text_lazily,
 };
 pub use expression_tree::{
     Assertion, ExpressionTree, Greed, LookDirection, NeedsBacktracking, TreeRepetition,

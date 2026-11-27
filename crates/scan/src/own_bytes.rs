@@ -4,10 +4,8 @@ use debar_matching::{
     PatternScanError, ScanEnd, ScanProgress,
 };
 
-use crate::object_bytes::{ChunkUse, ObjectBytes, ReadThrough, read_in_chunks, whole_object};
+use crate::object_bytes::{ChunkUse, ObjectBytes, ReadThrough, read_in_chunks};
 use crate::report::ScanFailure;
-
-pub const LARGEST_OBJECT_HELD_WHOLE: u64 = 16 * 1024 * 1024;
 
 pub(crate) struct OwnBytesMatched {
     pub(crate) outcomes: PatternOutcomes,
@@ -37,9 +35,8 @@ pub(crate) fn match_own_bytes(
             }
             ScanEnd::SecondPassNeeded(second) => scan = *second,
             ScanEnd::WholeObjectNeeded(waiting) => {
-                let whole = held_whole(bytes)?;
                 return Ok(OwnBytesMatched {
-                    outcomes: waiting.match_whole_object(&whole)?.into_outcomes()?,
+                    outcomes: waiting.match_whole_object(bytes)?.into_outcomes()?,
                     digests_while_read,
                 });
             }
@@ -74,15 +71,4 @@ fn feed_the_object(
         scan.skip(usize::try_from(rest).unwrap_or(usize::MAX))?;
     }
     Ok(read_through)
-}
-
-fn held_whole(bytes: &dyn ObjectBytes) -> Result<Vec<u8>, ScanFailure> {
-    let length = bytes.length();
-    if length > LARGEST_OBJECT_HELD_WHOLE {
-        return Err(ScanFailure::TooLargeToHoldWhole {
-            length,
-            largest: LARGEST_OBJECT_HELD_WHOLE,
-        });
-    }
-    Ok(whole_object(bytes)?)
 }

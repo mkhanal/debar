@@ -7,6 +7,7 @@ mod digests;
 mod executable_layout;
 mod hash_lookup;
 mod logical_state;
+mod paged_expression_search;
 mod part_ends;
 mod pattern_scan;
 mod plug_in_matching;
@@ -14,9 +15,11 @@ mod second_pass_search;
 
 pub use second_pass_search::largest_armed_search_bytes;
 mod verification;
+mod whole_object;
 
 pub use backtracking_search::{BacktrackingBounds, BacktrackingSearch, backtracking_search};
 pub use container_entries::{ContainerEntry, ContainerEntryError, container_entry_detections};
+pub use debar_platform::input::ObjectBytes;
 pub use digests::{DigestNeed, DigestsInProgress, ObjectDigests};
 pub use executable_layout::{ExecutableLayout, ExecutableSection};
 pub use hash_lookup::{

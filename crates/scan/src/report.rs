@@ -43,7 +43,6 @@ pub enum ScanFailure {
     Patterns(PatternScanError),
     Typing(TypingError),
     KindNotDescribed(ObjectKind),
-    TooLargeToHoldWhole { length: u64, largest: u64 },
 }
 
 impl fmt::Display for ScanFailure {
@@ -56,10 +55,6 @@ impl fmt::Display for ScanFailure {
             Self::KindNotDescribed(kind) => {
                 write!(formatter, "the image does not describe the kind {kind:?}")
             }
-            Self::TooLargeToHoldWhole { length, largest } => write!(
-                formatter,
-                "an object of {length} bytes needs its regular expressions or byte comparisons matched, which Debar does yet only for objects of at most {largest} bytes"
-            ),
         }
     }
 }
@@ -80,7 +75,10 @@ impl From<ImageError> for ScanFailure {
 
 impl From<PatternScanError> for ScanFailure {
     fn from(error: PatternScanError) -> Self {
-        Self::Patterns(error)
+        match error {
+            PatternScanError::Input(error) => Self::Input(error),
+            error => Self::Patterns(error),
+        }
     }
 }
 

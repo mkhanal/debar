@@ -3,8 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
+use acceptance::largest_file::{LARGEST_FILE, expressions_to_the_end, matched_only_to_the_end};
 use acceptance::{
-    CompiledImage, comparison_report, compile, detections, scratch_directory, write_file,
+    CompiledImage, comparison_report, comparison_report_with, compile, detections,
+    scratch_directory, write_file,
 };
 use serde_json::Value;
 
@@ -59,4 +61,31 @@ fn a_file_larger_than_the_file_size_limit_is_not_scanned() {
         ["Test.Body.UNOFFICIAL"],
         "{REQUIREMENT}"
     );
+}
+
+#[test]
+fn a_file_up_to_the_file_size_limit_is_scanned_to_its_end() {
+    const REQUIREMENT: &str = "A File Up To The File-Size Limit Is Scanned To Its End";
+    let directory = scratch_directory("scanned-to-its-end").unwrap();
+    let compiled = expressions_to_the_end(&directory).unwrap();
+    let input = matched_only_to_the_end(&directory, LARGEST_FILE).unwrap();
+
+    let every =
+        comparison_report_with(&compiled.image, &["--every-match"], &input, &directory).unwrap();
+    let first = comparison_report(&compiled.image, &input, &directory).unwrap();
+
+    let mut every_detection = detections(&every);
+    every_detection.sort();
+    let reference = [
+        "Test.Backreference.UNOFFICIAL",
+        "Test.End.UNOFFICIAL",
+        "Test.Large.UNOFFICIAL",
+        "Test.Span.UNOFFICIAL",
+        "Test.Tail.UNOFFICIAL",
+    ];
+    assert_eq!(every_detection, reference, "{REQUIREMENT}");
+    assert_eq!(every["verdict"], "strong_indicator", "{REQUIREMENT}");
+    let one = detections(&first);
+    assert_eq!(one.len(), 1, "{REQUIREMENT}");
+    assert!(reference.contains(&one[0].as_str()), "{REQUIREMENT}");
 }
