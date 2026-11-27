@@ -2,10 +2,6 @@
 
 Initiatives outside the first release. Each is taken up as its own piece of work when someone needs it. One item per `##`.
 
-## More signature formats
-
-Formats beyond the first, each as its own part with its own reference scanner and study folder.
-
 ## An in-process library interface
 
 A library other software links and calls directly, in addition to the daemon and the commands.

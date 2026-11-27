@@ -38,8 +38,11 @@ The pieces Debar is built from, their order, and what exists today. Each piece g
 | 7 | **Signature programs** | Signatures that are programs run and produce the reference scanner's detections |
 | 8 | **Updater and live update** | Published databases are fetched, verified and compiled, and a running scanner switches image with no scan lost and within the memory budget |
 | 9 | **Interfaces** | Native mode is complete, with its findings, refusals, whole-file reach and confinement, and compatibility mode passes for every command, protocol message and configuration option of the scanner being replaced |
+| 10 | **Signature sources** | A deployment chooses its sources by configuration; the updater fetches and verifies each by its own rules and refuses a source whose terms forbid how it is used; every chosen source compiles into one image, and each detection names its source. Third-party sets in an already supported format load through that format's part, compared with its reference scanner loading the same files |
+| 11 | **A second signature format** | A format with a public ecosystem of rules beyond the first is a part of its own, with its own pinned reference scanner, study folder and harness, matching that reference on its own inputs, and selectable as a source |
+| 12 | **Hash and indicator feeds** | Published lists of known-bad hashes and similar indicators are sources, compiled into the image's hash tables, checked by lookup, and refreshed on the feed's own cadence |
 
-Pieces 1 and 2 come first whatever else changes: every later piece is checked against the notes and the harness.
+Pieces 10 to 12 come after the first release. Pieces 1 and 2 come first whatever else changes: every later piece is checked against the notes and the harness.
 
 ## The performance track
 

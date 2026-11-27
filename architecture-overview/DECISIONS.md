@@ -536,3 +536,11 @@ A 1 KiB text object costs 2.4 M instructions beyond the scan's start, from 5.0 M
 **Why.** The owner set parity as: the input is what is scanned, the output is what is wrong with it. Order never changes a verdict: whichever strong detection comes first, the file is infected and potentially unwanted findings are held back the same way. It only changes which genuine name is shown when a file matches several signatures. Reproducing the reference's order needed its load-order hashing and, for some ties, its memory addresses, which cannot be computed at all.
 
 **Replaces** the requirement of the same name in single-detection mode implied by the earlier wording of Constitution §1, and the plan to replay the reference's anchor order in the compiler.
+
+### 2026-11-27 — People choose their signature sources
+
+**Decision.** A signature source is one publisher's signatures in a supported format, carrying where it is fetched from, how it is verified, the terms it may be used under and how often it changes. Each deployment chooses its sources by configuration. The updater fetches and verifies each source by its own rules; the compiler builds every chosen source into one image; every detection names the source it came from. Sources come in three steps after the first release (ROADMAP pieces 10 to 12): third-party sets in the first format, a second format with its own reference scanner, and hash and indicator feeds.
+
+**Why.** The owner wants other publicly available signatures usable on top of the first format's official databases, and each deployment to decide what it trusts. The engine already knows no format (Constitution §11), so a source is configuration plus, for a new format, a new part.
+
+**Consequence.** Parity (Constitution §1) holds per format against that format's reference scanner loading the same chosen sources. A source's terms are checked before it is used: some public sets allow free use but forbid redistribution, which bears on a hosted service distributing compiled images. Replaces the deferred item "More signature formats".

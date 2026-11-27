@@ -10,6 +10,12 @@ It is its own program, written in Rust to its own design.
 
 A signature format is a part that plugs into the engine. Others can be added beside the first.
 
+## Signature sources
+
+A **signature source** is one publisher's signatures in a supported format, with where they are fetched from, how they are verified, the terms they may be used under, and how often they change. Each deployment chooses its sources: the format's official databases, publicly available third-party sets in the same format, and later sets in other formats. Debar compiles every chosen source into one image, and every detection says which source it came from.
+
+Choosing sources is part of the roadmap, not the first release.
+
 ## Compatible interfaces
 
 - ClamAV's: the parameters of its commands, its daemon's socket protocol, and its configuration files.
