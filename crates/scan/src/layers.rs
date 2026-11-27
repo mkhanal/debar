@@ -119,13 +119,12 @@ impl<'o> Layers<'o> {
     }
 
     pub(crate) fn ancestor_kinds(&self) -> Vec<ObjectKind> {
-        let below_current = self.nested.len().saturating_sub(1);
         self.nested
             .iter()
-            .take(below_current)
             .rev()
-            .chain((!self.nested.is_empty()).then_some(&self.top_level))
+            .chain(std::iter::once(&self.top_level))
             .filter(|layer| layer.arrival != Arrival::View)
+            .skip(1)
             .map(|layer| layer.kind.unwrap_or(ObjectKind::Untyped))
             .collect()
     }
