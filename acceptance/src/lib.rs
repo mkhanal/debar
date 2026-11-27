@@ -422,10 +422,34 @@ pub fn peak_heap_bytes_to_scan(image: &Path, input: &Path, into: &Path) -> Outco
     peak.ok_or_else(|| Failure(format!("{} holds no heap snapshot", profile.display())))
 }
 
+pub(crate) const STRING_ROUTINES_FIXED_ON_X86_64: &str = "glibc.cpu.hwcaps=-AVX,-AVX2,-AVX512F,-AVX512VL,-AVX512BW,-ERMS,-FSRM:glibc.cpu.x86_rep_movsb_threshold=0xffffffffffffffff:glibc.cpu.x86_rep_stosb_threshold=0xffffffffffffffff:glibc.cpu.x86_non_temporal_threshold=0xfffffffffffffff:glibc.cpu.x86_memset_non_temporal_threshold=0xffffffffffffffff:glibc.cpu.x86_data_cache_size=0x8000:glibc.cpu.x86_shared_cache_size=0x800000";
+
+#[must_use]
+pub fn instruction_counter(tool: &str) -> Command {
+    let mut valgrind = Command::new("valgrind");
+    valgrind.arg(format!("--tool={tool}"));
+    if cfg!(target_arch = "x86_64") {
+        valgrind.env("GLIBC_TUNABLES", STRING_ROUTINES_FIXED_ON_X86_64);
+    }
+    valgrind
+}
+
+#[must_use]
+pub fn processor_model() -> String {
+    fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|cpuinfo| {
+            cpuinfo.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                matches!(name.trim(), "model name" | "CPU part").then(|| value.trim().to_owned())
+            })
+        })
+        .unwrap_or_else(|| "an unnamed processor".to_owned())
+}
+
 pub fn instructions_to_measure_scan(image: &Path, inputs: &[PathBuf], into: &Path) -> Outcome<u64> {
     let profile = into.join("callgrind.out");
-    run(Command::new("valgrind")
-        .arg("--tool=callgrind")
+    run(instruction_counter("callgrind")
         .arg(format!("--callgrind-out-file={}", profile.display()))
         .arg(&release_binaries()?.debar)
         .arg("measure-scan")

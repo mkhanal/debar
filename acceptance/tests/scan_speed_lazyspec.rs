@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::unwrap_used)]
 
-use acceptance::official_image;
 use acceptance::scan_speed::{
     BEST_MEASURED_RECORD, BEST_MEASURED_TOLERANCE, Calibration, TIMES_THE_REFERENCE_REQUIRED,
     as_float, best_measured, measured_scan_speed, this_architecture,
@@ -9,6 +8,7 @@ use acceptance::scan_speed::{
 use acceptance::small_object_cost::{
     BEST_SMALL_OBJECT_RECORD, best_small_object_cost, measured_small_object_cost,
 };
+use acceptance::{official_image, processor_model};
 
 #[test]
 fn debar_scans_at_least_twice_as_fast_as_the_reference_scanner() {
@@ -30,7 +30,11 @@ fn debar_scans_at_least_twice_as_fast_as_the_reference_scanner() {
             failures.push(format!("{kind}: {per_mebibyte:.0} > {budget:.0}"));
         }
     }
-    assert!(failures.is_empty(), "{REQUIREMENT}: {failures:?}");
+    assert!(
+        failures.is_empty(),
+        "{REQUIREMENT}, on {}: {failures:?}",
+        processor_model()
+    );
 }
 
 #[test]
@@ -56,7 +60,11 @@ fn debar_never_scans_slower_than_its_best_measured_speed() {
             ));
         }
     }
-    assert!(failures.is_empty(), "{REQUIREMENT}: {failures:?}");
+    assert!(
+        failures.is_empty(),
+        "{REQUIREMENT}, on {}: {failures:?}",
+        processor_model()
+    );
 }
 
 #[test]
@@ -86,5 +94,9 @@ fn debar_never_spends_more_on_a_small_object_than_its_best_measured_cost() {
             ));
         }
     }
-    assert!(failures.is_empty(), "{REQUIREMENT}: {failures:?}");
+    assert!(
+        failures.is_empty(),
+        "{REQUIREMENT}, on {}: {failures:?}",
+        processor_model()
+    );
 }

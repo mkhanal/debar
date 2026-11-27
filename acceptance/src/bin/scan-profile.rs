@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 use std::thread;
 
 use acceptance::scan_speed::{
@@ -11,7 +11,9 @@ use acceptance::scan_speed::{
     as_float, benchmark_slices,
 };
 use acceptance::small_object_cost::{SmallObjectKind, small_object_slices};
-use acceptance::{Failure, Outcome, official_image, release_binaries, run, target_directory};
+use acceptance::{
+    Failure, Outcome, instruction_counter, official_image, release_binaries, run, target_directory,
+};
 use serde_json::{Value, json};
 
 struct Stage {
@@ -235,8 +237,7 @@ fn profile_all(
 }
 
 fn profile_slice(debar: &Path, image: &Path, output: &Path, slice: &Slice) -> Outcome<ByStage> {
-    run(Command::new("valgrind")
-        .arg("--tool=cachegrind")
+    run(instruction_counter("cachegrind")
         .arg("--cache-sim=no")
         .arg(format!("--cachegrind-out-file={}", output.display()))
         .arg(debar)

@@ -156,6 +156,7 @@ pub(crate) fn measurement_key(image: &Path, measuring_source: &[u8]) -> Outcome<
     hasher.update(fs::read(&release_binaries()?.debar)?);
     hasher.update(include_bytes!("scan_speed.rs"));
     hasher.update(measuring_source);
+    hasher.update(crate::STRING_ROUTINES_FIXED_ON_X86_64);
     hasher.update(image.as_os_str().as_encoded_bytes());
     Ok(lowercase_hex(
         hasher.finalize().get(..8).unwrap_or_default(),
