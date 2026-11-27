@@ -48,6 +48,10 @@ What a scan leaves unscanned because of a size, and what it reports for it.
 
 - Every scanned object counts its whole length against the scan-size limit, the top-level file included.
 
+## A File Many Times Larger Than The Scan-Size Limit Is Still Reported
+
+- With a scan-size limit of 200,000 bytes and a file-size limit of 2,000,000 bytes, a file of 3 MiB is reported with its size and SHA-256, no detection and no type, and the verdict nothing found.
+
 ## At Most One Limit Alert Is Reported, And Only When Asked For
 
 - With limit alerts asked for, the first limit reached is reported as a potentially unwanted detection named for that limit.

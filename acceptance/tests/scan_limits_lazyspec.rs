@@ -9,9 +9,11 @@ use std::process::Command;
 use acceptance::largest_file::{LARGEST_FILE, expressions_to_the_end, matched_only_to_the_end};
 use acceptance::{
     CompiledImage, comparison_report, comparison_report_objects, comparison_report_with, compile,
-    detections, peak_heap_bytes_to_scan, release_binaries, run, scratch_directory, write_file,
+    detections, lowercase_hex, peak_heap_bytes_to_scan, release_binaries, run, scratch_directory,
+    write_file,
 };
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 
 const BODY: &[u8] = b"BCDE";
 const DATABASE: &str = "Test.Body:0:0:42434445\n";
@@ -357,6 +359,42 @@ fn an_object_too_large_for_what_remains_of_the_scan_size_limit_is_skipped_and_la
     );
 
     assert_eq!(sizes(&limited), [all[0], all[2]], "{REQUIREMENT}");
+}
+
+const MANY_TIMES_THE_SCAN_SIZE: usize = 3 * 1024 * 1024;
+
+#[test]
+fn a_file_many_times_larger_than_the_scan_size_limit_is_still_reported() {
+    const REQUIREMENT: &str = "A File Many Times Larger Than The Scan-Size Limit Is Still Reported";
+    let (directory, compiled) = loose_databases("many-times-the-scan-size");
+    let mut contents = vec![b'.'; MANY_TIMES_THE_SCAN_SIZE];
+    contents[..BODY.len()].copy_from_slice(BODY);
+    let input = directory.join("input");
+    write_file(&input, &contents).unwrap();
+
+    let reported = comparison_report_with(
+        &compiled.image,
+        &[
+            "--every-match",
+            "--max-scan-size",
+            "200000",
+            "--max-file-size",
+            "2000000",
+        ],
+        &input,
+        &directory,
+    )
+    .unwrap();
+
+    assert_eq!(reported["size"], MANY_TIMES_THE_SCAN_SIZE, "{REQUIREMENT}");
+    assert_eq!(
+        reported["sha256"],
+        lowercase_hex(&Sha256::digest(&contents)),
+        "{REQUIREMENT}"
+    );
+    assert_eq!(detections(&reported), Vec::<String>::new(), "{REQUIREMENT}");
+    assert_eq!(reported["type"], Value::Null, "{REQUIREMENT}");
+    assert_eq!(reported["verdict"], "nothing_found", "{REQUIREMENT}");
 }
 
 #[test]

@@ -354,7 +354,7 @@ jobs:
       harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
       known-differences: debar-known-differences-scan-core.jsonl
       fixture-sets: basic scan-core containers
-      scan-options: "--raw-only --max-files 2 --max-scan-size 400000 --max-file-size 2000000"
+      scan-options: "--raw-only --max-files 2 --max-scan-size 200000 --max-file-size 2000000"
       build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
       debar-command: >-
         { test -f debar.image || debar/target/release/debar-compiler --databases "$HARNESS_DATABASES"
@@ -372,7 +372,7 @@ jobs:
       harness-ref: 0cf7156f40565d6617d4027c299e20c807d1503a
       known-differences: debar-known-differences-scan-core.jsonl
       fixture-sets: basic scan-core containers
-      scan-options: "--raw-only --max-files 2 --max-scan-size 400000 --max-file-size 2000000"
+      scan-options: "--raw-only --max-files 2 --max-scan-size 200000 --max-file-size 2000000"
       matching: first
       build-command: ./in-toolchain cargo build --release --locked --bin debar --bin debar-compiler
       debar-command: >-

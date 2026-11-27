@@ -135,7 +135,7 @@ fn sha256_of(bytes: &dyn ObjectBytes) -> Result<String, InputError> {
         let filled = chunk
             .get_mut(..usize::try_from(wanted).unwrap_or(HASHED_CHUNK_LENGTH))
             .unwrap_or_default();
-        bytes.read_at(offset, filled)?;
+        bytes.read_again_at(offset, filled)?;
         digest.update(&*filled);
         offset = offset.saturating_add(wanted);
     }
