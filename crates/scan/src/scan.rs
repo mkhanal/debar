@@ -39,6 +39,10 @@ pub struct FinishedObject<'o> {
 
 pub trait ObjectObserver {
     fn object_finished(&mut self, object: &FinishedObject<'_>);
+
+    fn view_pushed(&mut self, view: LayerId, of: LayerId) {
+        let _ = (view, of);
+    }
 }
 
 pub struct Unobserved;
@@ -186,8 +190,10 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
         if let Some(refused) = self.refused_at_the_push(bytes.length())? {
             return Ok(refused);
         }
+        let of = self.current().id;
         self.layers.push(Arrival::View, bytes);
         self.current_mut().kind = Some(matched_as);
+        self.observer.view_pushed(self.current().id, of);
         let flow = match self.pass(
             GroupSelection::ForKind(matched_as),
             &MatchedGroups::default(),
@@ -276,7 +282,7 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
         self.uncounted_outputs_allowed = self
             .uncounted_outputs_allowed
             .saturating_add(object.length());
-        let mut context = self.module_context(None);
+        let mut context = self.module_context(None)?;
         let opened = module.open(object, &mut context);
         if self.limits_the_module_reached(context)? == Flow::Abort {
             return Ok(Flow::Abort);
@@ -287,7 +293,7 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
         };
         let mut last_part = None;
         loop {
-            let mut context = self.module_context(last_part);
+            let mut context = self.module_context(last_part)?;
             let output = parts.next(&mut context);
             if self.limits_the_module_reached(context)? == Flow::Abort {
                 return Ok(Flow::Abort);
@@ -335,8 +341,13 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
         Ok(())
     }
 
-    fn module_context(&self, last_part: Option<PartOutcome>) -> ModuleContext {
-        ModuleContext::new(
+    fn module_context(&self, last_part: Option<PartOutcome>) -> Result<ModuleContext, ScanFailure> {
+        let text_normalised_in_pieces_of = self
+            .image
+            .object_kinds()?
+            .and_then(|kinds| kinds.text_normalisation())
+            .map(|text| u64::from(text.normalised_in_pieces_of));
+        Ok(ModuleContext::new(
             ContextOfTheObject {
                 room: self.ledger.room(),
                 room_to_produce: MOST_PRODUCED_BYTES_HELD.saturating_sub(self.produced_held),
@@ -344,9 +355,11 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
                 deepest_level: self.settings.limits.deepest_level,
                 found_inside_another: self.current().arrival == Arrival::Embedded,
                 facts_wanted: self.settings.facts == Facts::Gathered,
+                current_kind: self.current().kind.unwrap_or(ObjectKind::Untyped),
+                text_normalised_in_pieces_of,
             },
             last_part,
-        )
+        ))
     }
 
     fn limits_the_module_reached(&mut self, context: ModuleContext) -> Result<Flow, ScanFailure> {

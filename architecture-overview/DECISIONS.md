@@ -851,3 +851,28 @@ The ratchet's figures are callgrind's (the requirement's count) and the table's 
 - **Budgets:** every acceptance budget passes unchanged.
 
 **Not in this slice, recorded:** the `_VBA_PROJECT` reader's raw modules against OLE2-target signatures, Word 6 macros, PowerPoint VBA storages, OLE1 native payloads, the XLM listing and its images, `Heuristics.OLE2.ContainsMacros.*`, codepages beyond the five, decryption with the default password, HWP 5 inflation.
+
+### 2026-11-27 — Plain text matched through its normalised text, as built
+
+**Decision.** A format module in `debar-formats` (`crates/formats/src/plain_text.rs` and `plain_text/`) gives each text object a normalised view of its text, matched as text, as the reference matches it (study, knowledge "Plain-text normaliser: what a signature sees").
+
+- **Which objects.** ASCII, UTF-8 and UTF-16 text, after its own bytes are matched, chosen by the kind it was typed as, unless the object was retyped as HTML while its own bytes were matched; a re-type to any other kind still gives the view. An object handed over as a script (a logical signature's handler type) gets the view before its own bytes. UTF-16 is not converted: the same byte rules apply to its bytes.
+- **The normalised text.** Letters lowercased, each run of whitespace (`\t` to `\r` and space) one space, other control bytes and bytes at or above `0x80` dropped, `0x7f` kept; a dropped byte neither starts nor ends a run. The run in progress ends every 131,072 bytes of input plus the longest part of any text-target signature, a number the signature-format part computes with the part lengths it already counts for report windows and writes into the image's kinds section (`TextNormalisation`); the module reads it from its context, with the object's current kind, both new in `ContextOfTheObject`.
+- **How it is matched.** A view of kind text: text-target and generic patterns, whole-object hashes, false-positive trust and logical signatures, offsets and sizes counted from the normalised bytes, no type recognition, checked against the limits at its push and never counted, invisible to container conditions. Text of more than 20 MiB (`LARGEST_TEXT_NORMALISED`) is not normalised; an empty view is not matched.
+- **Held or regenerated.** The view is held when it fits the produced-bytes room, else a producer normalises again on demand from the object's bytes, read again outside the read allowance.
+- **Reports.** `ObjectObserver::view_pushed` tells an observer which object a view belongs to, so the comparison report attributes a view's detection to the object holding it, as the reference's observer does.
+
+**Why.** Every detection of a text-target signature, and of a generic one written in lowercased text, comes from this view (Constitution §2).
+
+**Measured** 2026-11-27, locally (aarch64, toolchain image, pinned databases), with the comparison harness at `784f1c3` and the ratchet changes below:
+
+- Inputs built from every target-7 extended signature (1,565): every one detected by its signature, no difference with or without every match. From every target-7 logical signature (664): 663 detected; the one left is a page typed HTML whose signature matches only the page's normalised JavaScript (HTML normalisation, not built).
+- Inputs built from every target-0 extended signature with the boundary inputs (40,001): no new difference with or without every match, and 125 known differences no longer occur (generic signatures that match only lowercased text); the target-0 logical inputs (750): 4 more no longer occur. The harness's fixtures, scan-core and container fixtures under the default and the workflow's lowered limits, raw-only, and the target-4 inputs: no new difference.
+- Fuzzing `plain_text` (built-in modules, four piece lengths, limits drawn from the input, 32 MiB of heap): 5,203,715 runs in 600 s, no finding.
+- **Throughput and small objects.** Instructions per MiB, aarch64: text 53,698,648 → 146,981,883, binary 48,836,262 → 92,929,089; per small object: system 1,380,467 → 3,090,555, text 419,732 → 745,046, binary 352,146 → 567,287. On x86_64, as CI printed them (Intel Xeon 6975P-C): per MiB text 117,556,152 → 279,205,084, binary 111,726,891 → 182,738,316, system 201,707,147 → 222,953,129 (system files hold text there); per small object system 2,085,126 → 4,042,376, text 539,210 → 977,763, binary 459,749 → 731,892. Each stays within twice the reference. The cost is a second full pass over the normalised text, which the reference also makes.
+
+**Records raised by the supervisor**, under the owner's standing instruction and for the owner's review: those records (`acceptance/best-scan-speed.json`, `acceptance/best-small-object-cost.json`) are raised to the figures above, x86_64's system throughput among them, because the added work is the reference's own second full pass over normalised text, which parity requires (Constitution §1), and every kind stays within twice the reference; the speed is to be won back as performance work.
+
+**Not built, recorded:** the reference's chunked branch, which it takes only for a database set with no relative-offset text-target pattern and no linked signature program (no hash lookups and offsets counted against the raw object there); the text-target maximum part length of signature programs and YARA strings, which no pinned database has; the mail-target pass over text found to be mail; the engine switch that turns script normalisation off; `--max-scriptnormalize`, fixed at its default.
+
+**Ratchets.** In the harness, `debar-known-differences-text.jsonl` keeps only the page above, input by input, and `debar-known-differences.jsonl` loses the 129 lines that no longer occur.

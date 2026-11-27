@@ -94,13 +94,16 @@ impl ObjectRecord {
 }
 
 #[derive(Default)]
-struct ObjectRecords(Vec<ObjectRecord>);
+struct ObjectRecords {
+    objects: Vec<ObjectRecord>,
+    views: Vec<(LayerId, LayerId)>,
+}
 
 impl ObjectRecords {
     fn nearest_reached(&self, layer: LayerId) -> Option<LayerId> {
-        let mut looking_at = Some(layer);
+        let mut looking_at = Some(self.object_holding(layer));
         while let Some(layer) = looking_at {
-            let record = self.0.iter().find(|record| record.layer == layer)?;
+            let record = self.objects.iter().find(|record| record.layer == layer)?;
             if record.is_reached() {
                 return Some(layer);
             }
@@ -108,11 +111,23 @@ impl ObjectRecords {
         }
         None
     }
+
+    fn object_holding(&self, layer: LayerId) -> LayerId {
+        let mut holding = layer;
+        while let Some((_, of)) = self.views.iter().find(|(view, _)| *view == holding) {
+            holding = *of;
+        }
+        holding
+    }
 }
 
 impl ObjectObserver for ObjectRecords {
+    fn view_pushed(&mut self, view: LayerId, of: LayerId) {
+        self.views.push((view, of));
+    }
+
     fn object_finished(&mut self, object: &FinishedObject<'_>) {
-        self.0.push(ObjectRecord {
+        self.objects.push(ObjectRecord {
             layer: object.layer,
             parent: object.parent,
             depth: object.depth,
@@ -147,14 +162,14 @@ fn report_lines(
     mut records: ObjectRecords,
     scanned: &ScanReport,
 ) -> Result<String, ComparisonReportError> {
-    records.0.sort_by_key(|record| record.layer);
+    records.objects.sort_by_key(|record| record.layer);
     let attributed: Vec<Option<LayerId>> = scanned
         .reported
         .iter()
         .map(|reported| records.nearest_reached(reported.object))
         .collect();
     let mut lines = String::new();
-    for record in records.0.into_iter().filter(ObjectRecord::is_reached) {
+    for record in records.objects.into_iter().filter(ObjectRecord::is_reached) {
         let detections: Vec<&str> = scanned
             .reported
             .iter()

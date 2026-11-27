@@ -13,6 +13,7 @@ const EXECUTABLE: u8 = 8;
 const OWN_BYTES_MATCHED: u8 = 16;
 const RECOGNISES_TYPES_IN_FULL_SCAN: u8 = 32;
 const NO_KIND: u16 = 0;
+const NOT_NORMALISED: u32 = 0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KindDescription {
@@ -111,6 +112,11 @@ pub struct TypingRules {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextNormalisation {
+    pub normalised_in_pieces_of: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KindsNotBuilt {
     TooLarge,
 }
@@ -131,6 +137,7 @@ struct KindsHeader {
     wide_text_found: U16,
     wide_text_becomes: U16,
     most_found_at_offsets: U32,
+    text_normalised_in_pieces_of: U32,
     kind_count: U32,
     group_count: U32,
     retype_count: U32,
@@ -236,6 +243,7 @@ impl<'d> EncodedOffsetFinding<'d> {
 pub fn build(
     kinds: &BTreeMap<ObjectKind, KindDescription>,
     typing: Option<TypingRules>,
+    text: Option<TextNormalisation>,
 ) -> Result<Vec<u8>, KindsNotBuilt> {
     let count = |value: usize| u32::try_from(value).map_err(|_| KindsNotBuilt::TooLarge);
     let mut entries = Vec::with_capacity(kinds.len());
@@ -310,6 +318,9 @@ pub fn build(
         wide_text_found: U16::new(code_or_none(retry.map(|retry| retry.found))),
         wide_text_becomes: U16::new(code_or_none(retry.map(|retry| retry.becomes))),
         most_found_at_offsets: U32::new(typing.map_or(0, |rules| rules.most_found_at_offsets)),
+        text_normalised_in_pieces_of: U32::new(
+            text.map_or(NOT_NORMALISED, |text| text.normalised_in_pieces_of),
+        ),
         kind_count: U32::new(count(entries.len())?),
         group_count: U32::new(count(groups.len())?),
         retype_count: U32::new(count(retypes.len())?),
@@ -328,6 +339,7 @@ pub fn build(
 #[derive(Clone, Copy)]
 pub struct ObjectKinds<'m> {
     typing: TypingRules,
+    text: Option<TextNormalisation>,
     entries: &'m [KindEntry],
     groups: &'m [U32],
     retypes: &'m [U16],
@@ -418,6 +430,12 @@ impl<'m> ObjectKinds<'m> {
                 wide_text_retry,
                 most_found_at_offsets: header.most_found_at_offsets.get(),
             },
+            text: match header.text_normalised_in_pieces_of.get() {
+                NOT_NORMALISED => None,
+                normalised_in_pieces_of => Some(TextNormalisation {
+                    normalised_in_pieces_of,
+                }),
+            },
             entries,
             groups,
             retypes,
@@ -429,6 +447,11 @@ impl<'m> ObjectKinds<'m> {
     #[must_use]
     pub fn typing_rules(&self) -> TypingRules {
         self.typing
+    }
+
+    #[must_use]
+    pub const fn text_normalisation(&self) -> Option<TextNormalisation> {
+        self.text
     }
 
     pub fn describe(&self, kind: ObjectKind) -> Result<Option<KindView<'m>>, KindsMalformed> {

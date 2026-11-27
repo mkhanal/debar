@@ -161,3 +161,10 @@ path = "../crates/formats/fuzz_targets/ole2_streams.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "plain_text"
+path = "../crates/formats/fuzz_targets/plain_text.rs"
+test = false
+doc = false
+bench = false

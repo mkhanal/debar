@@ -97,7 +97,7 @@ fn a_file_up_to_the_file_size_limit_is_scanned_to_its_end() {
 
 const TRIGGERED_ELSEWHERE: usize = 400;
 const TRIGGERED_FILE_LENGTH: usize = 17 * 1024 * 1024;
-const MOST_WORK_FOR_THE_TRIGGERED_FILE: u64 = 2 * 17 * 1024 * 1024;
+const MOST_WORK_THE_TRIGGERS_ADD: u64 = 17 * 1024 * 1024;
 const LAST_BYTES: &[u8] = b"LASTBYTE";
 const LAST_BYTES_BODY: &str = "Test.Last:0:EOF-8:4c41535442595445\n";
 
@@ -128,6 +128,12 @@ fn triggering_file(directory: &Path, name: &str, ending: &[u8]) -> PathBuf {
     input
 }
 
+fn untriggered_file(directory: &Path, name: &str) -> PathBuf {
+    let input = directory.join(name);
+    write_file(&input, &vec![b'.'; TRIGGERED_FILE_LENGTH]).unwrap();
+    input
+}
+
 fn work_units_to_scan(image: &Path, input: &Path) -> u64 {
     let measured = run(Command::new(&release_binaries().unwrap().debar)
         .arg("measure-scan")
@@ -146,6 +152,7 @@ fn a_file_is_scanned_to_its_end_however_many_signatures_it_triggers_that_cannot_
     let (directory, compiled) = triggered_only_in_mail("triggered-only-in-mail");
     let ending_detected = triggering_file(&directory, "ending-detected", LAST_BYTES);
     let ending_clean = triggering_file(&directory, "ending-clean", b"........");
+    let untriggered = untriggered_file(&directory, "untriggered");
 
     let every = comparison_report_with(
         &compiled.image,
@@ -155,6 +162,7 @@ fn a_file_is_scanned_to_its_end_however_many_signatures_it_triggers_that_cannot_
     )
     .unwrap();
     let work = work_units_to_scan(&compiled.image, &ending_clean);
+    let work_untriggered = work_units_to_scan(&compiled.image, &untriggered);
 
     assert_eq!(
         detections(&every),
@@ -163,8 +171,8 @@ fn a_file_is_scanned_to_its_end_however_many_signatures_it_triggers_that_cannot_
     );
     assert_eq!(every["verdict"], "strong_indicator", "{REQUIREMENT}");
     assert!(
-        work < MOST_WORK_FOR_THE_TRIGGERED_FILE,
-        "{REQUIREMENT}: {work} work units for {TRIGGERED_FILE_LENGTH} bytes"
+        work < work_untriggered + MOST_WORK_THE_TRIGGERS_ADD,
+        "{REQUIREMENT}: {work} work units for {TRIGGERED_FILE_LENGTH} bytes, {work_untriggered} untriggered"
     );
 }
 

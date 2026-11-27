@@ -77,8 +77,8 @@ pub use names::NameId;
 pub use object_kind::ObjectKind;
 pub use object_kinds::{
     EmbeddedObject, FoundAtAnOffset, Hosts, KindDescription, KindView, KindsMalformed,
-    KindsNotBuilt, ObjectKinds, OffsetAction, OwnBytes, RecognitionRank, TypingRules,
-    WideTextRetry,
+    KindsNotBuilt, ObjectKinds, OffsetAction, OwnBytes, RecognitionRank, TextNormalisation,
+    TypingRules, WideTextRetry,
 };
 pub use pattern_group::{
     AnchorTables, AnchoredProgram, GroupMalformed, LongAnchorFilter, LongAnchorTable, PatternGroup,

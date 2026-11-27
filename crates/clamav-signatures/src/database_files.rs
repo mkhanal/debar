@@ -6,7 +6,8 @@ use debar_image::{
     BuildError, Category, CertificateRule, ContainerSignature, DatabaseRecord, HashEntryId,
     HashPurpose, HashSignature, IconGroups, ImageBuilder, LogicalOutcome, LogicalSignature,
     MagicTable, PartMemory, Pattern, PatternOutcome, PatternSignature, Placement, ProgramKind,
-    ReportWindows, SignatureGroup, SignatureProgram, TypeFinding, UnwantedCategory, UrlRule,
+    ReportWindows, SignatureGroup, SignatureProgram, TextNormalisation, TypeFinding,
+    UnwantedCategory, UrlRule,
 };
 
 use crate::account::{Account, FileAccount, LineOutcome};
@@ -30,7 +31,9 @@ use crate::logical_lines::{self, MalformedLogicalLine, ReadLogicalLine};
 use crate::program_text::{
     MalformedProgram, ParsedProgram, ProgramSkip, ReadProgram, read_program,
 };
-use crate::type_names::{GENERIC_GROUP, TYPE_RECOGNITION_GROUP, describe_object_kinds};
+use crate::type_names::{
+    GENERIC_GROUP, TEXT_TARGET_GROUP, TYPE_RECOGNITION_GROUP, describe_object_kinds,
+};
 use crate::url_lines::{
     self, MalformedUrlLine, ReadUrlLine, UrlFile, shadowed_by_an_allowed_digest,
 };
@@ -530,6 +533,14 @@ impl Loader<'_> {
         }
         let enabled = self.switches.enabled_features();
         describe_object_kinds(self.image, &enabled);
+        self.image.set_text_normalisation(TextNormalisation {
+            normalised_in_pieces_of: SCAN_WINDOW_LENGTH.saturating_add(
+                self.longest_parts
+                    .get(&TEXT_TARGET_GROUP)
+                    .copied()
+                    .unwrap_or(0),
+            ),
+        });
         name_engine_alerts(self.image).map_err(DatabaseError::Image)?;
         self.image.set_engine_features(&enabled);
         for rule in self.certificate_rules.drain(..).rev() {

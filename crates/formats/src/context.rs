@@ -1,3 +1,5 @@
+use debar_image::ObjectKind;
+
 use crate::limits::{Limit, Room};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8,6 +10,8 @@ pub struct ModuleContext {
     deepest_level: u32,
     found_inside_another: bool,
     facts_wanted: bool,
+    current_kind: ObjectKind,
+    text_normalised_in_pieces_of: Option<u64>,
     last_part: Option<PartOutcome>,
     refusals: Vec<Limit>,
 }
@@ -20,6 +24,8 @@ pub struct ContextOfTheObject {
     pub deepest_level: u32,
     pub found_inside_another: bool,
     pub facts_wanted: bool,
+    pub current_kind: ObjectKind,
+    pub text_normalised_in_pieces_of: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +45,8 @@ impl ModuleContext {
             deepest_level: object.deepest_level,
             found_inside_another: object.found_inside_another,
             facts_wanted: object.facts_wanted,
+            current_kind: object.current_kind,
+            text_normalised_in_pieces_of: object.text_normalised_in_pieces_of,
             last_part,
             refusals: Vec::new(),
         }
@@ -94,6 +102,16 @@ impl ModuleContext {
     #[must_use]
     pub const fn facts_wanted(&self) -> bool {
         self.facts_wanted
+    }
+
+    #[must_use]
+    pub const fn current_kind(&self) -> ObjectKind {
+        self.current_kind
+    }
+
+    #[must_use]
+    pub const fn text_normalised_in_pieces_of(&self) -> Option<u64> {
+        self.text_normalised_in_pieces_of
     }
 
     #[must_use]

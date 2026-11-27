@@ -23,7 +23,10 @@ fn loose_databases(test: &str, ndb: &str) -> (PathBuf, CompiledImage) {
 fn detected(directory: &Path, image: &Path, contents: &[u8]) -> Vec<String> {
     let input = directory.join("input");
     write_file(&input, contents).unwrap();
-    detections(&comparison_report_with(image, &["--every-match"], &input, directory).unwrap())
+    let mut names =
+        detections(&comparison_report_with(image, &["--every-match"], &input, directory).unwrap());
+    names.dedup();
+    names
 }
 
 fn file_with(length: usize, at: usize, body: &[u8]) -> Vec<u8> {

@@ -32,7 +32,7 @@ use crate::model::{
 };
 use crate::names::{self, NameId};
 use crate::object_kind::ObjectKind;
-use crate::object_kinds::{self, KindDescription, KindsNotBuilt, TypingRules};
+use crate::object_kinds::{self, KindDescription, KindsNotBuilt, TextNormalisation, TypingRules};
 use crate::pattern_group::{
     self, GroupNotBuilt, PatternSignatureId, PendingPatternSignature, RecordedOutcome,
 };
@@ -193,6 +193,7 @@ pub struct ImageBuilder {
     groups: BTreeMap<SignatureGroup, PendingGroup>,
     kinds: BTreeMap<ObjectKind, KindDescription>,
     typing: Option<TypingRules>,
+    text_normalisation: Option<TextNormalisation>,
     magic: Vec<PendingMagic>,
     unwanted_categories: BTreeMap<String, Option<String>>,
     containers: Vec<PendingContainer>,
@@ -528,6 +529,10 @@ impl ImageBuilder {
         self.typing = Some(rules);
     }
 
+    pub fn set_text_normalisation(&mut self, text: TextNormalisation) {
+        self.text_normalisation = Some(text);
+    }
+
     pub fn add_type_magic(
         &mut self,
         table: MagicTable,
@@ -666,6 +671,7 @@ impl ImageBuilder {
             groups,
             kinds,
             typing,
+            text_normalisation,
             magic,
             unwanted_categories,
             containers,
@@ -683,12 +689,13 @@ impl ImageBuilder {
         let selections_section = selections_section(&kinds, typing, &anchors)?;
         let containers_section = containers_section(containers, &name_ids)?;
         let mut sections = vec![databases_section(&databases)?];
-        if !kinds.is_empty() || typing.is_some() {
+        if !kinds.is_empty() || typing.is_some() || text_normalisation.is_some() {
             sections.push(Section {
                 kind: SectionKind::ObjectKinds,
                 qualifier: 0,
                 item_count: u64::try_from(kinds.len()).map_err(|_| BuildError::TooManySections)?,
-                bytes: object_kinds::build(&kinds, typing).map_err(BuildError::ObjectKinds)?,
+                bytes: object_kinds::build(&kinds, typing, text_normalisation)
+                    .map_err(BuildError::ObjectKinds)?,
             });
         }
         if !magic.is_empty() {

@@ -5,6 +5,7 @@ use debar_image::{
 
 pub const GENERIC_GROUP: SignatureGroup = SignatureGroup(0);
 pub const TYPE_RECOGNITION_GROUP: SignatureGroup = SignatureGroup(15);
+pub const TEXT_TARGET_GROUP: SignatureGroup = SignatureGroup(7);
 const TYPING_PREFIX_LENGTH: u32 = 1024;
 const MOST_FOUND_AT_OFFSETS: u32 = 10;
 const FIRST_ALWAYS_REPLACING_NUMBER: u32 = 563;
@@ -123,7 +124,7 @@ const TARGET_GROUPS: [(ObjectKind, SignatureGroup); 19] = [
     (ObjectKind::Jpeg, SignatureGroup(5)),
     (ObjectKind::Tiff, SignatureGroup(5)),
     (ObjectKind::Elf, SignatureGroup(6)),
-    (ObjectKind::Text, SignatureGroup(7)),
+    (ObjectKind::Text, TEXT_TARGET_GROUP),
     (ObjectKind::Unreadable, SignatureGroup(8)),
     (ObjectKind::MachO, SignatureGroup(9)),
     (ObjectKind::MachOUniversal, SignatureGroup(9)),
