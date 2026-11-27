@@ -1,11 +1,11 @@
 use debar_image::ObjectKind;
 use debar_platform::input::{InputError, ObjectBytes};
 
+use crate::little_endian::read_within;
 use crate::module::{AfterTheEntry, ContainerEntry};
 use crate::zip::headers::{
     CentralParse, LOCAL_HEADER_LENGTH, LOCAL_HEADER_MAGIC, central_record_at,
 };
-use crate::zip::little_endian::read_within;
 
 const FIRST_WINDOW_BYTES: u64 = 1024;
 const LATER_WINDOW_BYTES: u64 = 1028;

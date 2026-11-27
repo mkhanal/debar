@@ -1,7 +1,7 @@
 use debar_platform::input::{InputError, ObjectBytes};
 
+use crate::little_endian::{Fields, read_within};
 use crate::module::ContainerEntry;
-use crate::zip::little_endian::{Fields, read_within};
 
 pub const LOCAL_HEADER_MAGIC: [u8; 4] = *b"PK\x03\x04";
 const CENTRAL_HEADER_MAGIC: [u8; 4] = *b"PK\x01\x02";

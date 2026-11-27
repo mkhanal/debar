@@ -12,6 +12,7 @@ use sha2::{Digest as _, Sha256};
 
 pub mod coded_streams;
 pub mod largest_file;
+pub mod ole2_document;
 pub mod scan_speed;
 pub mod small_object_cost;
 pub mod zip_archive;

@@ -154,3 +154,10 @@ path = "../crates/formats/fuzz_targets/zip_members.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ole2_streams"
+path = "../crates/formats/fuzz_targets/ole2_streams.rs"
+test = false
+doc = false
+bench = false

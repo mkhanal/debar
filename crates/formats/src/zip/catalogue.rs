@@ -5,12 +5,12 @@ use debar_platform::input::{InputError, ObjectBytes};
 use crate::context::ModuleContext;
 use crate::facts::Fact;
 use crate::limits::Limit;
+use crate::little_endian::{Fields, read_within};
 use crate::module::ContainerEntry;
 use crate::zip::headers::{
     CentralParse, LOCAL_HEADER_LENGTH, LOCAL_HEADER_MAGIC, LocalParse, Record, central_record_at,
     local_record_at,
 };
-use crate::zip::little_endian::{Fields, read_within};
 
 const END_RECORD_MAGIC: [u8; 4] = *b"PK\x05\x06";
 const END_RECORD_LENGTH: u64 = 22;

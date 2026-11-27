@@ -5,7 +5,6 @@ mod decoded;
 mod deflate64;
 mod headers;
 mod imploded;
-mod little_endian;
 mod members;
 mod office_open;
 mod prefix_codes;

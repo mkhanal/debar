@@ -3,8 +3,10 @@
 mod context;
 mod facts;
 mod limits;
+mod little_endian;
 mod module;
 mod object;
+mod ole2;
 mod zip;
 
 pub use context::{ContextOfTheObject, ModuleContext, PartOutcome};
@@ -18,6 +20,7 @@ pub use module::{
 };
 pub use object::Object;
 
+pub use ole2::{OLE2_DOCUMENTS, Ole2Documents};
 pub use zip::{ZIP_ARCHIVES, ZipArchives};
 
-pub const BUILT_IN_MODULES: &[&dyn FormatModule] = &[&ZIP_ARCHIVES];
+pub const BUILT_IN_MODULES: &[&dyn FormatModule] = &[&ZIP_ARCHIVES, &OLE2_DOCUMENTS];

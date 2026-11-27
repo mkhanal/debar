@@ -341,6 +341,7 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
                 room: self.ledger.room(),
                 room_to_produce: MOST_PRODUCED_BYTES_HELD.saturating_sub(self.produced_held),
                 most_files: self.settings.limits.most_files,
+                deepest_level: self.settings.limits.deepest_level,
                 found_inside_another: self.current().arrival == Arrival::Embedded,
                 facts_wanted: self.settings.facts == Facts::Gathered,
             },
