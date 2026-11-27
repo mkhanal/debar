@@ -99,7 +99,7 @@ Everything builds and runs inside the toolchain image, on CI and on a developer 
 | To… | Run |
 | --- | --- |
 | run every check a change must pass | `./in-toolchain cargo xtask check` |
-| run one of them | `./in-toolchain cargo xtask <check>`, where `<check>` is `format`, `lints`, `tests`, `dependencies`, `lint-tables`, `layers`, `reference-mentions`, `requirements`, `unsafe-code` or `workflows` |
+| run one of them | `./in-toolchain cargo xtask <check>`, where `<check>` is `format`, `lints`, `tests`, `dependencies`, `lint-tables`, `layers`, `reference-mentions`, `requirements`, `unsafe-code`, `workflows` or `fuzz-targets` |
 | fetch the pinned databases the acceptance tests need, once, on the host | `crates/clamav-signatures/fetch-pinned-databases target/pinned-databases` (needs Docker; it copies them from the comparison harness's pinned image) |
 | run the platform crate's tests under Miri | `./in-toolchain cargo xtask miri` |
 | run every fuzz target | `./in-toolchain cargo xtask fuzz [SECONDS]` (60 seconds each by default) |
@@ -124,6 +124,7 @@ What each check enforces:
 - **reference-mentions**: no tracked file names a reference scanner outside the paths listed in `xtask/src/reference_mentions.rs` (Constitution §4). Naming a signature-format part's crate or path, listed there, states support and is not a mention.
 - **requirements**: every requirement in `specs/*.lazyspec.md` appears word for word in its one married test file, `<crate>/tests/<stem>_lazyspec.rs`, with the specification's stem joined by underscores. Put the requirement's text in the test, for example as the string a test asserts it proves.
 - **workflows**: `zizmor` over `.github/workflows`.
+- **fuzz-targets**: `cargo check` of the fuzz workspace (`fuzz/`), its own workspace that the other checks do not build, so a change that stops a fuzz target compiling fails here and not only in CI's fuzz job. `cargo xtask fuzz` builds every target before running any, so a target that does not compile ends its log with the compiler's error.
 
 CI (`.github/workflows/checks.yml`) fetches the pinned databases, runs `./in-toolchain cargo xtask check` on amd64 and arm64, checks that both compiled the same image, and runs `cargo xtask miri` and `cargo xtask fuzz 30` for every push and pull request, so a change that passes locally passes there.
 

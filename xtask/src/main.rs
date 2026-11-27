@@ -46,9 +46,10 @@ enum Check {
     Requirements,
     UnsafeCode,
     Workflows,
+    FuzzTargets,
 }
 
-const EVERY_CHANGE: [Check; 10] = [
+const EVERY_CHANGE: [Check; 11] = [
     Check::Format,
     Check::Lints,
     Check::Tests,
@@ -59,6 +60,7 @@ const EVERY_CHANGE: [Check; 10] = [
     Check::Requirements,
     Check::UnsafeCode,
     Check::Workflows,
+    Check::FuzzTargets,
 ];
 
 impl Check {
@@ -74,6 +76,7 @@ impl Check {
             Self::Requirements => "requirements",
             Self::UnsafeCode => "unsafe-code",
             Self::Workflows => "workflows",
+            Self::FuzzTargets => "fuzz-targets",
         }
     }
 
@@ -105,6 +108,11 @@ impl Check {
             Self::Requirements => check_requirements(root),
             Self::UnsafeCode => check_unsafe_code(root),
             Self::Workflows => run_command(root, "zizmor", &[WORKFLOWS]),
+            Self::FuzzTargets => run_command(
+                &root.join(FUZZ_DIRECTORY),
+                "cargo",
+                &["check", "--bins", "--locked"],
+            ),
         }
     }
 }
@@ -252,6 +260,8 @@ fn run_fuzz_targets(root: &Path, seconds: u32) -> Result<(), Failure> {
             "{FUZZ_DIRECTORY}/Cargo.lock is out of date: {reason}"
         ))
     })?;
+    eprintln!("==> build every fuzz target");
+    run_command(&fuzz, "cargo", &[&toolchain, "fuzz", "build"])?;
     let listing = command_output(&fuzz, "cargo", &[&toolchain, "fuzz", "list"])?;
     let time_limit = format!("-max_total_time={seconds}");
     let failed: Vec<&str> = listing
