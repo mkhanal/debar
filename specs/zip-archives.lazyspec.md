@@ -14,6 +14,12 @@ What a scan finds inside a ZIP file or an Office Open XML document (which is a Z
 - A detection in a member is reported on the member.
 - A ZIP inside a member is opened in turn, its members one level deeper again.
 
+## A ZIP Member Compressed With Deflate64, Bzip2 Or Implode Is Decoded And Scanned
+
+- Each such member is an object of the bytes it decodes to.
+- A deflate64 or implode member whose data ends early is the bytes decoded before the end; a bzip2 member is the blocks finished before it.
+- A member whose data is corrupt, or whose bzip2 check values are wrong, is not scanned.
+
 ## An Office Open XML Document Is Typed As Its Kind And Its Members Are Scanned
 
 - A ZIP whose first entries name a `word/`, `xl/` or `ppt/` entry is typed as that kind of document.
@@ -25,9 +31,15 @@ What a scan finds inside a ZIP file or an Office Open XML document (which is a Z
 - The sizes and the encryption flag tested are those the archive declares, and the position counts entries from 1.
 - The container tested is the archive, of its own kind, and a detection is reported on it.
 
+## A ZIP Entry Is Tested Against Container Signatures Wherever Its Header Is Read
+
+- A local header the search for unlisted members finds and then refuses is still tested, by the facts it declares.
+- The local header starting a ZIP found inside another file is tested with that file as the container, at position 0, whether or not the ZIP is then made an object.
+- While a ZIP is typed as an Office Open XML document, each central record read is tested with any container, in a raw-only scan too.
+
 ## A ZIP Member Over The File-Size Limit Is Cut To It
 
-- A deflated member that decodes to more than the file-size limit is cut to the largest multiple of 8,192 bytes within it, and its first bytes are scanned.
+- A member decoded from deflate, deflate64, bzip2 or implode that decodes to more than the file-size limit is cut to the largest multiple of 8,192 bytes within it, and its first bytes are scanned.
 
 ## A ZIP Stops Extracting At The File-Count Limit
 

@@ -1,6 +1,7 @@
 use debar_image::ObjectKind;
 use debar_platform::input::{InputError, ObjectBytes};
 
+use crate::module::{AfterTheEntry, ContainerEntry};
 use crate::zip::headers::{
     CentralParse, LOCAL_HEADER_LENGTH, LOCAL_HEADER_MAGIC, central_record_at,
 };
@@ -14,7 +15,6 @@ const WINDOW_OVERLAP: u64 = 53;
 const ROOM_FOR_ANOTHER_WINDOW: u64 = 30;
 const MOST_STEPS: u32 = 32;
 const NAMES_LOOKED_AT: u32 = 3;
-const POSITION_WHILE_TYPING: u64 = 1;
 
 const DECIDING_NAMES: [(&[u8], ObjectKind); 4] = [
     (b"xl/", ObjectKind::OfficeOpenSpreadsheet),
@@ -45,7 +45,10 @@ const DIRECTORY_NAMES: [(&[u8], bool, ObjectKind); 4] = [
     (b"Contents/content.hpf", true, ObjectKind::HangulOpen),
 ];
 
-pub fn office_kind(object: &dyn ObjectBytes) -> Result<Option<ObjectKind>, InputError> {
+pub fn office_kind(
+    object: &dyn ObjectBytes,
+    entries: &mut dyn FnMut(ContainerEntry) -> AfterTheEntry,
+) -> Result<Option<ObjectKind>, InputError> {
     let length = object.length();
     let first_length = length.min(FIRST_WINDOW_BYTES);
     if first_length <= SHORTEST_TYPED {
@@ -75,7 +78,7 @@ pub fn office_kind(object: &dyn ObjectBytes) -> Result<Option<ObjectKind>, Input
                 names_looked_at = names_looked_at.saturating_add(1);
                 if names_looked_at >= NAMES_LOOKED_AT {
                     if suggested {
-                        return named_in_the_central_directory(object);
+                        return named_in_the_central_directory(object, entries);
                     }
                     return Ok(None);
                 }
@@ -96,16 +99,26 @@ pub fn office_kind(object: &dyn ObjectBytes) -> Result<Option<ObjectKind>, Input
 
 fn named_in_the_central_directory(
     object: &dyn ObjectBytes,
+    entries: &mut dyn FnMut(ContainerEntry) -> AfterTheEntry,
 ) -> Result<Option<ObjectKind>, InputError> {
     let Some(mut at) = crate::zip::catalogue::central_directory_offset(object)? else {
         return Ok(None);
     };
+    let mut position = 0u64;
     loop {
-        let (entry, length) = match central_record_at(object, at, POSITION_WHILE_TYPING)? {
-            CentralParse::EndOfDirectory | CentralParse::EndAfter(_) => return Ok(None),
+        position = position.saturating_add(1);
+        let (entry, length) = match central_record_at(object, at, position)? {
+            CentralParse::EndOfDirectory => return Ok(None),
+            CentralParse::EndAfter(entry) => {
+                entries(entry);
+                return Ok(None);
+            }
             CentralParse::Record { entry, length, .. } => (entry, length),
         };
-        let name = entry.name.unwrap_or_default();
+        let name = entry.name.clone().unwrap_or_default();
+        if entries(entry) == AfterTheEntry::Stop {
+            return Ok(None);
+        }
         if let Some(kind) = DIRECTORY_NAMES
             .iter()
             .find(|(wanted, whole_name, _)| {

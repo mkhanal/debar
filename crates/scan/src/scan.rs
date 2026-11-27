@@ -1,6 +1,7 @@
 use debar_formats::{
-    ContainerEntry, ContextOfTheObject, Fact, FormatModule, HeaderCheck, Limit, ModuleContext,
-    ModuleError, ModuleOutput, Object, Part, PartBytes, PartOutcome, PartRole, Stage,
+    AfterTheEntry, ContainerEntry, ContextOfTheObject, Fact, FormatModule, HeaderCheck, Limit,
+    ModuleContext, ModuleError, ModuleOutput, Object, Part, PartBytes, PartOutcome, PartRole,
+    Stage,
 };
 use debar_image::{
     EngineAlert, Image, Indicator, KindView, ObjectKind, OffsetAction, OwnBytes, TypingRules,
@@ -74,6 +75,7 @@ pub fn scan_with_modules(
         facts: Vec::new(),
         produced_held: 0,
         uncounted_outputs: 0,
+        uncounted_outputs_allowed: MOST_UNCOUNTED_MODULE_OUTPUTS,
         observer,
     };
     let completion = match scan.scan_top_level() {
@@ -128,6 +130,7 @@ struct Scan<'i, 'm, 's, 'r, 'o, 'b> {
     facts: Vec<ObjectFact>,
     produced_held: u64,
     uncounted_outputs: u64,
+    uncounted_outputs_allowed: u64,
     observer: &'b mut dyn ObjectObserver,
 }
 
@@ -270,6 +273,9 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
 
     fn run_module(&mut self, module: &'r dyn FormatModule) -> Result<Flow, ScanFailure> {
         let object = self.current().bytes.clone();
+        self.uncounted_outputs_allowed = self
+            .uncounted_outputs_allowed
+            .saturating_add(object.length());
         let mut context = self.module_context(None);
         let opened = module.open(object, &mut context);
         if self.limits_the_module_reached(context)? == Flow::Abort {
@@ -301,7 +307,9 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
                         Flow::Continue
                     }
                 }
-                Ok(Some(ModuleOutput::Entry(entry))) => self.container_entry(&entry)?,
+                Ok(Some(ModuleOutput::Entry(entry))) => {
+                    self.container_entry(self.current_kind(), &entry)?
+                }
                 Ok(Some(ModuleOutput::Fact(fact))) => self.module_fact(fact)?,
             };
             if flow == Flow::Abort {
@@ -319,9 +327,9 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
             return Ok(());
         }
         self.uncounted_outputs = self.uncounted_outputs.saturating_add(1);
-        if self.uncounted_outputs > MOST_UNCOUNTED_MODULE_OUTPUTS {
+        if self.uncounted_outputs > self.uncounted_outputs_allowed {
             return Err(ScanFailure::ModuleOutputsBeyondBound {
-                most: MOST_UNCOUNTED_MODULE_OUTPUTS,
+                most: self.uncounted_outputs_allowed,
             });
         }
         Ok(())
@@ -396,11 +404,18 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
         }
     }
 
-    fn container_entry(&mut self, entry: &ContainerEntry) -> Result<Flow, ScanFailure> {
-        let container = self.current();
+    fn current_kind(&self) -> ObjectKind {
+        self.current().kind.unwrap_or(ObjectKind::Untyped)
+    }
+
+    fn container_entry(
+        &mut self,
+        container: ObjectKind,
+        entry: &ContainerEntry,
+    ) -> Result<Flow, ScanFailure> {
         let tested = debar_matching::ContainerEntry {
-            container: container.kind.unwrap_or(ObjectKind::Untyped),
-            container_size: container.bytes.length(),
+            container,
+            container_size: self.current().bytes.length(),
             name: entry.name.as_deref(),
             compressed_size: entry.compressed_size,
             real_size: entry.real_size,
@@ -524,7 +539,16 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
                     else {
                         continue;
                     };
-                    let bytes = match self.modules.header_check(embedded.scanned_as, &from) {
+                    let host_kind = self.current_kind();
+                    let modules = self.modules;
+                    let mut tested = Ok(Flow::Continue);
+                    let check = modules.header_check(embedded.scanned_as, &from, &mut |entry| {
+                        self.entry_tested_while(host_kind, &entry, &mut tested)
+                    });
+                    if tested? == Flow::Abort {
+                        return Ok(Flow::Abort);
+                    }
+                    let bytes = match check {
                         Ok(HeaderCheck::NotNeeded) => from,
                         Ok(HeaderCheck::Fails) | Err(ModuleError::Damaged { .. }) => continue,
                         Err(ModuleError::Input(error)) => return Err(error.into()),
@@ -767,12 +791,34 @@ impl<'m, 's, 'r, 'o> Scan<'_, 'm, 's, 'r, 'o, '_> {
         Ok(kinds.typing_rules())
     }
 
-    fn kind_of_the_object(&self) -> Result<ObjectKind, ScanFailure> {
+    fn kind_of_the_object(&mut self) -> Result<ObjectKind, ScanFailure> {
         let typed = self.kind_from_first_bytes()?;
-        match self.modules.refined_kind(typed, &self.current().bytes) {
+        let bytes = self.current().bytes.clone();
+        let modules = self.modules;
+        let mut tested = Ok(Flow::Continue);
+        let refined = modules.refined_kind(typed, &bytes, &mut |entry| {
+            self.entry_tested_while(ObjectKind::Untyped, &entry, &mut tested)
+        });
+        tested?;
+        match refined {
             Ok(refined) => Ok(refined.unwrap_or(typed)),
             Err(ModuleError::Damaged { .. }) => Ok(typed),
             Err(ModuleError::Input(error)) => Err(error.into()),
+        }
+    }
+
+    fn entry_tested_while(
+        &mut self,
+        container: ObjectKind,
+        entry: &ContainerEntry,
+        tested: &mut Result<Flow, ScanFailure>,
+    ) -> AfterTheEntry {
+        if matches!(tested, Ok(Flow::Continue)) {
+            *tested = self.container_entry(container, entry);
+        }
+        match tested {
+            Ok(Flow::Continue) => AfterTheEntry::GoOn,
+            Ok(Flow::Abort) | Err(_) => AfterTheEntry::Stop,
         }
     }
 

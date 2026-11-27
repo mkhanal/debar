@@ -217,7 +217,11 @@ impl Catalogue {
         };
         let position = self.counted.saturating_add(1);
         let resume_at = match local_record_at(object, candidate, None, position)? {
-            LocalParse::Unreadable | LocalParse::Rejected { .. } => candidate.saturating_add(1),
+            LocalParse::Unreadable => candidate.saturating_add(1),
+            LocalParse::Rejected { entry } => {
+                self.pending.push_back(Indexed::Entry(entry));
+                candidate.saturating_add(1)
+            }
             LocalParse::Accepted { entry, record } => {
                 self.pending.push_back(Indexed::Entry(entry));
                 self.found.push(record);

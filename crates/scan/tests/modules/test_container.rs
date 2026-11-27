@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
 use debar_formats::{
-    ContainerEntry, EncryptedContent, Fact, FormatModule, HeaderCheck, Limit, MacroLanguage,
-    ModuleContext, ModuleError, ModuleOutput, Object, Part, PartBytes, PartOutcome, PartRole,
-    PartSource, Stage,
+    AfterTheEntry, ContainerEntry, EncryptedContent, Fact, FormatModule, HeaderCheck, Limit,
+    MacroLanguage, ModuleContext, ModuleError, ModuleOutput, Object, Part, PartBytes, PartOutcome,
+    PartRole, PartSource, Stage,
 };
 use debar_image::{
     BuildError, ByteSet, Category, EmbeddedObject, EngineAlert, FoundAtAnOffset, Hosts,
@@ -59,7 +59,11 @@ impl FormatModule for TestContainer {
         }))
     }
 
-    fn header_check(&self, from: &Object<'_>) -> Result<HeaderCheck, ModuleError> {
+    fn header_check(
+        &self,
+        from: &Object<'_>,
+        _entries: &mut dyn FnMut(ContainerEntry) -> AfterTheEntry,
+    ) -> Result<HeaderCheck, ModuleError> {
         let mut header = [0u8; 8];
         if from.length() < HEADER_LENGTH {
             return Ok(HeaderCheck::Fails);

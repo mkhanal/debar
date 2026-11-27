@@ -21,6 +21,7 @@ pub struct Record {
     pub compressed_size: u64,
     pub real_size: u64,
     pub method: u16,
+    pub flags: u16,
     pub encrypted: bool,
 }
 
@@ -31,6 +32,7 @@ impl Record {
         compressed_size: 0,
         real_size: 0,
         method: 0,
+        flags: 0,
         encrypted: false,
     };
 
@@ -126,6 +128,7 @@ pub fn local_record_at(
         compressed_size: sizes.compressed,
         real_size: sizes.real,
         method: fields.u16_at(8),
+        flags,
         encrypted: flags & ENCRYPTED != 0,
     };
     if flags & SIZES_IN_A_DATA_DESCRIPTOR != 0

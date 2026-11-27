@@ -3,19 +3,22 @@ use std::collections::VecDeque;
 use debar_platform::input::ObjectBytes;
 
 use crate::context::ModuleContext;
-use crate::facts::{EncryptedContent, Fact, Unsupported};
+use crate::facts::{EncryptedContent, Fact};
 use crate::limits::Limit;
 use crate::module::{ModuleError, ModuleOutput, Part, PartBytes, PartRole, PartSource};
 use crate::object::Object;
 use crate::zip::catalogue::{Catalogue, Indexed};
+use crate::zip::decoded::{Decoded, Method, Regenerated, decode};
 use crate::zip::headers::{LocalParse, Record, local_record_at};
-use crate::zip::inflated::{Inflated, Inflation, inflate};
+use crate::zip::imploded::ImplodedShape;
 
 const STORED: u16 = 0;
 const IMPLODED: u16 = 6;
 const DEFLATED: u16 = 8;
 const DEFLATED_64: u16 = 9;
 const BZIP2: u16 = 12;
+const LARGE_IMPLODE_WINDOW: u16 = 0x0002;
+const IMPLODED_LITERAL_CODE: u16 = 0x0004;
 const POSITION_INSIDE_ANOTHER: u64 = 0;
 
 pub struct Members<'o> {
@@ -131,28 +134,27 @@ impl<'o> Members<'o> {
         else {
             return Ok(0);
         };
-        match record.method {
+        let method = match record.method {
             STORED if record.compressed_size >= record.real_size => {
                 self.stored(&record, context);
-                Ok(1)
+                return Ok(1);
             }
             STORED => {
-                if self.inflated(data, context)? {
+                if self.decoded(Method::Deflate, data, context)? {
                     self.stored(&record, context);
                 }
-                Ok(2)
+                return Ok(2);
             }
-            DEFLATED => Ok(u64::from(self.inflated(data, context)?)),
-            IMPLODED | DEFLATED_64 | BZIP2 => {
-                if context.facts_wanted() {
-                    self.pending.push_back(ModuleOutput::Fact(Fact::Unsupported(
-                        Unsupported::Compression,
-                    )));
-                }
-                Ok(0)
-            }
-            _ => Ok(0),
-        }
+            DEFLATED => Method::Deflate,
+            DEFLATED_64 => Method::Deflate64,
+            BZIP2 => Method::Bzip2,
+            IMPLODED => Method::Implode(ImplodedShape {
+                large_window: record.flags & LARGE_IMPLODE_WINDOW != 0,
+                literal_code: record.flags & IMPLODED_LITERAL_CODE != 0,
+            }),
+            _ => return Ok(0),
+        };
+        Ok(u64::from(self.decoded(method, data, context)?))
     }
 
     fn stored(&mut self, record: &Record, context: &ModuleContext) {
@@ -167,12 +169,22 @@ impl<'o> Members<'o> {
         });
     }
 
-    fn inflated(&mut self, data: Object<'o>, context: &ModuleContext) -> Result<bool, ModuleError> {
-        let bytes = match inflate(&data, context.largest_file(), context.room_to_produce())? {
-            Inflation::Failed => return Ok(false),
-            Inflation::Held(bytes) => PartBytes::Produced(bytes),
-            Inflation::Measured(length) => {
-                PartBytes::Regenerable(Box::new(Inflated::new(data, length)))
+    fn decoded(
+        &mut self,
+        method: Method,
+        data: Object<'o>,
+        context: &ModuleContext,
+    ) -> Result<bool, ModuleError> {
+        let bytes = match decode(
+            method,
+            &data,
+            context.largest_file(),
+            context.room_to_produce(),
+        )? {
+            Decoded::Failed => return Ok(false),
+            Decoded::Held(bytes) => PartBytes::Produced(bytes),
+            Decoded::Measured(length) => {
+                PartBytes::Regenerable(Box::new(Regenerated::new(method, data, length)))
             }
         };
         self.member(bytes);

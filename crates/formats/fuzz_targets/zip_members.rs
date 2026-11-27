@@ -25,6 +25,7 @@ const FILE_SIZE_STEP: u64 = 4 * 1024;
 const SCAN_SIZE_STEP: u64 = 16 * 1024;
 const SETTINGS_BYTES: usize = 4;
 const LOCAL_HEADER: &[u8] = b"PK\x03\x04";
+const CODED_METHODS: [(u16, u16); 4] = [(9, 0), (12, 0), (6, 0x0006), (6, 0)];
 const GENERIC: SignatureGroup = SignatureGroup(0);
 const RECOGNITION: SignatureGroup = SignatureGroup(15);
 
@@ -126,6 +127,48 @@ fn image() -> &'static [u8] {
     })
 }
 
+fn one_coded_member(data: &[u8], method: u16, flags: u16, real_size: u32) -> Vec<u8> {
+    let compressed = u32::try_from(data.len()).unwrap_or(u32::MAX);
+    let name = b"m";
+    let mut archive = Vec::new();
+    archive.extend_from_slice(LOCAL_HEADER);
+    for value in [20u16, flags, method, 0, 0] {
+        archive.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [0u32, compressed, real_size] {
+        archive.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [1u16, 0] {
+        archive.extend_from_slice(&value.to_le_bytes());
+    }
+    archive.extend_from_slice(name);
+    archive.extend_from_slice(data);
+    let central_offset = u32::try_from(archive.len()).unwrap_or(u32::MAX);
+    archive.extend_from_slice(b"PK\x01\x02");
+    for value in [20u16, 20, flags, method, 0, 0] {
+        archive.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [0u32, compressed, real_size] {
+        archive.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [1u16, 0, 0, 0, 0] {
+        archive.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [0u32, 0] {
+        archive.extend_from_slice(&value.to_le_bytes());
+    }
+    archive.extend_from_slice(name);
+    archive.extend_from_slice(b"PK\x05\x06");
+    for value in [0u16, 0, 1, 1] {
+        archive.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [47u32, central_offset] {
+        archive.extend_from_slice(&value.to_le_bytes());
+    }
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive
+}
+
 struct Bounds {
     deepest_level: u32,
     most_files: u64,
@@ -172,6 +215,15 @@ fuzz_target!(|input: &[u8]| {
         facts: Facts::Gathered,
         limits,
         ..ScanSettings::default()
+    };
+    let coded;
+    let object = if flags & 1 == 1 {
+        let (method, method_flags) = CODED_METHODS[usize::from(files >> 6)];
+        let real_size = u32::from(file_steps).saturating_add(1).saturating_mul(4096);
+        coded = one_coded_member(object, method, method_flags, real_size);
+        coded.as_slice()
+    } else {
+        object
     };
     let image = Image::open(image()).unwrap();
     let mut bounds = Bounds {

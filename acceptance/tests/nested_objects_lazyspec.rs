@@ -27,6 +27,10 @@ const FILE_TYPES: &str = "\
 1:*:415243484956454d41524b:RAR-SFX:CL_TYPE_ANY:CL_TYPE_RARSFX
 1:*:51405140:RAR-SFX short:CL_TYPE_ANY:CL_TYPE_RARSFX
 ";
+const ZIP_TYPES: &str = "\
+0:0:504b0304:ZIP:CL_TYPE_ANY:CL_TYPE_ZIP
+1:*:504b0304:ZIP-SFX:CL_TYPE_ANY:CL_TYPE_ZIPSFX
+";
 const BODIES: &str = "Test.Embedded:0:*:454d424544444544424f4459\n";
 const LOGICAL: &str = "\
 Test.Rescanned;Engine:51-255,Target:0,HandlerType:CL_TYPE_PDF;0;52455343414e424f4459
@@ -136,6 +140,26 @@ fn an_archive_found_inside_another_file_is_scanned_as_an_object_of_its_own() {
         2,
         "{REQUIREMENT}: six bytes"
     );
+
+    let (directory, compiled) = databases("embedded-zip", &[("zip.ftm", ZIP_TYPES.to_owned())]);
+    let local_record = [
+        b"PK\x03\x04\x14\x00\x00\x00\x00\x00\x00\x00\x21\x00".as_slice(),
+        &[0u8; 4],
+        &u32::try_from(EMBEDDED_BODY.len()).unwrap().to_le_bytes(),
+        &u32::try_from(EMBEDDED_BODY.len()).unwrap().to_le_bytes(),
+        &1u16.to_le_bytes(),
+        &0u16.to_le_bytes(),
+        b"m",
+        EMBEDDED_BODY,
+    ]
+    .concat();
+    let contents = binary_with(&[&local_record, b"bytes after the record"]);
+    let start = offset_of(&contents, b"PK\x03\x04", 0);
+    let found = objects(&directory, &compiled.image, &contents);
+    let zip = &found[1];
+    assert_eq!(zip["type"], "CL_TYPE_ZIP", "{REQUIREMENT}: a ZIP");
+    assert_eq!(zip["size"], local_record.len(), "{REQUIREMENT}: a ZIP");
+    assert!(start + local_record.len() < contents.len(), "{REQUIREMENT}");
 }
 
 #[test]

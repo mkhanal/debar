@@ -13,8 +13,8 @@ pub use facts::{
 };
 pub use limits::{Limit, Room};
 pub use module::{
-    ContainerEntry, FormatModule, HeaderCheck, ModuleError, ModuleOutput, Part, PartBytes,
-    PartRole, PartSource, Stage,
+    AfterTheEntry, ContainerEntry, FormatModule, HeaderCheck, ModuleError, ModuleOutput, Part,
+    PartBytes, PartRole, PartSource, Stage,
 };
 pub use object::Object;
 

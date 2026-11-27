@@ -13,10 +13,15 @@ const VERSION: u16 = 20;
 const MODIFIED_DATE: u16 = 0x21;
 const CRC_POLYNOMIAL: u32 = 0xedb8_8320;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Method {
     Stored,
     Deflated,
+    Coded {
+        code: u16,
+        flags: u16,
+        data: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +44,19 @@ impl Member {
     }
 
     #[must_use]
+    pub fn coded(name: &str, code: u16, flags: u16, data: &[u8], contents: &[u8]) -> Self {
+        Self::new(
+            name,
+            contents,
+            Method::Coded {
+                code,
+                flags,
+                data: data.to_vec(),
+            },
+        )
+    }
+
+    #[must_use]
     pub const fn flagged_encrypted(mut self) -> Self {
         self.encrypted = true;
         self
@@ -55,9 +73,10 @@ impl Member {
 
     #[must_use]
     pub fn stored_data(&self) -> Vec<u8> {
-        match self.method {
+        match &self.method {
             Method::Stored => self.contents.clone(),
             Method::Deflated => deflate(&self.contents),
+            Method::Coded { data, .. } => data.clone(),
         }
     }
 
@@ -117,13 +136,18 @@ impl Member {
     }
 
     const fn flags(&self) -> u16 {
-        if self.encrypted { ENCRYPTED_FLAG } else { 0 }
+        let coded = match &self.method {
+            Method::Coded { flags, .. } => *flags,
+            Method::Stored | Method::Deflated => 0,
+        };
+        coded | if self.encrypted { ENCRYPTED_FLAG } else { 0 }
     }
 
     const fn method_code(&self) -> u16 {
-        match self.method {
+        match &self.method {
             Method::Stored => STORED,
             Method::Deflated => DEFLATED,
+            Method::Coded { code, .. } => *code,
         }
     }
 }

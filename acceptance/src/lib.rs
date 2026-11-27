@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
+pub mod coded_streams;
 pub mod largest_file;
 pub mod scan_speed;
 pub mod small_object_cost;

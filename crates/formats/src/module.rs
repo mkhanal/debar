@@ -24,8 +24,12 @@ pub trait FormatModule: Sync {
         context: &mut ModuleContext,
     ) -> Result<Box<dyn PartSource<'o> + 'o>, ModuleError>;
 
-    fn header_check(&self, from: &Object<'_>) -> Result<HeaderCheck, ModuleError> {
-        let _ = from;
+    fn header_check(
+        &self,
+        from: &Object<'_>,
+        entries: &mut dyn FnMut(ContainerEntry) -> AfterTheEntry,
+    ) -> Result<HeaderCheck, ModuleError> {
+        let _ = (from, entries);
         Ok(HeaderCheck::NotNeeded)
     }
 
@@ -33,8 +37,9 @@ pub trait FormatModule: Sync {
         &self,
         object: &Object<'_>,
         typed_as: ObjectKind,
+        entries: &mut dyn FnMut(ContainerEntry) -> AfterTheEntry,
     ) -> Result<Option<ObjectKind>, ModuleError> {
-        let _ = (object, typed_as);
+        let _ = (object, typed_as, entries);
         Ok(None)
     }
 }
@@ -44,6 +49,12 @@ pub trait PartSource<'o> {
         &mut self,
         context: &mut ModuleContext,
     ) -> Result<Option<ModuleOutput<'o>>, ModuleError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterTheEntry {
+    GoOn,
+    Stop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -4,23 +4,48 @@ use debar_platform::input::{InputError, ObjectBytes};
 use flate2::{Decompress, FlushDecompress};
 
 use crate::object::Object;
+use crate::zip::bzip2::Bzip2;
+use crate::zip::compressed_bits::CompressedBytes;
+use crate::zip::deflate64::Deflate64;
+use crate::zip::imploded::{Imploded, ImplodedShape};
 
-const COMPRESSED_READ_BYTES: usize = 16 * 1024;
 const DECODED_WINDOW_BYTES: usize = 64 * 1024;
 
 const OUTPUT_BUFFER_BYTES: u64 = 8192;
 
-pub enum Inflation {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    Deflate,
+    Deflate64,
+    Bzip2,
+    Implode(ImplodedShape),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decoding {
+    Going,
+    Ended,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Filled {
+    pub written: usize,
+    pub decoding: Decoding,
+}
+
+pub enum Decoded {
     Failed,
     Held(Vec<u8>),
     Measured(u64),
 }
 
-pub fn inflate(
+pub fn decode(
+    method: Method,
     compressed: &Object<'_>,
     largest_file: Option<u64>,
     most_held: u64,
-) -> Result<Inflation, InputError> {
+) -> Result<Decoded, InputError> {
     let whole_buffers_allowed = largest_file.map(|largest| {
         largest
             .checked_div(OUTPUT_BUFFER_BYTES)
@@ -30,7 +55,7 @@ pub fn inflate(
     let decoded_at_most = whole_buffers_allowed.map_or(u64::MAX, |allowed| {
         allowed.saturating_add(OUTPUT_BUFFER_BYTES)
     });
-    let mut stream = Stream::new(compressed.clone(), decoded_at_most);
+    let mut stream = Stream::new(method, compressed.clone(), decoded_at_most);
     let mut held = Some(Vec::new());
     let mut window = vec![0u8; DECODED_WINDOW_BYTES];
     loop {
@@ -47,7 +72,7 @@ pub fn inflate(
         }
     }
     if stream.failed {
-        return Ok(Inflation::Failed);
+        return Ok(Decoded::Failed);
     }
     let length = match (largest_file, whole_buffers_allowed) {
         (Some(largest), Some(allowed)) if stream.produced > largest => allowed,
@@ -56,22 +81,24 @@ pub fn inflate(
     Ok(match held {
         Some(mut bytes) => {
             bytes.truncate(usize::try_from(length).unwrap_or(usize::MAX));
-            Inflation::Held(bytes)
+            Decoded::Held(bytes)
         }
-        None => Inflation::Measured(length),
+        None => Decoded::Measured(length),
     })
 }
 
-pub struct Inflated<'o> {
+pub struct Regenerated<'o> {
+    method: Method,
     compressed: Object<'o>,
     length: u64,
     reading: RefCell<Reading<'o>>,
 }
 
-impl<'o> Inflated<'o> {
-    pub fn new(compressed: Object<'o>, length: u64) -> Self {
-        let reading = RefCell::new(Reading::from_the_start(&compressed, length));
+impl<'o> Regenerated<'o> {
+    pub fn new(method: Method, compressed: Object<'o>, length: u64) -> Self {
+        let reading = RefCell::new(Reading::from_the_start(method, &compressed, length));
         Self {
+            method,
             compressed,
             length,
             reading,
@@ -79,7 +106,7 @@ impl<'o> Inflated<'o> {
     }
 }
 
-impl ObjectBytes for Inflated<'_> {
+impl ObjectBytes for Regenerated<'_> {
     fn length(&self) -> u64 {
         self.length
     }
@@ -98,7 +125,7 @@ impl ObjectBytes for Inflated<'_> {
         }
         let mut reading = self.reading.borrow_mut();
         if offset < reading.window_start {
-            *reading = Reading::from_the_start(&self.compressed, self.length);
+            *reading = Reading::from_the_start(self.method, &self.compressed, self.length);
         }
         let mut filled = 0usize;
         while let Some(rest) = into.get_mut(filled..).filter(|rest| !rest.is_empty()) {
@@ -125,9 +152,9 @@ struct Reading<'o> {
 }
 
 impl<'o> Reading<'o> {
-    fn from_the_start(compressed: &Object<'o>, length: u64) -> Self {
+    fn from_the_start(method: Method, compressed: &Object<'o>, length: u64) -> Self {
         Self {
-            stream: Stream::new(compressed.clone(), length),
+            stream: Stream::new(method, compressed.clone(), length),
             window: vec![0u8; DECODED_WINDOW_BYTES],
             window_start: 0,
             window_length: 0,
@@ -162,25 +189,30 @@ impl<'o> Reading<'o> {
 }
 
 struct Stream<'o> {
-    compressed: Object<'o>,
-    decoder: Decompress,
-    input: Vec<u8>,
-    input_used: usize,
-    input_read: u64,
+    decoder: Decoder<'o>,
     produced: u64,
     most_produced: u64,
     ended: bool,
     failed: bool,
 }
 
+enum Decoder<'o> {
+    Deflate(Deflate<'o>),
+    Deflate64(Box<Deflate64<'o>>),
+    Bzip2(Box<Bzip2<'o>>),
+    Implode(Box<Imploded<'o>>),
+}
+
 impl<'o> Stream<'o> {
-    fn new(compressed: Object<'o>, most_produced: u64) -> Self {
+    fn new(method: Method, compressed: Object<'o>, most_produced: u64) -> Self {
+        let decoder = match method {
+            Method::Deflate => Decoder::Deflate(Deflate::new(compressed)),
+            Method::Deflate64 => Decoder::Deflate64(Box::new(Deflate64::new(compressed))),
+            Method::Bzip2 => Decoder::Bzip2(Box::new(Bzip2::new(compressed))),
+            Method::Implode(shape) => Decoder::Implode(Box::new(Imploded::new(compressed, shape))),
+        };
         Self {
-            compressed,
-            decoder: Decompress::new(false),
-            input: Vec::new(),
-            input_used: 0,
-            input_read: 0,
+            decoder,
             produced: 0,
             most_produced,
             ended: false,
@@ -196,33 +228,21 @@ impl<'o> Stream<'o> {
             return Ok(0);
         };
         let mut written = 0usize;
-        while !self.ended && written < into.len() {
-            if self.input_used >= self.input.len() && !self.refill()? {
-                self.ended = true;
-                break;
-            }
-            let (Some(input), Some(output)) =
-                (self.input.get(self.input_used..), into.get_mut(written..))
-            else {
-                self.ended = true;
+        while !self.ended {
+            let Some(rest) = into.get_mut(written..).filter(|rest| !rest.is_empty()) else {
                 break;
             };
-            let in_before = self.decoder.total_in();
-            let out_before = self.decoder.total_out();
-            let outcome = self
-                .decoder
-                .decompress(input, output, FlushDecompress::None);
-            let consumed = self.decoder.total_in().saturating_sub(in_before);
-            let made = self.decoder.total_out().saturating_sub(out_before);
-            self.input_used = self
-                .input_used
-                .saturating_add(usize::try_from(consumed).unwrap_or(usize::MAX));
-            written = written.saturating_add(usize::try_from(made).unwrap_or(usize::MAX));
-            match outcome {
-                Ok(flate2::Status::Ok) => {}
-                Ok(flate2::Status::BufError) if consumed > 0 || made > 0 => {}
-                Ok(flate2::Status::StreamEnd | flate2::Status::BufError) => self.ended = true,
-                Err(_) => {
+            let filled = match &mut self.decoder {
+                Decoder::Deflate(decoder) => decoder.fill(rest)?,
+                Decoder::Deflate64(decoder) => decoder.fill(rest)?,
+                Decoder::Bzip2(decoder) => decoder.fill(rest)?,
+                Decoder::Implode(decoder) => decoder.fill(rest)?,
+            };
+            written = written.saturating_add(filled.written);
+            match filled.decoding {
+                Decoding::Going => {}
+                Decoding::Ended => self.ended = true,
+                Decoding::Failed => {
                     self.ended = true;
                     self.failed = true;
                 }
@@ -233,21 +253,43 @@ impl<'o> Stream<'o> {
             .saturating_add(u64::try_from(written).unwrap_or(u64::MAX));
         Ok(written)
     }
+}
 
-    fn refill(&mut self) -> Result<bool, InputError> {
-        let left = self.compressed.length().saturating_sub(self.input_read);
-        if left == 0 {
-            return Ok(false);
+struct Deflate<'o> {
+    input: CompressedBytes<'o>,
+    decoder: Decompress,
+}
+
+impl<'o> Deflate<'o> {
+    fn new(compressed: Object<'o>) -> Self {
+        Self {
+            input: CompressedBytes::new(compressed),
+            decoder: Decompress::new(false),
         }
-        let take = usize::try_from(left)
-            .unwrap_or(usize::MAX)
-            .min(COMPRESSED_READ_BYTES);
-        self.input.resize(take, 0);
-        self.compressed.read_at(self.input_read, &mut self.input)?;
-        self.input_read = self
-            .input_read
-            .saturating_add(u64::try_from(take).unwrap_or(u64::MAX));
-        self.input_used = 0;
-        Ok(true)
+    }
+
+    fn fill(&mut self, into: &mut [u8]) -> Result<Filled, InputError> {
+        let input = self.input.unused()?;
+        if input.is_empty() {
+            return Ok(Filled {
+                written: 0,
+                decoding: Decoding::Ended,
+            });
+        }
+        let in_before = self.decoder.total_in();
+        let out_before = self.decoder.total_out();
+        let outcome = self.decoder.decompress(input, into, FlushDecompress::None);
+        let consumed = self.decoder.total_in().saturating_sub(in_before);
+        let made = self.decoder.total_out().saturating_sub(out_before);
+        self.input
+            .consume(usize::try_from(consumed).unwrap_or(usize::MAX));
+        let written = usize::try_from(made).unwrap_or(usize::MAX);
+        let decoding = match outcome {
+            Ok(flate2::Status::Ok) => Decoding::Going,
+            Ok(flate2::Status::BufError) if consumed > 0 || made > 0 => Decoding::Going,
+            Ok(flate2::Status::StreamEnd | flate2::Status::BufError) => Decoding::Ended,
+            Err(_) => Decoding::Failed,
+        };
+        Ok(Filled { written, decoding })
     }
 }

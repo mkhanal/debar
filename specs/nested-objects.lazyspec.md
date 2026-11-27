@@ -10,7 +10,8 @@ Which objects a scan finds inside a file, or makes of it again as another kind, 
 
 ## An Archive Found Inside Another File Is Scanned As An Object Of Its Own
 
-- A self-extracting archive the file-type database finds after the start of a file is an object from there to the file's end, one level deeper, typed as the archive.
+- A self-extracting archive the file-type database finds after the start of a file is an object one level deeper, typed as the archive, from there to the file's end.
+- A ZIP found there is instead an object of the one local header and data starting there.
 - Its own detections are reported on it.
 - An archive found at the very start, or in a file of its own archive kind, is not a separate object.
 - An object of five bytes or less is never made.

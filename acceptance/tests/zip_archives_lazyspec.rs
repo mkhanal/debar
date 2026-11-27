@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use acceptance::coded_streams::{ImplodeShape, deflate64_fixed, imploded};
 use acceptance::zip_archive::{Member, zip_archive, zip_archive_listing};
 use acceptance::{
     CompiledImage, comparison_report_objects, compile, detections, lowercase_hex,
@@ -26,6 +27,11 @@ Test.Member:0:*:4d454d424552424f4459
 Test.Inner:0:*:494e4e4552424f445954455854
 ";
 const OVERLAPPING_FILES: &str = "Heuristics.Zip.OverlappingFiles";
+const DEFLATED_64: u16 = 9;
+const BZIP2: u16 = 12;
+const IMPLODED: u16 = 6;
+const BZIP2_TEXT: &[u8] = b"plain text of a bzip2 member .... MEMBERBODY ....\n";
+const BZIP2_STREAM: &str = "425a6839314159265359e177128c0000175f80401040011000160290203327d45020002229ed243d4c986a19a21400001932108e5816a2bdd4b6893d59855b80192f807f4dedaa3ae4cf29a808fe2ee48a70a121c2ee2518";
 
 fn databases(test: &str, container_signatures: &str) -> (PathBuf, CompiledImage) {
     let directory = scratch_directory(test).unwrap();
@@ -130,6 +136,113 @@ fn a_zips_members_are_scanned_as_objects_of_their_own() {
 }
 
 #[test]
+fn a_zip_member_compressed_with_deflate64_bzip2_or_implode_is_decoded_and_scanned() {
+    const REQUIREMENT: &str =
+        "A ZIP Member Compressed With Deflate64, Bzip2 Or Implode Is Decoded And Scanned";
+    let (directory, compiled) = databases("coded-members", "");
+    let far: Vec<u8> = (0..40_000u32)
+        .map(|at| u8::try_from((at * 7919 + at / 8 * 31) % 251).unwrap())
+        .collect();
+    let deflated_64 = [far.as_slice(), MEMBER_BODY, &far[..33_000], &[0u8; 300]].concat();
+    let implode_text = text_holding(MEMBER_BODY, "an imploded member, imploded, imploded");
+    let mut members = vec![
+        Member::coded(
+            "far.bin",
+            DEFLATED_64,
+            0,
+            &deflate64_fixed(&deflated_64),
+            &deflated_64,
+        ),
+        Member::coded("b.txt", BZIP2, 0, &hex_bytes(BZIP2_STREAM), BZIP2_TEXT),
+    ];
+    for (large_window, literal_code) in [(true, true), (false, false), (true, false), (false, true)]
+    {
+        let shape = ImplodeShape {
+            large_window,
+            literal_code,
+        };
+        members.push(Member::coded(
+            "i.txt",
+            IMPLODED,
+            shape.flags(),
+            &imploded(&implode_text, shape),
+            &implode_text,
+        ));
+    }
+    let archive = zip_archive(&members);
+
+    let found = objects(&directory, &compiled.image, &archive, &[]);
+
+    let scanned = children_of(&found, &found[0]["id"]);
+    let expected: Vec<String> = members
+        .iter()
+        .map(|member| sha256(&member.contents))
+        .collect();
+    assert_eq!(hashes(&scanned), expected, "{REQUIREMENT}");
+    for member in &scanned {
+        assert_eq!(member["depth"], 1, "{REQUIREMENT}");
+        assert_eq!(
+            detections(member),
+            ["Test.Member.UNOFFICIAL"],
+            "{REQUIREMENT}"
+        );
+    }
+
+    let literals_only = ImplodeShape {
+        large_window: false,
+        literal_code: false,
+    };
+    let deflated_64_stream = deflate64_fixed(&implode_text);
+    let imploded_stream = imploded(&implode_text, literals_only);
+    for (code, flags, stream, case) in [
+        (DEFLATED_64, 0, &deflated_64_stream, "deflate64"),
+        (IMPLODED, literals_only.flags(), &imploded_stream, "implode"),
+    ] {
+        let cut = &stream[..stream.len() / 2];
+        let archive = zip_archive(&[Member::coded("cut.txt", code, flags, cut, &implode_text)]);
+        let found = objects(&directory, &compiled.image, &archive, &[]);
+        let scanned = children_of(&found, &found[0]["id"]);
+        assert_eq!(scanned.len(), 1, "{REQUIREMENT}: {case} cut short");
+        let length = usize::try_from(scanned[0]["size"].as_u64().unwrap()).unwrap();
+        assert!(
+            length > 5 && length < implode_text.len(),
+            "{REQUIREMENT}: {case} cut short"
+        );
+        assert_eq!(
+            scanned[0]["sha256"],
+            sha256(&implode_text[..length]),
+            "{REQUIREMENT}: {case} cut short"
+        );
+    }
+
+    let bzip2_stream = hex_bytes(BZIP2_STREAM);
+    let mut block_type_3 = deflated_64_stream.clone();
+    block_type_3[0] |= 0x06;
+    let mut wrong_check_value = bzip2_stream.clone();
+    wrong_check_value[10] ^= 0xff;
+    for (code, stream, case) in [
+        (
+            BZIP2,
+            &bzip2_stream[..bzip2_stream.len() / 2],
+            "bzip2 cut in its only block",
+        ),
+        (DEFLATED_64, block_type_3.as_slice(), "deflate64 corrupt"),
+        (
+            BZIP2,
+            wrong_check_value.as_slice(),
+            "bzip2 check value wrong",
+        ),
+    ] {
+        let archive = zip_archive(&[Member::coded("bad.txt", code, 0, stream, BZIP2_TEXT)]);
+        let found = objects(&directory, &compiled.image, &archive, &[]);
+        assert!(
+            children_of(&found, &found[0]["id"]).is_empty(),
+            "{REQUIREMENT}: {case}"
+        );
+    }
+}
+
+#[test]
 fn an_office_open_xml_document_is_typed_as_its_kind_and_its_members_are_scanned() {
     const REQUIREMENT: &str =
         "An Office Open XML Document Is Typed As Its Kind And Its Members Are Scanned";
@@ -217,6 +330,64 @@ Test.DocumentAsZip:CL_TYPE_ZIP:*:^word/:*:*:*:*:*:
 }
 
 #[test]
+fn a_zip_entry_is_tested_against_container_signatures_wherever_its_header_is_read() {
+    const REQUIREMENT: &str =
+        "A ZIP Entry Is Tested Against Container Signatures Wherever Its Header Is Read";
+    let signatures = "\
+Test.Refused:CL_TYPE_ZIP:*:^hidden\\.exe$:11:22:0:2:*:
+Test.Host:CL_TYPE_BINARY_DATA:*:^empty\\.txt$:0:0:0:0:*:
+Test.Typing:*:*:^customXml/item\\.xml$:*:*:*:3:*:
+";
+    let (directory, compiled) = databases("entries-wherever-read", signatures);
+
+    let mut refused =
+        Member::stored("a.txt", b"the member before a refused header\n").local_record();
+    refused.extend_from_slice(b"PK\x03\x04");
+    for value in [20u16, 0x2000, 0, 0, 0] {
+        refused.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [0u32, 11, 22] {
+        refused.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [u16::try_from("hidden.exe".len()).unwrap(), 0] {
+        refused.extend_from_slice(&value.to_le_bytes());
+    }
+    refused.extend_from_slice(b"hidden.exe and some bytes after it");
+    let found = objects(&directory, &compiled.image, &refused, &[]);
+    assert_eq!(
+        distinct(&found[0]),
+        ["Test.Refused.UNOFFICIAL"],
+        "{REQUIREMENT}: refused"
+    );
+
+    let host = [
+        b"\x00\x00\x00\x00binary data before an archive ".as_slice(),
+        &zip_archive(&[Member::stored("empty.txt", b"")]),
+    ]
+    .concat();
+    let found = objects(&directory, &compiled.image, &host, &[]);
+    assert_eq!(found.len(), 1, "{REQUIREMENT}: the host");
+    assert_eq!(
+        distinct(&found[0]),
+        ["Test.Host.UNOFFICIAL"],
+        "{REQUIREMENT}: the host"
+    );
+
+    let document = zip_archive(&[
+        Member::stored("[Content_Types].xml", b"<Types/>"),
+        Member::stored("docProps/core.xml", b"<core/>"),
+        Member::stored("customXml/item.xml", b"<item/>"),
+        Member::stored("word/document.xml", b"<document/>"),
+    ]);
+    let found = objects(&directory, &compiled.image, &document, &["--raw-only"]);
+    assert_eq!(
+        distinct(&found[0]),
+        ["Test.Typing.UNOFFICIAL"],
+        "{REQUIREMENT}: typing"
+    );
+}
+
+#[test]
 fn a_zip_member_over_the_file_size_limit_is_cut_to_it() {
     const REQUIREMENT: &str = "A ZIP Member Over The File-Size Limit Is Cut To It";
     let (directory, compiled) = databases("member-cut", "");
@@ -242,6 +413,32 @@ fn a_zip_member_over_the_file_size_limit_is_cut_to_it() {
         members[0]["sha256"],
         sha256(&lines[..16_384]),
         "{REQUIREMENT}"
+    );
+
+    let shape = ImplodeShape {
+        large_window: true,
+        literal_code: true,
+    };
+    let imploded_archive = zip_archive(&[Member::coded(
+        "long.txt",
+        IMPLODED,
+        shape.flags(),
+        &imploded(&lines, shape),
+        &lines,
+    )]);
+    let found = objects(
+        &directory,
+        &compiled.image,
+        &imploded_archive,
+        &["--max-file-size", "20000"],
+    );
+    let members = children_of(&found, &found[0]["id"]);
+    assert_eq!(members.len(), 1, "{REQUIREMENT}: implode");
+    assert_eq!(members[0]["size"], 16_384, "{REQUIREMENT}: implode");
+    assert_eq!(
+        members[0]["sha256"],
+        sha256(&lines[..16_384]),
+        "{REQUIREMENT}: implode"
     );
 }
 
@@ -396,6 +593,13 @@ fn an_encrypted_zip_member_is_scanned_as_the_bytes_it_stores() {
         ["Test.Member.UNOFFICIAL"],
         "{REQUIREMENT}"
     );
+}
+
+fn hex_bytes(hex: &str) -> Vec<u8> {
+    hex.as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect()
 }
 
 fn chain_of_overlapping_records(records: usize) -> Vec<u8> {

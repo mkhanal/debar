@@ -1,4 +1,7 @@
-use debar_formats::{BUILT_IN_MODULES, FormatModule, HeaderCheck, ModuleError, Object, Stage};
+use debar_formats::{
+    AfterTheEntry, BUILT_IN_MODULES, ContainerEntry, FormatModule, HeaderCheck, ModuleError,
+    Object, Stage,
+};
 use debar_image::ObjectKind;
 
 #[derive(Clone, Copy)]
@@ -34,9 +37,10 @@ impl<'r> FormatModules<'r> {
         self,
         kind: ObjectKind,
         from: &Object<'_>,
+        entries: &mut dyn FnMut(ContainerEntry) -> AfterTheEntry,
     ) -> Result<HeaderCheck, ModuleError> {
         for module in self.claiming(kind) {
-            let check = module.header_check(from)?;
+            let check = module.header_check(from, entries)?;
             if check != HeaderCheck::NotNeeded {
                 return Ok(check);
             }
@@ -48,9 +52,10 @@ impl<'r> FormatModules<'r> {
         self,
         typed_as: ObjectKind,
         object: &Object<'_>,
+        entries: &mut dyn FnMut(ContainerEntry) -> AfterTheEntry,
     ) -> Result<Option<ObjectKind>, ModuleError> {
         for module in self.claiming(typed_as) {
-            if let Some(refined) = module.refined_kind(object, typed_as)? {
+            if let Some(refined) = module.refined_kind(object, typed_as, entries)? {
                 return Ok(Some(refined));
             }
         }
