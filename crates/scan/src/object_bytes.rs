@@ -19,7 +19,12 @@ pub(crate) fn read_in_chunks(
     mut use_chunk: impl FnMut(&[u8]) -> ChunkUse,
 ) -> Result<ReadThrough, InputError> {
     let length = bytes.length();
-    let mut chunk = vec![0u8; CHUNK_LENGTH];
+    let mut chunk = vec![
+        0u8;
+        usize::try_from(length)
+            .unwrap_or(CHUNK_LENGTH)
+            .min(CHUNK_LENGTH)
+    ];
     let mut offset = 0u64;
     while offset < length {
         let wanted = length

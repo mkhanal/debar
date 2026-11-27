@@ -486,6 +486,21 @@ impl ProgramHeader {
     }
 
     #[must_use]
+    pub fn predecessor_found_on_its_own(&self) -> bool {
+        self.context_flags.get() & PREDECESSOR_FOUND_ON_ITS_OWN != 0
+    }
+
+    #[must_use]
+    pub fn successor_found_on_its_own(&self) -> bool {
+        self.context_flags.get() & SUCCESSOR_FOUND_ON_ITS_OWN != 0
+    }
+
+    #[must_use]
+    pub fn successor_gap_unbounded(&self) -> bool {
+        self.context_flags.get() & SUCCESSOR_GAP_UNBOUNDED != 0
+    }
+
+    #[must_use]
     pub fn anchor(&self) -> ProgramAnchor {
         let short = <[u8; SHORT_ANCHOR_LENGTH]>::try_from(
             self.anchor.get(..SHORT_ANCHOR_LENGTH).unwrap_or_default(),
@@ -514,6 +529,9 @@ const HAS_BEFORE: u32 = 1;
 const HAS_AFTER: u32 = 2;
 const HAS_GAP_MOST: u32 = 4;
 const ARMED_BY_PREDECESSOR: u32 = 8;
+const PREDECESSOR_FOUND_ON_ITS_OWN: u32 = 16;
+const SUCCESSOR_GAP_UNBOUNDED: u32 = 32;
+const SUCCESSOR_FOUND_ON_ITS_OWN: u32 = 64;
 const CASE_EXACT: u8 = 0;
 const CASE_FOLDED: u8 = 1;
 
@@ -554,12 +572,24 @@ pub struct ProgramPlace {
     pub signature: u32,
     pub segment: u32,
     pub segment_count: u32,
+    pub predecessor_found_on_its_own: bool,
+    pub successor_gap_unbounded: bool,
+    pub successor_found_on_its_own: bool,
 }
 
 pub fn encode(segment: &Segment, place: &ProgramPlace) -> Result<Vec<u8>, PatternNotCompiled> {
     let mut context_flags = 0;
     if segment.is_armed_by_predecessor(place.segment) {
         context_flags |= ARMED_BY_PREDECESSOR;
+    }
+    if place.predecessor_found_on_its_own {
+        context_flags |= PREDECESSOR_FOUND_ON_ITS_OWN;
+    }
+    if place.successor_gap_unbounded {
+        context_flags |= SUCCESSOR_GAP_UNBOUNDED;
+    }
+    if place.successor_found_on_its_own {
+        context_flags |= SUCCESSOR_FOUND_ON_ITS_OWN;
     }
     let mut anchor = [0u8; LONG_ANCHOR_LENGTH];
     let mut anchor_neighbours = AnchorNeighbours::default();

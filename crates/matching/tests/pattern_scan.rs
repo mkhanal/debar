@@ -12,8 +12,8 @@ use std::collections::BTreeSet;
 
 use debar_image::{
     ByteSet, Category, ContextTest, Image, ImageBuilder, Indicator, KindDescription, MaskedByte,
-    ObjectKind, OwnBytes, Pattern, PatternElement, PatternOutcome, PatternSignature, Placement,
-    RecognitionRank, SignatureGroup, TypeFinding, TypingRules,
+    ObjectKind, OwnBytes, PartMemory, Pattern, PatternElement, PatternOutcome, PatternSignature,
+    Placement, RecognitionRank, SignatureGroup, TypeFinding, TypingRules,
 };
 use debar_matching::{
     GroupSelection, ObjectContext, PatternRequest, PatternScan, PatternSettings, ScanProgress,
@@ -174,7 +174,12 @@ impl Model {
     }
 
     fn image(&self) -> Vec<u8> {
+        self.image_remembering(PartMemory::EarliestEnd)
+    }
+
+    fn image_remembering(&self, memory: PartMemory) -> Vec<u8> {
         let mut builder = ImageBuilder::new();
+        builder.set_part_memory(GENERIC, memory);
         for ((name, pattern), placement) in
             self.names.iter().zip(&self.patterns).zip(&self.placements)
         {
@@ -725,5 +730,109 @@ fn signatures_placed_at_a_fixed_offset_are_found_as_a_naive_matcher_finds_them_w
                 );
             }
         }
+    }
+}
+
+fn exact_bytes(bytes: &[u8]) -> impl Iterator<Item = PatternElement> + '_ {
+    bytes
+        .iter()
+        .map(|byte| PatternElement::Byte(MaskedByte::exactly(*byte)))
+}
+
+fn two_parts(first: &[u8], minimum: u32, maximum: Option<u32>, second: &[u8]) -> Model {
+    let mut elements: Vec<PatternElement> = exact_bytes(first).collect();
+    elements.push(PatternElement::PartBreak { minimum, maximum });
+    elements.extend(exact_bytes(second));
+    Model {
+        names: vec!["Test.Parts".to_owned()],
+        patterns: vec![Pattern {
+            before: None,
+            elements,
+            after: None,
+        }],
+        placements: vec![Placement::Anywhere],
+    }
+}
+
+fn object_with(placed: &[(usize, &[u8])], length: usize) -> Vec<u8> {
+    let mut object = vec![b'.'; length];
+    for (at, bytes) in placed {
+        object[*at..*at + bytes.len()].copy_from_slice(bytes);
+    }
+    object
+}
+
+#[test]
+fn a_first_part_end_pushed_out_of_the_latest_ends_no_longer_admits_the_next_part() {
+    let model = two_parts(b"abcd", 150, Some(200), b"efgh");
+    let object = object_with(
+        &[
+            (0, b"abcd"),
+            (100, b"abcd"),
+            (104, b"abcd"),
+            (250, b"abcd"),
+            (260, b"abcd"),
+            (280, b"efgh"),
+        ],
+        6000,
+    );
+    let detections = |latest: u32| {
+        let bytes = model.image_remembering(PartMemory::FirstAndLatestEnds { latest });
+        let image = Image::open(&bytes).unwrap();
+        [1, 7, 64, 4096]
+            .iter()
+            .map(|chunk| engine_detections(&image, &object, &[*chunk], true))
+            .collect::<BTreeSet<Vec<String>>>()
+    };
+    assert_eq!(detections(2), BTreeSet::from([Vec::new()]));
+    assert_eq!(
+        detections(8),
+        BTreeSet::from([vec!["Test.Parts".to_owned()]])
+    );
+}
+
+#[test]
+fn a_first_part_seen_long_before_its_next_part_is_remembered_however_often_it_repeats() {
+    let model = two_parts(b"abcd", 0, None, b"efgh");
+    let bytes = model.image_remembering(PartMemory::FirstAndLatestEnds { latest: 2 });
+    let image = Image::open(&bytes).unwrap();
+    let mut placed: Vec<(usize, &[u8])> =
+        (0..200).map(|index| (index * 50, &b"abcd"[..])).collect();
+    placed.push((20_000, b"efgh"));
+    let object = object_with(&placed, 30_000);
+    for chunk in [1, 13, 4096] {
+        assert_eq!(
+            engine_detections(&image, &object, &[chunk], true),
+            ["Test.Parts"]
+        );
+    }
+    let later_first_part = object_with(&[(20_000, b"efgh"), (25_000, b"abcd")], 30_000);
+    assert_eq!(
+        engine_detections(&image, &later_first_part, &[4096], true),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_next_part_found_only_within_its_gap_of_a_repeated_first_part_is_matched_at_every_chunk_size() {
+    let model = two_parts(b"<scr", 0, Some(40), b"evil");
+    let bytes = model.image_remembering(PartMemory::FirstAndLatestEnds { latest: 8 });
+    let image = Image::open(&bytes).unwrap();
+    let repeated: Vec<(usize, &[u8])> = (0..400).map(|index| (index * 100, &b"<scr"[..])).collect();
+    let mut near = repeated.clone();
+    near.push((30_030, b"evil"));
+    let mut far = repeated;
+    far.push((30_060, b"evil"));
+    let near = object_with(&near, 41_000);
+    let far = object_with(&far, 41_000);
+    for chunk in [1, 9, 4096, 70_000] {
+        assert_eq!(
+            engine_detections(&image, &near, &[chunk], true),
+            ["Test.Parts"]
+        );
+        assert_eq!(
+            engine_detections(&image, &far, &[chunk], true),
+            Vec::<String>::new()
+        );
     }
 }

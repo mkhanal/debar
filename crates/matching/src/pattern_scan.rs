@@ -4,9 +4,9 @@ use std::fmt;
 use debar_image::{
     AnchorCase, AnchorTables, AnchoredProgram, ArmedAnchor, Category, Displacement, GroupMalformed,
     Image, ImageError, Indicator, KindsMalformed, LONG_ANCHOR_LENGTH, LogicalGroup,
-    LogicalSignatureId, LongAnchorFilter, LongAnchorTable, MatchingPass, ObjectKind, PatternGroup,
-    PatternSignatureId, PatternSignatureRecord, PlugInSubsignatures, ProgramHeader, ProgramId,
-    ProgramMalformed, ProgramView, RecordedOutcome, ReportWindows, SHORT_ANCHOR_LENGTH,
+    LogicalSignatureId, LongAnchorFilter, LongAnchorTable, MatchingPass, ObjectKind, PartMemory,
+    PatternGroup, PatternSignatureId, PatternSignatureRecord, PlugInSubsignatures, ProgramHeader,
+    ProgramId, ProgramMalformed, ProgramView, RecordedOutcome, ReportWindows, SHORT_ANCHOR_LENGTH,
     SelectionFilter, ShortAnchorFilter, SignatureGroup, ascii_lowercase,
 };
 
@@ -26,6 +26,8 @@ use crate::work_meter::WorkMeter;
 const POSITIONS_PER_PASS: u64 = 4096;
 const CHUNK_LENGTH: usize = 128 * 1024;
 const ARMED_FILTER_WORDS: usize = 1 << 10;
+const LONGEST_DEFERRED_REACH: u64 = 1 << 16;
+const WORDS_PER_INDEX_BLOCK: usize = 16;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PatternSettings<'s> {
@@ -738,43 +740,66 @@ fn ascii_lowercase_word(word: u32) -> u32 {
     word | (capitals >> HIGH_BIT_TO_CASE_BIT)
 }
 
-struct SignatureBits {
-    words: Vec<u64>,
-    signatures: usize,
+struct IndexBits {
+    blocks: Vec<Option<Box<IndexBlock>>>,
+    indices: usize,
 }
 
-impl SignatureBits {
-    fn sized_for(signatures: usize) -> Self {
+type IndexBlock = [u64; WORDS_PER_INDEX_BLOCK];
+
+impl IndexBits {
+    fn sized_for(indices: usize) -> Self {
         Self {
-            words: Vec::new(),
-            signatures,
+            blocks: Vec::new(),
+            indices,
         }
     }
 
-    fn contains(&self, signature: u32) -> bool {
-        usize::try_from(signature / u64::BITS)
-            .ok()
-            .and_then(|word| self.words.get(word))
-            .is_some_and(|word| word & (1u64 << (signature % u64::BITS)) != 0)
+    fn contains(&self, index: u32) -> bool {
+        let (block, word, bit) = index_bit(index);
+        self.blocks
+            .get(block)
+            .and_then(Option::as_deref)
+            .and_then(|words| words.get(word))
+            .is_some_and(|word| word & bit != 0)
     }
 
-    fn insert(&mut self, signature: u32) {
-        if self.words.is_empty() {
-            self.words.resize(self.signatures.div_ceil(64), 0);
+    fn insert(&mut self, index: u32) {
+        if self.blocks.is_empty() {
+            let indices_per_block = WORDS_PER_INDEX_BLOCK.saturating_mul(64);
+            self.blocks
+                .resize_with(self.indices.div_ceil(indices_per_block), || None);
         }
-        if let Some(word) = usize::try_from(signature / u64::BITS)
-            .ok()
-            .and_then(|word| self.words.get_mut(word))
+        let (block, word, bit) = index_bit(index);
+        if let Some(slot) = self.blocks.get_mut(block)
+            && let Some(word) = slot
+                .get_or_insert_with(|| Box::new([0; WORDS_PER_INDEX_BLOCK]))
+                .get_mut(word)
         {
-            *word |= 1u64 << (signature % u64::BITS);
+            *word |= bit;
         }
+    }
+
+    fn clear(&mut self) {
+        self.blocks.clear();
     }
 
     fn bytes(&self) -> usize {
-        self.words
+        let held_blocks = self.blocks.iter().filter(|block| block.is_some()).count();
+        self.blocks
             .capacity()
-            .saturating_mul(std::mem::size_of::<u64>())
+            .saturating_mul(std::mem::size_of::<Option<Box<IndexBlock>>>())
+            .saturating_add(held_blocks.saturating_mul(std::mem::size_of::<IndexBlock>()))
     }
+}
+
+fn index_bit(index: u32) -> (usize, usize, u64) {
+    let word = usize::try_from(index / u64::BITS).unwrap_or(usize::MAX);
+    (
+        word / WORDS_PER_INDEX_BLOCK,
+        word % WORDS_PER_INDEX_BLOCK,
+        1u64 << (index % u64::BITS),
+    )
 }
 
 struct SelectedGroup<'m> {
@@ -786,7 +811,33 @@ struct SelectedGroup<'m> {
     tables: AnchorTables<'m>,
     logical: Option<LogicalState<'m>>,
     chains: BTreeMap<u32, Vec<RememberedEnds>>,
-    detected: SignatureBits,
+    deferred: BTreeMap<u32, VecDeque<DeferredPart>>,
+    detected: IndexBits,
+    programs_with_candidates: IndexBits,
+}
+
+impl SelectedGroup<'_> {
+    fn note_candidate(&mut self, program: &ProgramHeader, id: ProgramId) {
+        if program.successor_found_on_its_own() {
+            self.programs_with_candidates.insert(id.0);
+        }
+    }
+
+    fn forget_chain(&mut self, signature: u32) {
+        self.chains.remove(&signature);
+        self.deferred.remove(&signature);
+    }
+}
+
+struct DeferredPart {
+    candidate: Candidate,
+    useful_until: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Deferral {
+    Allowed,
+    Refused,
 }
 
 pub struct PatternScan<'i, 'm, 'r> {
@@ -893,7 +944,9 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
                 tables: view.anchor_tables(MatchingPass::Main),
                 logical: logical.map(|logical| LogicalState::new(logical, group)),
                 chains: BTreeMap::new(),
-                detected: SignatureBits::sized_for(view.signature_count()),
+                deferred: BTreeMap::new(),
+                detected: IndexBits::sized_for(view.signature_count()),
+                programs_with_candidates: IndexBits::sized_for(view.program_count()),
             });
         }
         let matched_ids: Vec<SignatureGroup> = groups.iter().map(|group| group.id).collect();
@@ -1011,6 +1064,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
                     .as_ref()
                     .map_or(0, LogicalState::state_bytes)
                     .saturating_add(group.detected.bytes())
+                    .saturating_add(group.programs_with_candidates.bytes())
             })
             .fold(
                 self.second_pass_search
@@ -1137,6 +1191,8 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         for group in &mut self.groups {
             group.tables = group.view.anchor_tables(MatchingPass::Second);
             group.chains.clear();
+            group.deferred.clear();
+            group.programs_with_candidates.clear();
         }
         self.retained.clear();
         self.first_retained = 0;
@@ -1304,6 +1360,12 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
                 }
             }
         }
+        for candidate in &placed {
+            if let Some(group) = self.groups.get_mut(candidate.group) {
+                let program = group.view.program_header(candidate.program)?;
+                group.note_candidate(program, candidate.program);
+            }
+        }
         placed.sort_by_key(|candidate| (candidate.first_start, candidate.group));
         self.positional = placed.into();
         Ok(())
@@ -1356,12 +1418,16 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             self.admit_positional_up_to(position);
             let group = self
                 .groups
-                .get(group_index)
+                .get_mut(group_index)
                 .ok_or(GroupMalformed::UnknownProgram(hit.program))?;
             let program = group.view.program_header(hit.program)?;
+            if predecessor_never_a_candidate(group, program, hit.program) {
+                continue;
+            }
             let Some(last_start) = position.checked_sub(u64::from(hit.displacement.nearest)) else {
                 continue;
             };
+            group.note_candidate(program, hit.program);
             let first_start = position.saturating_sub(u64::from(hit.displacement.farthest));
             self.queue.push_back(Candidate {
                 group: group_index,
@@ -1408,11 +1474,15 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         part_program: ProgramId,
         part_end: u64,
     ) -> Result<(), PatternScanError> {
-        let Some(view) = self.groups.get(group).map(|group| group.view) else {
+        let next = ProgramId(part_program.0.saturating_add(1));
+        let Some(program) = self
+            .groups
+            .get(group)
+            .map(|group| group.view.program(next))
+            .transpose()?
+        else {
             return Ok(());
         };
-        let next = ProgramId(part_program.0.saturating_add(1));
-        let program = view.program(next)?;
         let Some(ArmedAnchor {
             bytes: anchor,
             case,
@@ -1641,17 +1711,27 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
     }
 
     fn verify(&mut self, candidate: &Candidate) -> Result<(), PatternScanError> {
+        self.verify_part(candidate, Deferral::Allowed)
+    }
+
+    fn verify_part(
+        &mut self,
+        candidate: &Candidate,
+        deferral: Deferral,
+    ) -> Result<(), PatternScanError> {
+        let Some(header) = self.header_after_waiting_first_parts(candidate)? else {
+            return Ok(());
+        };
         let Some(group) = self.groups.get(candidate.group) else {
             return Ok(());
         };
-        let view = group.view;
+        let view = &group.view;
         let position_in_selection = group.position;
         let bytes = RetainedBytes {
             bytes: &self.retained,
             first_position: self.first_retained,
             object_length: self.object_length,
         };
-        let header = view.program_header(candidate.program)?;
         if anchor_rules_out(header, candidate.first_start, candidate.last_start, &bytes) {
             return Ok(());
         }
@@ -1660,7 +1740,19 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             return Ok(());
         }
         let segment = header.segment.get();
-        if segment > 0 && !group.chains.contains_key(&signature) {
+        let chain = group.chains.get(&signature);
+        if segment > 0 && chain.is_none() {
+            return Ok(());
+        }
+        let own_ends =
+            chain.and_then(|ends| ends.get(usize::try_from(segment).unwrap_or(usize::MAX)));
+        if end_adds_nothing(header, own_ends, candidate.first_start) {
+            return Ok(());
+        }
+        if deferral == Deferral::Allowed
+            && let Some(useful_until) = deferrable_until(view, header, own_ends, candidate)?
+        {
+            self.defer(candidate, signature, useful_until);
             return Ok(());
         }
         let record = view.signature(PatternSignatureId(signature))?;
@@ -1694,18 +1786,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             return Ok(());
         };
         if segment.saturating_add(1) < record.segment_count {
-            let memory = view.part_memory();
-            let Some(group) = self.groups.get_mut(candidate.group) else {
-                return Ok(());
-            };
-            let ends = group.chains.entry(signature).or_default();
-            let index = usize::try_from(segment).unwrap_or(usize::MAX);
-            if index == ends.len() {
-                ends.push(RememberedEnds::new(memory));
-            }
-            if let Some(remembered) = ends.get_mut(index) {
-                remembered.remember(earliest_end);
-            }
+            self.remember_part_end(candidate.group, header, earliest_end);
             return self.arm_next_part(candidate.group, candidate.program, earliest_end);
         }
         if let RecordedOutcome::Subsignature { logical, index } = record.outcome {
@@ -1737,6 +1818,73 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         self.matched(candidate, signature, &record, order, earliest_end)
     }
 
+    fn header_after_waiting_first_parts(
+        &mut self,
+        candidate: &Candidate,
+    ) -> Result<Option<&'m ProgramHeader>, PatternScanError> {
+        let Some(header) = self
+            .groups
+            .get(candidate.group)
+            .map(|group| group.view.program_header(candidate.program))
+            .transpose()?
+        else {
+            return Ok(None);
+        };
+        if header.segment.get() == 1 {
+            self.verify_deferred(candidate.group, header.signature.get(), candidate.anchor)?;
+        }
+        Ok(Some(header))
+    }
+
+    fn defer(&mut self, candidate: &Candidate, signature: u32, useful_until: u64) {
+        if let Some(group) = self.groups.get_mut(candidate.group) {
+            group
+                .deferred
+                .entry(signature)
+                .or_default()
+                .push_back(DeferredPart {
+                    candidate: candidate.clone(),
+                    useful_until,
+                });
+        }
+    }
+
+    fn remember_part_end(&mut self, group: usize, program: &ProgramHeader, end: u64) {
+        let Some(group) = self.groups.get_mut(group) else {
+            return;
+        };
+        let memory = group.view.part_memory();
+        let ends = group.chains.entry(program.signature.get()).or_default();
+        let index = usize::try_from(program.segment.get()).unwrap_or(usize::MAX);
+        if index == ends.len() {
+            ends.push(RememberedEnds::new(memory));
+        }
+        if let Some(remembered) = ends.get_mut(index) {
+            remembered.remember(end);
+        }
+    }
+
+    fn verify_deferred(
+        &mut self,
+        group: usize,
+        signature: u32,
+        successor_anchor: u64,
+    ) -> Result<(), PatternScanError> {
+        let Some(waiting) = self
+            .groups
+            .get_mut(group)
+            .and_then(|group| group.deferred.remove(&signature))
+        else {
+            return Ok(());
+        };
+        for part in waiting {
+            if part.useful_until >= successor_anchor {
+                self.verify_part(&part.candidate, Deferral::Refused)?;
+            }
+        }
+        Ok(())
+    }
+
     fn count_subsignature(
         &mut self,
         group_index: usize,
@@ -1754,7 +1902,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         };
         if state.count(logical, index, matches, pass)?.saturated {
             group.detected.insert(signature);
-            group.chains.remove(&signature);
+            group.forget_chain(signature);
         }
         Ok(())
     }
@@ -1773,7 +1921,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             group.found_types |= type_found;
             if !found_at_every_offset {
                 group.detected.insert(signature);
-                group.chains.remove(&signature);
+                group.forget_chain(signature);
             }
         }
         match record.outcome {
@@ -1841,19 +1989,43 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
                 winning_priority: Some(rank.priority),
             };
             if let Some(group) = self.groups.get_mut(group) {
-                group.chains.remove(&signature);
+                group.forget_chain(signature);
             }
         }
         Ok(())
     }
 
+    fn drop_deferred_parts_no_successor_can_use(&mut self, next_verified: u64) -> u64 {
+        let mut oldest = u64::MAX;
+        for group in &mut self.groups {
+            group.deferred.retain(|_, parts| {
+                while parts
+                    .front()
+                    .is_some_and(|part| part.useful_until < next_verified)
+                {
+                    parts.pop_front();
+                }
+                if let Some(part) = parts.front() {
+                    oldest = oldest.min(part.candidate.first_start);
+                }
+                !parts.is_empty()
+            });
+        }
+        oldest
+    }
+
     fn release_unneeded(&mut self) {
+        let next_verified = self.queue.front().map_or(self.probed_to, |candidate| {
+            candidate.anchor.min(self.probed_to)
+        });
+        let oldest_deferred = self.drop_deferred_parts_no_successor_can_use(next_verified);
         let oldest_needed = self
             .queue
             .front()
             .map_or(self.probed_to, |candidate| {
                 candidate.first_start.min(self.probed_to)
             })
+            .min(oldest_deferred)
             .saturating_sub(u64::from(self.lookback));
         let releasable = usize::try_from(oldest_needed.saturating_sub(self.first_retained))
             .unwrap_or(usize::MAX)
@@ -1962,6 +2134,54 @@ fn window_end(windows: Option<ReportWindows>, window: u64) -> u64 {
     window
         .saturating_mul(step)
         .saturating_add(u64::from(windows.length))
+}
+
+fn deferrable_until(
+    view: &PatternGroup<'_>,
+    program: &ProgramHeader,
+    own_ends: Option<&RememberedEnds>,
+    candidate: &Candidate,
+) -> Result<Option<u64>, PatternScanError> {
+    let ends_are_kept = matches!(view.part_memory(), PartMemory::FirstAndLatestEnds { .. });
+    if program.segment.get() != 0
+        || !program.successor_found_on_its_own()
+        || program.successor_gap_unbounded()
+        || !ends_are_kept
+        || !own_ends.is_some_and(RememberedEnds::holds_an_end)
+    {
+        return Ok(None);
+    }
+    let successor = view.program_header(ProgramId(candidate.program.0.saturating_add(1)))?;
+    let reach = u64::from(program.longest.get())
+        .saturating_add(u64::from(successor.gap_most.get()))
+        .saturating_add(u64::from(successor.anchor_farthest.get()));
+    Ok((reach <= LONGEST_DEFERRED_REACH).then(|| candidate.last_start.saturating_add(reach)))
+}
+
+fn end_adds_nothing(
+    program: &ProgramHeader,
+    own_ends: Option<&RememberedEnds>,
+    first_start: u64,
+) -> bool {
+    program.successor_gap_unbounded()
+        && own_ends
+            .and_then(RememberedEnds::first_when_earliest)
+            .is_some_and(|earliest| {
+                first_start.saturating_add(u64::from(program.shortest.get())) >= earliest
+            })
+}
+
+fn predecessor_never_a_candidate(
+    group: &SelectedGroup<'_>,
+    program: &ProgramHeader,
+    id: ProgramId,
+) -> bool {
+    program.predecessor_found_on_its_own()
+        && !program.is_armed_by_predecessor()
+        && id
+            .0
+            .checked_sub(1)
+            .is_some_and(|predecessor| !group.programs_with_candidates.contains(predecessor))
 }
 
 fn candidate_starts(

@@ -221,10 +221,7 @@ impl PageNormaliser {
         while let Some(&byte) = bytes.get(consumed) {
             if is_plain_text(byte) {
                 let rest = bytes.get(consumed..).unwrap_or_default();
-                let run = rest
-                    .iter()
-                    .position(|&byte| !is_plain_text(byte))
-                    .unwrap_or(rest.len());
+                let run = words_with_single_spaces(rest);
                 let plain = rest.get(..run).unwrap_or_default();
                 self.without_comments.write_lowercased(plain);
                 self.without_tags.write_lowercased(plain);
@@ -883,6 +880,25 @@ fn entity_bytes(value: u64) -> Vec<u8> {
 
 pub const fn is_whitespace(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+fn words_with_single_spaces(bytes: &[u8]) -> usize {
+    let mut length = 0;
+    while let Some(&byte) = bytes.get(length) {
+        let next_is_plain_text = || {
+            bytes
+                .get(length.saturating_add(1))
+                .is_some_and(|&next| is_plain_text(next))
+        };
+        if is_plain_text(byte) {
+            length = length.saturating_add(1);
+        } else if byte == b' ' && length > 0 && next_is_plain_text() {
+            length = length.saturating_add(2);
+        } else {
+            break;
+        }
+    }
+    length
 }
 
 const fn is_plain_text(byte: u8) -> bool {

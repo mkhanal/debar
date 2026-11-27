@@ -508,12 +508,21 @@ impl PlacedPrograms {
             first_program: U32::new(first_program),
             segment_count: U32::new(segment_count),
         });
+        let mut predecessor_found_on_its_own = false;
         for (segment_index, segment) in signature.segments.iter().enumerate() {
+            let successor = signature.segments.get(segment_index.saturating_add(1));
             let place = ProgramPlace {
                 signature: signature_id,
                 segment: u32::try_from(segment_index).map_err(too_large)?,
                 segment_count,
+                predecessor_found_on_its_own,
+                successor_gap_unbounded: successor.is_some_and(|next| next.gap_most.is_none()),
+                successor_found_on_its_own: successor.is_some_and(|next| {
+                    u32::try_from(segment_index.saturating_add(1))
+                        .is_ok_and(|index| !next.is_armed_by_predecessor(index))
+                }),
             };
+            predecessor_found_on_its_own = !segment.is_armed_by_predecessor(place.segment);
             let placed_by_offset = place.segment == 0 && placement != PLACEMENT_ANYWHERE;
             self.add_program(segment, &place, placed_by_offset, signature.pass)?;
         }
@@ -1183,6 +1192,11 @@ impl<'m> PatternGroup<'m> {
                     .map(|entry| PatternSignatureId(entry.signature.get())),
             );
         }
+    }
+
+    #[must_use]
+    pub fn program_count(&self) -> usize {
+        self.program_starts.len().saturating_sub(1)
     }
 
     #[must_use]

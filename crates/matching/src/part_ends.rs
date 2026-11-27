@@ -46,6 +46,15 @@ impl RememberedEnds {
             .unwrap_or(0);
     }
 
+    pub const fn holds_an_end(&self) -> bool {
+        self.first.is_some()
+    }
+
+    pub fn first_when_earliest(&self) -> Option<u64> {
+        self.first
+            .filter(|first| self.latest.iter().all(|latest| latest >= first))
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = u64> + '_ {
         self.first.into_iter().chain(self.latest.iter().copied())
     }
