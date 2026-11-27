@@ -87,8 +87,28 @@ struct ObjectRecord {
     sha256: Result<String, InputError>,
 }
 
+impl ObjectRecord {
+    fn is_reached(&self) -> bool {
+        self.parent.is_none() || self.kind.is_some()
+    }
+}
+
 #[derive(Default)]
 struct ObjectRecords(Vec<ObjectRecord>);
+
+impl ObjectRecords {
+    fn nearest_reached(&self, layer: LayerId) -> Option<LayerId> {
+        let mut looking_at = Some(layer);
+        while let Some(layer) = looking_at {
+            let record = self.0.iter().find(|record| record.layer == layer)?;
+            if record.is_reached() {
+                return Some(layer);
+            }
+            looking_at = record.parent;
+        }
+        None
+    }
+}
 
 impl ObjectObserver for ObjectRecords {
     fn object_finished(&mut self, object: &FinishedObject<'_>) {
@@ -128,13 +148,19 @@ fn report_lines(
     scanned: &ScanReport,
 ) -> Result<String, ComparisonReportError> {
     records.0.sort_by_key(|record| record.layer);
+    let attributed: Vec<Option<LayerId>> = scanned
+        .reported
+        .iter()
+        .map(|reported| records.nearest_reached(reported.layer))
+        .collect();
     let mut lines = String::new();
-    for record in records.0 {
+    for record in records.0.into_iter().filter(ObjectRecord::is_reached) {
         let detections: Vec<&str> = scanned
             .reported
             .iter()
-            .filter(|reported| reported.layer == record.layer)
-            .map(|reported| reported.name.as_str())
+            .zip(&attributed)
+            .filter(|(_, object)| **object == Some(record.layer))
+            .map(|(reported, _)| reported.name.as_str())
             .collect();
         let type_name = record
             .kind

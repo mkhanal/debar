@@ -22,8 +22,49 @@ pub struct KindDescription {
     pub own_bytes: OwnBytes,
     pub matched_again_as: Option<ObjectKind>,
     pub found_in_full_scan_retypes: Vec<ObjectKind>,
+    pub found_at_an_offset: Option<FoundAtAnOffset>,
     pub executable: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FoundAtAnOffset {
+    Recorded,
+    RetypesTheObject {
+        hosts: Hosts,
+    },
+    Embedded {
+        object: EmbeddedObject,
+        hosts: Hosts,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hosts {
+    Any,
+    OnlyIn(Vec<ObjectKind>),
+    NotIn(Vec<ObjectKind>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddedObject {
+    pub scanned_as: ObjectKind,
+    pub starts_before_the_match: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OffsetAction {
+    Recorded,
+    RetypesTheObject,
+    Embedded(EmbeddedObject),
+}
+
+const NOT_RECORDED: u8 = 0;
+const RECORDED: u8 = 1;
+const RETYPES_THE_OBJECT: u8 = 2;
+const EMBEDDED: u8 = 3;
+const ANY_HOST: u8 = 0;
+const ONLY_IN_HOSTS: u8 = 1;
+const NOT_IN_HOSTS: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RecognitionRank {
@@ -54,6 +95,7 @@ pub struct TypingRules {
     pub recognition_group: Option<SignatureGroup>,
     pub text_bytes: ByteSet,
     pub wide_text_retry: Option<WideTextRetry>,
+    pub most_found_at_offsets: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,9 +118,11 @@ struct KindsHeader {
     text_bytes: [u8; 32],
     wide_text_found: U16,
     wide_text_becomes: U16,
+    most_found_at_offsets: U32,
     kind_count: U32,
     group_count: U32,
     retype_count: U32,
+    host_count: U32,
     name_bytes: U32,
 }
 
@@ -97,6 +141,13 @@ struct KindEntry {
     group_count: U32,
     first_retype: U32,
     retype_count: U32,
+    offset_action: u8,
+    offset_hosts: u8,
+    embedded_as: U16,
+    starts_before_the_match: U16,
+    reserved_after_offsets: U16,
+    first_host: U32,
+    host_count: U32,
 }
 
 fn code_or_none(kind: Option<ObjectKind>) -> u16 {
@@ -137,6 +188,39 @@ fn flags_of(description: &KindDescription) -> u8 {
     flags
 }
 
+struct EncodedOffsetFinding<'d> {
+    action: u8,
+    hosts: u8,
+    embedded: Option<EmbeddedObject>,
+    host_kinds: &'d [ObjectKind],
+}
+
+impl<'d> EncodedOffsetFinding<'d> {
+    fn of(finding: Option<&'d FoundAtAnOffset>) -> Self {
+        let (action, embedded, hosts) = match finding {
+            None => (NOT_RECORDED, None, None),
+            Some(FoundAtAnOffset::Recorded) => (RECORDED, None, None),
+            Some(FoundAtAnOffset::RetypesTheObject { hosts }) => {
+                (RETYPES_THE_OBJECT, None, Some(hosts))
+            }
+            Some(FoundAtAnOffset::Embedded { object, hosts }) => {
+                (EMBEDDED, Some(*object), Some(hosts))
+            }
+        };
+        let (hosts, host_kinds): (u8, &[ObjectKind]) = match hosts {
+            None | Some(Hosts::Any) => (ANY_HOST, &[]),
+            Some(Hosts::OnlyIn(kinds)) => (ONLY_IN_HOSTS, kinds),
+            Some(Hosts::NotIn(kinds)) => (NOT_IN_HOSTS, kinds),
+        };
+        Self {
+            action,
+            hosts,
+            embedded,
+            host_kinds,
+        }
+    }
+}
+
 pub fn build(
     kinds: &BTreeMap<ObjectKind, KindDescription>,
     typing: Option<TypingRules>,
@@ -145,8 +229,10 @@ pub fn build(
     let mut entries = Vec::with_capacity(kinds.len());
     let mut groups: Vec<U32> = Vec::new();
     let mut retypes: Vec<U16> = Vec::new();
+    let mut hosts: Vec<U16> = Vec::new();
     let mut names = Vec::new();
     for (kind, description) in kinds {
+        let offset = EncodedOffsetFinding::of(description.found_at_an_offset.as_ref());
         let matched_as = match description.own_bytes {
             OwnBytes::Matched { as_kind, .. } => code_or_none(as_kind),
             OwnBytes::NotMatched => NO_KIND,
@@ -164,6 +250,19 @@ pub fn build(
             group_count: U32::new(count(description.groups.len())?),
             first_retype: U32::new(count(retypes.len())?),
             retype_count: U32::new(count(description.found_in_full_scan_retypes.len())?),
+            offset_action: offset.action,
+            offset_hosts: offset.hosts,
+            embedded_as: U16::new(code_or_none(
+                offset.embedded.map(|object| object.scanned_as),
+            )),
+            starts_before_the_match: U16::new(
+                offset
+                    .embedded
+                    .map_or(0, |object| object.starts_before_the_match),
+            ),
+            reserved_after_offsets: U16::new(0),
+            first_host: U32::new(count(hosts.len())?),
+            host_count: U32::new(count(offset.host_kinds.len())?),
         });
         names.extend_from_slice(description.format_name.as_bytes());
         groups.extend(description.groups.iter().map(|group| U32::new(group.0)));
@@ -173,6 +272,7 @@ pub fn build(
                 .iter()
                 .map(|kind| U16::new(kind.code())),
         );
+        hosts.extend(offset.host_kinds.iter().map(|kind| U16::new(kind.code())));
     }
     let retry = typing.and_then(|rules| rules.wide_text_retry);
     let header = KindsHeader {
@@ -188,15 +288,18 @@ pub fn build(
         text_bytes: typing.map_or([0; 32], |rules| rules.text_bytes.0),
         wide_text_found: U16::new(code_or_none(retry.map(|retry| retry.found))),
         wide_text_becomes: U16::new(code_or_none(retry.map(|retry| retry.becomes))),
+        most_found_at_offsets: U32::new(typing.map_or(0, |rules| rules.most_found_at_offsets)),
         kind_count: U32::new(count(entries.len())?),
         group_count: U32::new(count(groups.len())?),
         retype_count: U32::new(count(retypes.len())?),
+        host_count: U32::new(count(hosts.len())?),
         name_bytes: U32::new(count(names.len())?),
     };
     let mut bytes = header.as_bytes().to_vec();
     bytes.extend_from_slice(entries.as_bytes());
     bytes.extend_from_slice(groups.as_bytes());
     bytes.extend_from_slice(retypes.as_bytes());
+    bytes.extend_from_slice(hosts.as_bytes());
     bytes.extend_from_slice(&names);
     Ok(bytes)
 }
@@ -207,6 +310,7 @@ pub struct ObjectKinds<'m> {
     entries: &'m [KindEntry],
     groups: &'m [U32],
     retypes: &'m [U16],
+    hosts: &'m [U16],
     names: &'m [u8],
 }
 
@@ -216,9 +320,18 @@ pub struct KindView<'m> {
     pub recognition: RecognitionRank,
     pub own_bytes: OwnBytes,
     pub matched_again_as: Option<ObjectKind>,
+    pub offset_action: Option<OffsetAction>,
     pub executable: bool,
     groups: &'m [U32],
     retypes: &'m [U16],
+    offset_hosts: HostsView<'m>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostsView<'m> {
+    Any,
+    OnlyIn(&'m [U16]),
+    NotIn(&'m [U16]),
 }
 
 impl KindView<'_> {
@@ -229,6 +342,16 @@ impl KindView<'_> {
     #[must_use]
     pub fn retypes_when_found_in(&self, kind: ObjectKind) -> bool {
         self.retypes.iter().any(|code| code.get() == kind.code())
+    }
+
+    #[must_use]
+    pub fn acts_in(&self, host: ObjectKind) -> bool {
+        let listed = |kinds: &[U16]| kinds.iter().any(|code| code.get() == host.code());
+        match self.offset_hosts {
+            HostsView::Any => true,
+            HostsView::OnlyIn(kinds) => listed(kinds),
+            HostsView::NotIn(kinds) => !listed(kinds),
+        }
     }
 }
 
@@ -249,9 +372,11 @@ impl<'m> ObjectKinds<'m> {
         let (groups, rest) =
             <[U32]>::ref_from_prefix_with_elems(rest, length(&header.group_count)?)
                 .map_err(|_| KindsMalformed::Layout)?;
-        let (retypes, names) =
+        let (retypes, rest) =
             <[U16]>::ref_from_prefix_with_elems(rest, length(&header.retype_count)?)
                 .map_err(|_| KindsMalformed::Layout)?;
+        let (hosts, names) = <[U16]>::ref_from_prefix_with_elems(rest, length(&header.host_count)?)
+            .map_err(|_| KindsMalformed::Layout)?;
         if names.len() != length(&header.name_bytes)? {
             return Err(KindsMalformed::Layout);
         }
@@ -270,10 +395,12 @@ impl<'m> ObjectKinds<'m> {
                 recognition_group,
                 text_bytes: ByteSet(header.text_bytes),
                 wide_text_retry,
+                most_found_at_offsets: header.most_found_at_offsets.get(),
             },
             entries,
             groups,
             retypes,
+            hosts,
             names,
         })
     }
@@ -304,6 +431,26 @@ impl<'m> ObjectKinds<'m> {
             .retypes
             .get(span(entry.first_retype, entry.retype_count)?)
             .ok_or(KindsMalformed::Layout)?;
+        let host_kinds = self
+            .hosts
+            .get(span(entry.first_host, entry.host_count)?)
+            .ok_or(KindsMalformed::Layout)?;
+        let offset_hosts = match entry.offset_hosts {
+            ANY_HOST => HostsView::Any,
+            ONLY_IN_HOSTS => HostsView::OnlyIn(host_kinds),
+            NOT_IN_HOSTS => HostsView::NotIn(host_kinds),
+            _ => return Err(KindsMalformed::Layout),
+        };
+        let offset_action = match entry.offset_action {
+            NOT_RECORDED => None,
+            RECORDED => Some(OffsetAction::Recorded),
+            RETYPES_THE_OBJECT => Some(OffsetAction::RetypesTheObject),
+            EMBEDDED => Some(OffsetAction::Embedded(EmbeddedObject {
+                scanned_as: kind_or_none(entry.embedded_as.get())?.ok_or(KindsMalformed::Layout)?,
+                starts_before_the_match: entry.starts_before_the_match.get(),
+            })),
+            _ => return Err(KindsMalformed::Layout),
+        };
         let flag = |flag: u8| entry.flags & flag != 0;
         let own_bytes = if flag(OWN_BYTES_MATCHED) {
             OwnBytes::Matched {
@@ -323,9 +470,11 @@ impl<'m> ObjectKinds<'m> {
             },
             own_bytes,
             matched_again_as: kind_or_none(entry.matched_again_as.get())?,
+            offset_action,
             executable: flag(EXECUTABLE),
             groups,
             retypes,
+            offset_hosts,
         }))
     }
 

@@ -48,6 +48,7 @@ fn describe(
             },
             matched_again_as: None,
             found_in_full_scan_retypes: retypes,
+            found_at_an_offset: None,
             executable: false,
         },
     );
@@ -133,6 +134,7 @@ fn image() -> Vec<u8> {
             found: ObjectKind::Html,
             becomes: ObjectKind::HtmlUtf16,
         }),
+        most_found_at_offsets: 10,
     });
     builder.finish().unwrap()
 }

@@ -7,6 +7,7 @@ use zerocopy::FromBytes;
 use crate::builder::provenance_code;
 use crate::certificate_rules::CertificateRules;
 use crate::container_signatures::ContainerSignatures;
+use crate::engine_alerts::{EngineAlert, EngineAlerts};
 use crate::engine_features::EngineFeatures;
 use crate::hash_partition::{HashPartition, PartitionKey, PartitionMalformed};
 use crate::icon_signatures::{self, IconGroups};
@@ -386,6 +387,22 @@ impl<'m> Image<'m> {
         UnwantedCategories::read(bytes)
             .and_then(|categories| categories.of(name))
             .map_err(ImageError::UnwantedCategoriesMalformed)
+    }
+
+    pub fn engine_alert_name(
+        &self,
+        alert: EngineAlert,
+    ) -> Result<Option<SignatureName>, ImageError> {
+        let kind = SectionKind::EngineAlerts;
+        let Some(bytes) = self.optional_section_bytes(kind, 0) else {
+            return Ok(None);
+        };
+        let alerts =
+            EngineAlerts::read(bytes).map_err(|_| ImageError::CarriedSectionMalformed(kind))?;
+        alerts
+            .name_of(alert)
+            .map(|name| self.signature_name(name))
+            .transpose()
     }
 
     pub fn signature_name(&self, id: NameId) -> Result<SignatureName, ImageError> {

@@ -447,6 +447,18 @@ pub fn comparison_report_with(
     input: &Path,
     into: &Path,
 ) -> Outcome<Value> {
+    comparison_report_objects(image, options, input, into)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Failure("the report is empty".to_owned()))
+}
+
+pub fn comparison_report_objects(
+    image: &Path,
+    options: &[&str],
+    input: &Path,
+    into: &Path,
+) -> Outcome<Vec<Value>> {
     let report = into.join("report.jsonl");
     run(Command::new(&release_binaries()?.debar)
         .arg("comparison-report")
@@ -456,9 +468,7 @@ pub fn comparison_report_with(
         .arg(input)
         .arg(&report))?;
     let text = fs::read_to_string(&report)?;
-    let first = text
-        .lines()
-        .next()
-        .ok_or_else(|| Failure("the report is empty".to_owned()))?;
-    Ok(serde_json::from_str(first)?)
+    text.lines()
+        .map(|line| Ok(serde_json::from_str(line)?))
+        .collect()
 }

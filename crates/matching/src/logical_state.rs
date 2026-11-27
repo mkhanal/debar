@@ -48,20 +48,45 @@ impl UnwantedCategories<'_> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogicalEvent {
+    Detection(PatternDetection),
+    Rescan(ObjectKind),
+    ProgramTrigger(LogicalOutcome),
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LogicalFindings {
-    pub detections: Vec<PatternDetection>,
-    pub program_triggers: Vec<LogicalOutcome>,
-    pub rescans: Vec<ObjectKind>,
+    pub events: Vec<LogicalEvent>,
     pub do_not_cache: bool,
 }
 
 impl LogicalFindings {
+    pub fn detections(&self) -> impl Iterator<Item = &PatternDetection> {
+        self.events.iter().filter_map(|event| match event {
+            LogicalEvent::Detection(detection) => Some(detection),
+            LogicalEvent::Rescan(_) | LogicalEvent::ProgramTrigger(_) => None,
+        })
+    }
+
+    pub fn rescans(&self) -> impl Iterator<Item = ObjectKind> {
+        self.events.iter().filter_map(|event| match event {
+            LogicalEvent::Rescan(kind) => Some(*kind),
+            LogicalEvent::Detection(_) | LogicalEvent::ProgramTrigger(_) => None,
+        })
+    }
+
+    pub fn program_triggers(&self) -> impl Iterator<Item = LogicalOutcome> {
+        self.events.iter().filter_map(|event| match event {
+            LogicalEvent::ProgramTrigger(outcome) => Some(*outcome),
+            LogicalEvent::Detection(_) | LogicalEvent::Rescan(_) => None,
+        })
+    }
+
     pub(crate) fn ends_the_scan(&self, every_match: bool) -> bool {
         !every_match
             && self
-                .detections
-                .iter()
+                .detections()
                 .any(|detection| detection.indicator == Indicator::Strong)
     }
 }
@@ -376,7 +401,7 @@ impl<'m> LogicalState<'m> {
                 .and_then(|conditions| conditions.handler_type)
                 && !context.retyped
             {
-                findings.rescans.push(kind);
+                findings.events.push(LogicalEvent::Rescan(kind));
                 continue;
             }
             if conditions
@@ -386,15 +411,19 @@ impl<'m> LogicalState<'m> {
                 continue;
             }
             if record.outcome != LogicalOutcome::Detection {
-                findings.program_triggers.push(record.outcome);
+                findings
+                    .events
+                    .push(LogicalEvent::ProgramTrigger(record.outcome));
                 continue;
             }
             let name = image.signature_name(record.name)?;
             let strong = name.indicator == Indicator::Strong;
-            findings.detections.push(PatternDetection {
-                name: name.text,
-                indicator: name.indicator,
-            });
+            findings
+                .events
+                .push(LogicalEvent::Detection(PatternDetection {
+                    name: name.text,
+                    indicator: name.indicator,
+                }));
             if strong && !settings.every_match {
                 return Ok(());
             }

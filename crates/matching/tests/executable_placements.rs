@@ -51,6 +51,7 @@ fn describe(
             },
             matched_again_as: None,
             found_in_full_scan_retypes: Vec::new(),
+            found_at_an_offset: None,
             executable,
         },
     );

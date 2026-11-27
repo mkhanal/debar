@@ -83,6 +83,7 @@ fn binary_data() -> KindDescription {
         },
         matched_again_as: None,
         found_in_full_scan_retypes: Vec::new(),
+        found_at_an_offset: None,
         executable: false,
     }
 }
@@ -138,9 +139,8 @@ fn detected_with(
     scan_object(&image, request, || None, object)
         .unwrap()
         .logical
-        .detections
-        .into_iter()
-        .map(|detection| detection.name)
+        .detections()
+        .map(|detection| detection.name.clone())
         .collect()
 }
 
@@ -660,9 +660,9 @@ fn a_logical_signature_that_triggers_a_program_reports_the_trigger_and_no_detect
     let findings = scan_object(&image, request, || None, object)
         .unwrap()
         .logical;
-    assert_eq!(findings.detections, []);
+    assert_eq!(findings.detections().count(), 0);
     assert_eq!(
-        findings.program_triggers,
+        findings.program_triggers().collect::<Vec<_>>(),
         [LogicalOutcome::RunProgram(SignatureProgramId(0))]
     );
 }

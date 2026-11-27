@@ -16,6 +16,13 @@ impl Ledger {
         }
     }
 
+    pub(crate) fn admits_a_level_below(&self, depth: u32) -> Result<(), Limit> {
+        if depth >= self.limits.deepest_level {
+            return Err(Limit::DeepestLevel);
+        }
+        Ok(())
+    }
+
     pub(crate) fn count(&mut self, length: u64) -> Result<(), Limit> {
         self.admit(length)?;
         self.files = self.files.saturating_add(1);
@@ -23,7 +30,7 @@ impl Ledger {
         Ok(())
     }
 
-    fn admit(&self, needed: u64) -> Result<(), Limit> {
+    pub(crate) fn admit(&self, needed: u64) -> Result<(), Limit> {
         if self
             .limits
             .largest_scan

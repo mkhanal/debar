@@ -27,7 +27,7 @@ pub use hash_lookup::{
     executable_section_digest_need, whole_object_detections, whole_object_digest_need,
     whole_object_trust, whole_object_trust_digest_need,
 };
-pub use logical_state::{LogicalFindings, ObjectContext, UnwantedCategories};
+pub use logical_state::{LogicalEvent, LogicalFindings, ObjectContext, UnwantedCategories};
 pub use pattern_scan::{
     GroupSelection, PatternDetection, PatternOutcomes, PatternRequest, PatternScan,
     PatternScanError, PatternSettings, ScanEnd, ScanProgress, TypeFound, scan_object,

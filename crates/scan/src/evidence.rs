@@ -23,6 +23,10 @@ impl Evidence {
         self.alerts.push(alert);
     }
 
+    pub(crate) fn merge(&mut self, child: Self) {
+        self.alerts.extend(child.alerts);
+    }
+
     pub(crate) fn clear(&mut self) {
         self.alerts.clear();
     }

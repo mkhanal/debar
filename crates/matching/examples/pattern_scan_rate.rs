@@ -62,7 +62,7 @@ fn measure(image_path: &Path, files: &[PathBuf]) -> Result<String, Box<dyn std::
         let outcomes = scan_object(&image, request, || None, &object)?;
         detections = detections
             .saturating_add(outcomes.detections.len())
-            .saturating_add(outcomes.logical.detections.len());
+            .saturating_add(outcomes.logical.detections().count());
         scanning = scanning.saturating_add(stopwatch.elapsed());
         scanned_bytes = scanned_bytes.saturating_add(length);
     }

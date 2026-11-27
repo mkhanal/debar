@@ -4,6 +4,7 @@ const MEBIBYTE: u64 = 1024 * 1024;
 pub const DEFAULT_LARGEST_FILE: u64 = 100 * MEBIBYTE;
 pub const DEFAULT_LARGEST_SCAN: u64 = 400 * MEBIBYTE;
 pub const DEFAULT_MOST_FILES: u64 = 10_000;
+pub const DEFAULT_DEEPEST_LEVEL: u32 = 16;
 pub const DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS: u64 = 100 * MEBIBYTE;
 const READS_OF_EACH_COUNTED_BYTE: u64 = 8;
 
@@ -19,6 +20,7 @@ pub struct Limits {
     pub largest_file: Option<u64>,
     pub largest_scan: Option<u64>,
     pub most_files: Option<u64>,
+    pub deepest_level: u32,
 }
 
 impl Default for Limits {
@@ -27,6 +29,7 @@ impl Default for Limits {
             largest_file: Some(DEFAULT_LARGEST_FILE),
             largest_scan: Some(DEFAULT_LARGEST_SCAN),
             most_files: Some(DEFAULT_MOST_FILES),
+            deepest_level: DEFAULT_DEEPEST_LEVEL,
         }
     }
 }
@@ -39,6 +42,7 @@ pub struct ScanSettings<'s> {
     pub unwanted_categories: UnwantedCategories<'s>,
     pub largest_object_for_regular_expressions: Option<u64>,
     pub limits: Limits,
+    pub alert_on_limits: bool,
 }
 
 impl<'s> ScanSettings<'s> {

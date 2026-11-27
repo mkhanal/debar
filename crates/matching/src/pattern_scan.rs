@@ -730,6 +730,7 @@ pub struct PatternScan<'i, 'm, 'r> {
     selection_filter: Option<SelectionFilter<'m>>,
     found: Vec<Found>,
     types_found: Vec<TypeFound>,
+    types_found_at_every_offset: bool,
     stop_once_past: Option<u64>,
     stopped: bool,
     image_fuzzy_hash: Option<u64>,
@@ -811,6 +812,10 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             selection_filter,
             found: Vec::new(),
             types_found: Vec::new(),
+            types_found_at_every_offset: matches!(
+                request.selection,
+                GroupSelection::ForKindRecognisingTypes(_)
+            ),
             stop_once_past: None,
             stopped: false,
             image_fuzzy_hash: request.image_fuzzy_hash,
@@ -1539,7 +1544,11 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         record: &PatternSignatureRecord,
         order: ReportOrder,
     ) -> Result<(), PatternScanError> {
-        if let Some(group) = self.groups.get_mut(candidate.group) {
+        let found_at_every_offset = self.types_found_at_every_offset
+            && matches!(record.outcome, RecordedOutcome::TypeFound(_));
+        if let Some(group) = self.groups.get_mut(candidate.group)
+            && !found_at_every_offset
+        {
             group.detected.insert(signature);
             group.chains.remove(&signature);
         }

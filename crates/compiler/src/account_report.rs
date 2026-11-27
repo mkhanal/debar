@@ -207,6 +207,7 @@ fn section_kind_name(kind: SectionKind) -> &'static str {
         SectionKind::IconSignatures => "icon signatures",
         SectionKind::UrlRules => "URL rules",
         SectionKind::SignaturePrograms => "signature programs",
+        SectionKind::EngineAlerts => "names of the alerts the engine raises",
     }
 }
 

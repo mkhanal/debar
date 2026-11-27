@@ -63,6 +63,7 @@ pub enum SectionKind {
     IconSignatures,
     UrlRules,
     SignaturePrograms,
+    EngineAlerts,
 }
 
 impl SectionKind {
@@ -87,6 +88,7 @@ impl SectionKind {
             Self::IconSignatures => 16,
             Self::UrlRules => 17,
             Self::SignaturePrograms => 18,
+            Self::EngineAlerts => 19,
         }
     }
 
@@ -111,6 +113,7 @@ impl SectionKind {
             16 => Some(Self::IconSignatures),
             17 => Some(Self::UrlRules),
             18 => Some(Self::SignaturePrograms),
+            19 => Some(Self::EngineAlerts),
             _ => None,
         }
     }

@@ -262,6 +262,7 @@ fn binary_data() -> KindDescription {
         },
         matched_again_as: None,
         found_in_full_scan_retypes: Vec::new(),
+        found_at_an_offset: None,
         executable: false,
     }
 }
@@ -324,9 +325,8 @@ fn detected_with(
     scan_object(image, request, || None, object)
         .unwrap()
         .logical
-        .detections
-        .into_iter()
-        .map(|detection| detection.name)
+        .detections()
+        .map(|detection| detection.name.clone())
         .collect()
 }
 
@@ -424,9 +424,8 @@ fn every_split_of_an_object_into_chunks_gives_the_same_logical_detections() {
             };
             let names: Vec<String> = outcomes
                 .logical
-                .detections
-                .into_iter()
-                .map(|detection| detection.name)
+                .detections()
+                .map(|detection| detection.name.clone())
                 .collect();
             assert_eq!(names, whole, "chunk {chunk}");
         }
@@ -563,11 +562,11 @@ fn a_handler_type_asks_for_a_rescan_instead_of_a_detection_unless_already_retype
             .logical
     };
     let first = scan(false);
-    assert_eq!(first.detections, []);
-    assert_eq!(first.rescans, [ObjectKind::Pdf]);
+    assert_eq!(first.detections().count(), 0);
+    assert_eq!(first.rescans().collect::<Vec<_>>(), [ObjectKind::Pdf]);
     let again = scan(true);
-    assert_eq!(again.detections.len(), 1);
-    assert_eq!(again.rescans, []);
+    assert_eq!(again.detections().count(), 1);
+    assert_eq!(again.rescans().count(), 0);
 }
 
 #[test]

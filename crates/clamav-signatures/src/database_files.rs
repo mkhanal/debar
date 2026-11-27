@@ -15,6 +15,7 @@ use crate::certificate_lines::{
 };
 use crate::container::{self, ContainerError, ContainerKind, Member};
 use crate::container_lines::{self, MalformedContainerLine, ReadContainerLine};
+use crate::engine_alert_names::name_engine_alerts;
 use crate::engine_switches::{
     CERTIFICATES, EngineSwitches, MalformedSwitchLine, PHISHING_ENGINE, ReadSwitchLine,
 };
@@ -527,9 +528,10 @@ impl Loader<'_> {
                 },
             );
         }
-        describe_object_kinds(self.image);
-        self.image
-            .set_engine_features(&self.switches.enabled_features());
+        let enabled = self.switches.enabled_features();
+        describe_object_kinds(self.image, &enabled);
+        name_engine_alerts(self.image).map_err(DatabaseError::Image)?;
+        self.image.set_engine_features(&enabled);
         for rule in self.certificate_rules.drain(..).rev() {
             self.image.add_certificate_rule(rule);
         }

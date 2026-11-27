@@ -1,11 +1,12 @@
 use debar_image::{
-    ByteSet, ImageBuilder, KindDescription, ObjectKind, OwnBytes, RecognitionRank, SignatureGroup,
-    TypingRules, WideTextRetry,
+    ByteSet, EmbeddedObject, EngineFeature, FoundAtAnOffset, Hosts, ImageBuilder, KindDescription,
+    ObjectKind, OwnBytes, RecognitionRank, SignatureGroup, TypingRules, WideTextRetry,
 };
 
 pub const GENERIC_GROUP: SignatureGroup = SignatureGroup(0);
 pub const TYPE_RECOGNITION_GROUP: SignatureGroup = SignatureGroup(15);
 const TYPING_PREFIX_LENGTH: u32 = 1024;
+const MOST_FOUND_AT_OFFSETS: u32 = 10;
 const FIRST_ALWAYS_REPLACING_NUMBER: u32 = 563;
 const BYTES_NEVER_IN_TEXT: [(u8, u8); 5] = [
     (0x00, 0x06),
@@ -182,6 +183,152 @@ const RETYPED_WHEN_FOUND: [(ObjectKind, &[ObjectKind]); 2] = [
     (ObjectKind::Mail, &[ObjectKind::Text]),
 ];
 
+const MASTER_BOOT_RECORD_NUMBER: u32 = 560;
+const LAST_NUMBER_RECORDED_AT_AN_OFFSET: u32 = 585;
+const NULLSOFT_MARK_FOLLOWS_ITS_START_BY: u16 = 4;
+
+const TEXT_OR_BINARY_DATA: [ObjectKind; 5] = [
+    ObjectKind::Text,
+    ObjectKind::TextUtf8,
+    ObjectKind::TextUtf16LittleEndian,
+    ObjectKind::TextUtf16BigEndian,
+    ObjectKind::BinaryData,
+];
+
+#[derive(Clone, Copy)]
+enum ActionAtAnOffset {
+    RetypesAnyObject,
+    RetypesTextOrBinaryData,
+    EmbeddedOutsideItsOwnKind(ObjectKind),
+    EmbeddedInAnExecutable { starts_before_the_match: u16 },
+}
+
+const ACTIONS_AT_AN_OFFSET: [(ObjectKind, EngineFeature, ActionAtAnOffset); 14] = [
+    (
+        ObjectKind::Mhtml,
+        EngineFeature::MailMbox,
+        ActionAtAnOffset::RetypesTextOrBinaryData,
+    ),
+    (
+        ObjectKind::XmlDataPackage,
+        EngineFeature::DocumentPdf,
+        ActionAtAnOffset::RetypesTextOrBinaryData,
+    ),
+    (
+        ObjectKind::XmlWord,
+        EngineFeature::DocumentMsXml,
+        ActionAtAnOffset::RetypesTextOrBinaryData,
+    ),
+    (
+        ObjectKind::XmlSpreadsheet,
+        EngineFeature::DocumentMsXml,
+        ActionAtAnOffset::RetypesTextOrBinaryData,
+    ),
+    (
+        ObjectKind::XmlHangul,
+        EngineFeature::DocumentHwp,
+        ActionAtAnOffset::RetypesTextOrBinaryData,
+    ),
+    (
+        ObjectKind::AppleDiskImage,
+        EngineFeature::ArchiveDmg,
+        ActionAtAnOffset::RetypesAnyObject,
+    ),
+    (
+        ObjectKind::Iso9660,
+        EngineFeature::ArchiveIso9660,
+        ActionAtAnOffset::RetypesAnyObject,
+    ),
+    (
+        ObjectKind::Udf,
+        EngineFeature::ArchiveUdf,
+        ActionAtAnOffset::RetypesAnyObject,
+    ),
+    (
+        ObjectKind::RarSelfExtracting,
+        EngineFeature::ArchiveRar,
+        ActionAtAnOffset::EmbeddedOutsideItsOwnKind(ObjectKind::Rar),
+    ),
+    (
+        ObjectKind::EggSelfExtracting,
+        EngineFeature::ArchiveEgg,
+        ActionAtAnOffset::EmbeddedOutsideItsOwnKind(ObjectKind::Egg),
+    ),
+    (
+        ObjectKind::SevenZipSelfExtracting,
+        EngineFeature::ArchiveSevenZip,
+        ActionAtAnOffset::EmbeddedOutsideItsOwnKind(ObjectKind::SevenZip),
+    ),
+    (
+        ObjectKind::NullsoftInstaller,
+        EngineFeature::ArchiveNsis,
+        ActionAtAnOffset::EmbeddedInAnExecutable {
+            starts_before_the_match: NULLSOFT_MARK_FOLLOWS_ITS_START_BY,
+        },
+    ),
+    (
+        ObjectKind::AutoIt,
+        EngineFeature::ArchiveAutoIt,
+        ActionAtAnOffset::EmbeddedInAnExecutable {
+            starts_before_the_match: 0,
+        },
+    ),
+    (
+        ObjectKind::InstallShieldMsi,
+        EngineFeature::ArchiveInstallShield,
+        ActionAtAnOffset::EmbeddedInAnExecutable {
+            starts_before_the_match: 0,
+        },
+    ),
+];
+
+fn action_at_an_offset(kind: ObjectKind, enabled: &[EngineFeature]) -> Option<ActionAtAnOffset> {
+    ACTIONS_AT_AN_OFFSET
+        .into_iter()
+        .find(|(found, _, _)| *found == kind)
+        .filter(|(_, gate, _)| enabled.contains(gate))
+        .map(|(_, _, action)| action)
+}
+
+fn found_at_an_offset(
+    kind: ObjectKind,
+    number: u32,
+    enabled: &[EngineFeature],
+) -> Option<FoundAtAnOffset> {
+    let recorded = number == MASTER_BOOT_RECORD_NUMBER
+        || (FIRST_ALWAYS_REPLACING_NUMBER..=LAST_NUMBER_RECORDED_AT_AN_OFFSET).contains(&number);
+    if !recorded {
+        return None;
+    }
+    Some(match action_at_an_offset(kind, enabled) {
+        None => FoundAtAnOffset::Recorded,
+        Some(ActionAtAnOffset::RetypesAnyObject) => {
+            FoundAtAnOffset::RetypesTheObject { hosts: Hosts::Any }
+        }
+        Some(ActionAtAnOffset::RetypesTextOrBinaryData) => FoundAtAnOffset::RetypesTheObject {
+            hosts: Hosts::OnlyIn(TEXT_OR_BINARY_DATA.to_vec()),
+        },
+        Some(ActionAtAnOffset::EmbeddedOutsideItsOwnKind(scanned_as)) => {
+            FoundAtAnOffset::Embedded {
+                object: EmbeddedObject {
+                    scanned_as,
+                    starts_before_the_match: 0,
+                },
+                hosts: Hosts::NotIn(vec![scanned_as]),
+            }
+        }
+        Some(ActionAtAnOffset::EmbeddedInAnExecutable {
+            starts_before_the_match,
+        }) => FoundAtAnOffset::Embedded {
+            object: EmbeddedObject {
+                scanned_as: kind,
+                starts_before_the_match,
+            },
+            hosts: Hosts::OnlyIn(vec![ObjectKind::WindowsExecutable]),
+        },
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NamedType {
     AnyType,
@@ -201,9 +348,9 @@ pub fn type_named(name: &str) -> Option<NamedType> {
         })
 }
 
-pub fn describe_object_kinds(image: &mut ImageBuilder) {
+pub fn describe_object_kinds(image: &mut ImageBuilder, enabled: &[EngineFeature]) {
     for (name, kind, number) in TYPE_NUMBERS {
-        image.describe_object_kind(kind, description(name, kind, number));
+        image.describe_object_kind(kind, description(name, kind, number, enabled));
     }
     image.set_typing(TypingRules {
         prefix_length: TYPING_PREFIX_LENGTH,
@@ -217,10 +364,16 @@ pub fn describe_object_kinds(image: &mut ImageBuilder) {
             found: ObjectKind::Html,
             becomes: ObjectKind::HtmlUtf16,
         }),
+        most_found_at_offsets: MOST_FOUND_AT_OFFSETS,
     });
 }
 
-fn description(name: &str, kind: ObjectKind, number: u32) -> KindDescription {
+fn description(
+    name: &str,
+    kind: ObjectKind,
+    number: u32,
+    enabled: &[EngineFeature],
+) -> KindDescription {
     let target = TARGET_GROUPS
         .iter()
         .find(|(targeted, _)| *targeted == kind)
@@ -255,6 +408,7 @@ fn description(name: &str, kind: ObjectKind, number: u32) -> KindDescription {
             .iter()
             .find(|(found, _)| *found == kind)
             .map_or_else(Vec::new, |(_, retyped)| retyped.to_vec()),
+        found_at_an_offset: found_at_an_offset(kind, number, enabled),
         executable: EXECUTABLES.contains(&kind),
     }
 }

@@ -8,6 +8,7 @@ use zerocopy::little_endian::{U32, U64};
 use crate::byte_rarity::rarity_of;
 use crate::certificate_rules::{self, CertificateRule};
 use crate::container_signatures::{self, ContainerSignaturesNotBuilt, PendingContainerSignature};
+use crate::engine_alerts::{self, EngineAlert};
 use crate::engine_features::{self, EngineFeature};
 use crate::hash_partition::{self, PartitionKey, PartitionNotBuilt, PendingEntry};
 use crate::icon_signatures::{self, IconGroups};
@@ -196,6 +197,7 @@ pub struct ImageBuilder {
     unwanted_categories: BTreeMap<String, Option<String>>,
     containers: Vec<PendingContainer>,
     engine_features: Option<Vec<EngineFeature>>,
+    engine_alerts: Vec<(EngineAlert, u32)>,
     certificate_rules: Vec<CertificateRule>,
     icon_groups: Option<IconGroups>,
     url_rules: Vec<UrlRule>,
@@ -447,6 +449,17 @@ impl ImageBuilder {
         self.engine_features = Some(enabled.to_vec());
     }
 
+    pub fn name_engine_alert(
+        &mut self,
+        alert: EngineAlert,
+        name: &str,
+        indicator: Indicator,
+    ) -> Result<(), BuildError> {
+        let name = self.add_name(name, indicator)?;
+        self.engine_alerts.push((alert, name));
+        Ok(())
+    }
+
     pub fn add_certificate_rule(&mut self, rule: CertificateRule) {
         self.certificate_rules.push(rule);
     }
@@ -657,6 +670,7 @@ impl ImageBuilder {
             unwanted_categories,
             containers,
             engine_features,
+            engine_alerts,
             certificate_rules,
             icon_groups,
             url_rules,
@@ -697,6 +711,17 @@ impl ImageBuilder {
             &url_rules,
             &programs,
         )?);
+        if !engine_alerts.is_empty() {
+            let named = engine_alerts
+                .iter()
+                .map(|(alert, name)| Ok((*alert, name_id(&name_ids, *name)?)))
+                .collect::<Result<Vec<_>, BuildError>>()?;
+            sections.push(carried_section(
+                SectionKind::EngineAlerts,
+                named.len(),
+                engine_alerts::build(&named),
+            )?);
+        }
         sections.extend(categories_section);
         sections.extend(hash_sections);
         sections.push(Section {

@@ -127,6 +127,7 @@ fn image(choices: &mut Choices<'_>) -> Option<Vec<u8>> {
             },
             matched_again_as: None,
             found_in_full_scan_retypes: Vec::new(),
+            found_at_an_offset: None,
             executable: false,
         },
     );
@@ -165,9 +166,8 @@ fn detections(image: &Image<'_>, object: &[u8], chunk: usize) -> Vec<String> {
     };
     outcomes
         .logical
-        .detections
-        .into_iter()
-        .map(|detection| detection.name)
+        .detections()
+        .map(|detection| detection.name.clone())
         .collect()
 }
 

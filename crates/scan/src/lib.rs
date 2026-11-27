@@ -16,7 +16,7 @@ pub use report::{
 };
 pub use scan::{FinishedObject, LARGEST_OBJECT_LEFT_UNSCANNED, ObjectObserver, Unobserved, scan};
 pub use settings::{
-    DEFAULT_LARGEST_FILE, DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS, DEFAULT_LARGEST_SCAN,
-    DEFAULT_MOST_FILES, Limits, Matching, ScanSettings,
+    DEFAULT_DEEPEST_LEVEL, DEFAULT_LARGEST_FILE, DEFAULT_LARGEST_OBJECT_FOR_REGULAR_EXPRESSIONS,
+    DEFAULT_LARGEST_SCAN, DEFAULT_MOST_FILES, Limits, Matching, ScanSettings,
 };
 pub use typing::{TypingError, kind_after_full_scan, kind_from_first_bytes};

@@ -28,6 +28,7 @@ pub enum Limit {
     LargestFile,
     LargestScan,
     MostFiles,
+    DeepestLevel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

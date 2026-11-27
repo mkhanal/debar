@@ -4,6 +4,60 @@ pub use debar_platform::input::ObjectBytes;
 
 pub(crate) const CHUNK_LENGTH: usize = 128 * 1024;
 
+#[derive(Clone, Copy)]
+pub(crate) struct ObjectWindow<'o> {
+    whole: &'o dyn ObjectBytes,
+    start: u64,
+    length: u64,
+}
+
+impl<'o> ObjectWindow<'o> {
+    pub(crate) fn whole(whole: &'o dyn ObjectBytes) -> Self {
+        Self {
+            whole,
+            start: 0,
+            length: whole.length(),
+        }
+    }
+
+    pub(crate) fn onward_from(self, offset: u64) -> Option<Self> {
+        Some(Self {
+            whole: self.whole,
+            start: self.start.checked_add(offset)?,
+            length: self.length.checked_sub(offset)?,
+        })
+    }
+}
+
+impl ObjectBytes for ObjectWindow<'_> {
+    fn length(&self) -> u64 {
+        self.length
+    }
+
+    fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), InputError> {
+        let wanted = u64::try_from(into.len()).unwrap_or(u64::MAX);
+        if offset
+            .checked_add(wanted)
+            .is_none_or(|end| end > self.length)
+        {
+            return Err(InputError::BeyondTheEnd {
+                offset,
+                wanted,
+                length: self.length,
+            });
+        }
+        let at = self
+            .start
+            .checked_add(offset)
+            .ok_or(InputError::BeyondTheEnd {
+                offset,
+                wanted,
+                length: self.length,
+            })?;
+        self.whole.read_at(at, into)
+    }
+}
+
 pub(crate) enum ChunkUse {
     Continue,
     Stop,

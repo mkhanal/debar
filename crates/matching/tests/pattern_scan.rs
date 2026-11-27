@@ -13,11 +13,11 @@ use std::collections::BTreeSet;
 use debar_image::{
     ByteSet, Category, ContextTest, Image, ImageBuilder, Indicator, KindDescription, MaskedByte,
     ObjectKind, OwnBytes, Pattern, PatternElement, PatternOutcome, PatternSignature, Placement,
-    RecognitionRank, SignatureGroup,
+    RecognitionRank, SignatureGroup, TypeFinding, TypingRules,
 };
 use debar_matching::{
     GroupSelection, ObjectContext, PatternRequest, PatternScan, PatternSettings, ScanProgress,
-    UnwantedCategories,
+    UnwantedCategories, scan_object,
 };
 
 const GENERIC: SignatureGroup = SignatureGroup(0);
@@ -204,6 +204,7 @@ impl Model {
                 },
                 matched_again_as: None,
                 found_in_full_scan_retypes: Vec::new(),
+                found_at_an_offset: None,
                 executable: false,
             },
         );
@@ -571,4 +572,78 @@ fn detections_at_one_position_are_reported_in_signature_table_order_whatever_the
             "chunk {chunk}"
         );
     }
+}
+
+#[test]
+fn a_type_recognition_pattern_is_found_at_every_offset_it_matches() {
+    const RECOGNITION: SignatureGroup = SignatureGroup(15);
+    let mark: Vec<PatternElement> = b"MARK"
+        .iter()
+        .map(|byte| PatternElement::Byte(MaskedByte::exactly(*byte)))
+        .collect();
+    let mut builder = ImageBuilder::new();
+    builder
+        .add_pattern_signature(&PatternSignature {
+            group: RECOGNITION,
+            category: Category::Malware,
+            placement: Placement::Anywhere,
+            report_rank: 0,
+            pattern: &Pattern {
+                before: None,
+                elements: mark,
+                after: None,
+            },
+            outcome: PatternOutcome::TypeFound(TypeFinding {
+                found: ObjectKind::Rar,
+                required: None,
+            }),
+        })
+        .unwrap();
+    builder.set_typing(TypingRules {
+        prefix_length: 16,
+        recognition_group: Some(RECOGNITION),
+        text_bytes: ByteSet::of(0x20..=0x7e),
+        wide_text_retry: None,
+        most_found_at_offsets: 10,
+    });
+    builder.describe_object_kind(
+        ObjectKind::BinaryData,
+        KindDescription {
+            format_name: "binary data".to_owned(),
+            groups: vec![GENERIC],
+            recognition: RecognitionRank::default(),
+            own_bytes: OwnBytes::Matched {
+                as_kind: None,
+                recognising_types: true,
+            },
+            matched_again_as: None,
+            found_in_full_scan_retypes: Vec::new(),
+            found_at_an_offset: None,
+            executable: false,
+        },
+    );
+    let bytes = builder.finish().unwrap();
+    let image = Image::open(&bytes).unwrap();
+    let object = b"..MARK....MARK..";
+    let request = PatternRequest {
+        selection: GroupSelection::ForKindRecognisingTypes(ObjectKind::BinaryData),
+        settings: PatternSettings {
+            potentially_unwanted: false,
+            unwanted_categories: UnwantedCategories::Every,
+            every_match: false,
+            largest_object_for_regular_expressions: None,
+        },
+        object_length: object.len() as u64,
+        context: ObjectContext::TOP_LEVEL,
+        image_fuzzy_hash: None,
+    };
+
+    let outcomes = scan_object(&image, request, || None, object).unwrap();
+
+    let offsets: Vec<u64> = outcomes
+        .types_found
+        .iter()
+        .map(|found| found.offset)
+        .collect();
+    assert_eq!(offsets, [2, 10]);
 }

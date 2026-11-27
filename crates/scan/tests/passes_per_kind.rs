@@ -68,6 +68,7 @@ fn describe_retyping(
             own_bytes,
             matched_again_as,
             found_in_full_scan_retypes,
+            found_at_an_offset: None,
             executable: false,
         },
     );
@@ -111,6 +112,7 @@ fn image(hashed: &[&[u8]]) -> Vec<u8> {
         recognition_group: Some(RECOGNITION),
         text_bytes: ByteSet::of((0..=u8::MAX).filter(|byte| !BYTES_NEVER_IN_TEXT.contains(byte))),
         wide_text_retry: None,
+        most_found_at_offsets: 10,
     });
     builder.add_type_magic(MagicTable::Files, 0, b"<html>", ObjectKind::Html);
     describe(

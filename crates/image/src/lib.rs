@@ -5,6 +5,7 @@ mod builder;
 mod byte_rarity;
 mod certificate_rules;
 mod container_signatures;
+mod engine_alerts;
 mod engine_features;
 mod expression_automata;
 mod expression_tree;
@@ -42,6 +43,7 @@ pub use container_signatures::{
     ContainerSignatureRecord, ContainerSignatures, ContainerSignaturesMalformed,
     EntryNameExpression,
 };
+pub use engine_alerts::{EngineAlert, EngineAlerts, EngineAlertsMalformed};
 pub use engine_features::{EngineFeature, EngineFeatures, EngineFeaturesMalformed};
 pub use expression_automata::{
     AutomatonMalformed, InPlaceAutomaton, LARGEST_AUTOMATON_IN_IMAGE, LazyExpression,
@@ -74,8 +76,9 @@ pub use model::{
 pub use names::NameId;
 pub use object_kind::ObjectKind;
 pub use object_kinds::{
-    KindDescription, KindView, KindsMalformed, KindsNotBuilt, ObjectKinds, OwnBytes,
-    RecognitionRank, TypingRules, WideTextRetry,
+    EmbeddedObject, FoundAtAnOffset, Hosts, KindDescription, KindView, KindsMalformed,
+    KindsNotBuilt, ObjectKinds, OffsetAction, OwnBytes, RecognitionRank, TypingRules,
+    WideTextRetry,
 };
 pub use pattern_group::{
     AnchorTables, AnchoredProgram, GroupMalformed, LongAnchorFilter, LongAnchorTable, PatternGroup,
