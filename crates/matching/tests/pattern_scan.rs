@@ -428,7 +428,7 @@ fn a_signature_is_reported_once_however_often_it_matches() {
 #[test]
 fn every_split_of_an_object_into_chunks_gives_the_same_detections_in_the_same_order() {
     let mut random = Random(2);
-    for _ in 0..200 {
+    for _ in 0..2_000 {
         let count = 1 + random.below(12) as usize;
         let model = Model::random(&mut random, count);
         let bytes = model.image();
@@ -488,6 +488,85 @@ fn a_match_far_beyond_the_first_chunks_is_found_whatever_the_chunk_size() {
         assert_eq!(
             engine_detections(&image, &object, &[chunk], true),
             ["Test.Far"],
+            "chunk {chunk}"
+        );
+    }
+}
+
+#[test]
+fn a_later_part_waiting_beyond_the_probed_bytes_keeps_the_bytes_earlier_candidates_need() {
+    let exactly = |byte: u8| PatternElement::Byte(MaskedByte::exactly(byte));
+    let pattern = Pattern {
+        before: None,
+        elements: vec![
+            exactly(b'A'),
+            PatternElement::Gap {
+                minimum: 1,
+                maximum: None,
+            },
+            exactly(b'\n'),
+            PatternElement::Gap {
+                minimum: 0,
+                maximum: None,
+            },
+            exactly(b'A'),
+            exactly(b'B'),
+        ],
+        after: None,
+    };
+    let model = Model {
+        names: vec!["Test.Chained".to_owned()],
+        patterns: vec![pattern],
+        placements: vec![Placement::Anywhere],
+    };
+    let bytes = model.image();
+    let image = Image::open(&bytes).unwrap();
+    let object = b"ABBB BBBB\nBBBB BBAB";
+
+    for every_match in [true, false] {
+        assert_eq!(
+            engine_detections(&image, object, &[1], every_match),
+            ["Test.Chained"],
+            "every_match {every_match}"
+        );
+    }
+}
+
+#[test]
+fn detections_at_one_position_are_reported_in_signature_table_order_whatever_the_chunks() {
+    let exactly = |byte: u8| PatternElement::Byte(MaskedByte::exactly(byte));
+    let plain = Pattern {
+        before: None,
+        elements: vec![exactly(b'A')],
+        after: None,
+    };
+    let chained = Pattern {
+        before: None,
+        elements: vec![
+            exactly(b'\n'),
+            exactly(b'\n'),
+            PatternElement::Gap {
+                minimum: 2,
+                maximum: None,
+            },
+            exactly(b'A'),
+            exactly(b' '),
+        ],
+        after: None,
+    };
+    let model = Model {
+        names: vec!["Test.Plain".to_owned(), "Test.Chained".to_owned()],
+        patterns: vec![plain, chained],
+        placements: vec![Placement::Anywhere, Placement::Anywhere],
+    };
+    let bytes = model.image();
+    let image = Image::open(&bytes).unwrap();
+    let object = b"\n\nBBBBBBBBA BB";
+
+    for chunk in [1, 2, 5, object.len()] {
+        assert_eq!(
+            engine_detections(&image, object, &[chunk], true),
+            ["Test.Plain", "Test.Chained"],
             "chunk {chunk}"
         );
     }

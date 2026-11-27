@@ -711,6 +711,7 @@ pub struct PatternScan<'i, 'm, 'r> {
     fed: u64,
     probed_to: u64,
     positional: VecDeque<Candidate>,
+    beyond_probed: VecDeque<Candidate>,
     queue: VecDeque<Candidate>,
     hits: Vec<(u64, usize, AnchoredProgram)>,
     armed: ArmedParts,
@@ -729,6 +730,7 @@ struct ReportOrder {
     group: usize,
     rank: u8,
     position: u64,
+    signature: u32,
 }
 
 struct Found {
@@ -790,6 +792,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             fed: 0,
             probed_to: 0,
             positional: VecDeque::new(),
+            beyond_probed: VecDeque::new(),
             queue: VecDeque::new(),
             hits: Vec::new(),
             armed: ArmedParts::default(),
@@ -968,6 +971,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         self.fed = 0;
         self.probed_to = 0;
         self.positional.clear();
+        self.beyond_probed.clear();
         self.queue.clear();
         self.armed.clear();
         Ok(())
@@ -1129,6 +1133,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         }
         self.hits = hits;
         self.admit_positional_up_to(pass_end.saturating_sub(1));
+        self.admit_probed_parts();
         self.expire_armed();
         Ok(())
     }
@@ -1203,7 +1208,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         };
         if anchor.is_none() {
             let last = last_start.unwrap_or(first_start);
-            self.insert_in_order(Candidate {
+            self.queue_in_position_order(Candidate {
                 group,
                 anchor: first_start,
                 program: next,
@@ -1267,6 +1272,29 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             }
         }
         found
+    }
+
+    fn queue_in_position_order(&mut self, candidate: Candidate) {
+        if candidate.anchor < self.probed_to {
+            self.insert_in_order(candidate);
+        } else {
+            let at = self
+                .beyond_probed
+                .partition_point(|waiting| waiting.anchor <= candidate.anchor);
+            self.beyond_probed.insert(at, candidate);
+        }
+    }
+
+    fn admit_probed_parts(&mut self) {
+        while self
+            .beyond_probed
+            .front()
+            .is_some_and(|candidate| candidate.anchor < self.probed_to)
+        {
+            if let Some(candidate) = self.beyond_probed.pop_front() {
+                self.insert_in_order(candidate);
+            }
+        }
     }
 
     fn insert_in_order(&mut self, candidate: Candidate) {
@@ -1466,6 +1494,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             group: candidate.group,
             rank: record.report_rank,
             position: first_start,
+            signature,
         };
         self.matched(candidate, signature, &record, order)
     }
