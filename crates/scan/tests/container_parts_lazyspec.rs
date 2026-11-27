@@ -18,8 +18,8 @@ use debar_scan::{
     ObjectObserver, ScanReport, ScanSettings, scan_with_modules,
 };
 use test_container::{
-    ContainerWriter, HEADER_LENGTH, TEST_CONTAINER, TEST_CONTAINER_MODULE, add_body,
-    test_container_image_builder,
+    ContainerWriter, HEADER_LENGTH, OWN_BYTES_FIRST_TEST_CONTAINER_MODULE, TEST_CONTAINER,
+    TEST_CONTAINER_MODULE, add_body, test_container_image_builder,
 };
 
 #[global_allocator]
@@ -147,13 +147,22 @@ fn scanned_with(object: &[u8], settings: &ScanSettings<'_>) -> Scanned {
 }
 
 fn scanned_in(image: &[u8], object: &[u8], settings: &ScanSettings<'_>) -> Scanned {
+    scanned_by(MODULES, image, object, settings)
+}
+
+fn scanned_by(
+    modules: &[&dyn FormatModule],
+    image: &[u8],
+    object: &[u8],
+    settings: &ScanSettings<'_>,
+) -> Scanned {
     let image = Image::open(image).unwrap();
     let mut objects = Objects::default();
     let report = scan_with_modules(
         &image,
         &Held(object),
         settings,
-        FormatModules::new(MODULES),
+        FormatModules::new(modules),
         &mut objects,
     );
     assert!(
@@ -225,8 +234,9 @@ fn each_part_of_a_container_is_scanned_whole_before_the_next_part_is_read() {
 }
 
 #[test]
-fn a_containers_parts_are_scanned_before_its_own_bytes() {
-    const REQUIREMENT: &str = "A Container's Parts Are Scanned Before Its Own Bytes";
+fn a_containers_parts_are_scanned_before_or_after_its_own_bytes_as_its_format_orders_them() {
+    const REQUIREMENT: &str =
+        "A Container's Parts Are Scanned Before Or After Its Own Bytes, As Its Format Orders Them";
     let _shared = alongside_others();
     let container = ContainerWriter::new()
         .inverted(&binary(ONE_BODY))
@@ -240,6 +250,18 @@ fn a_containers_parts_are_scanned_before_its_own_bytes() {
     assert_eq!(every.names(), ["Test.One", "Test.Own"], "{REQUIREMENT}");
     assert_eq!(every.layer_of("Test.Own"), 0, "{REQUIREMENT}");
     assert_eq!(first.names(), ["Test.One"], "{REQUIREMENT}");
+
+    let own_bytes_first: &[&dyn FormatModule] = &[&OWN_BYTES_FIRST_TEST_CONTAINER_MODULE];
+    let every = scanned_by(own_bytes_first, &image(), &container, &every_match());
+    let first = scanned_by(own_bytes_first, &image(), &container, &first_match());
+
+    assert_eq!(every.names(), ["Test.Own", "Test.One"], "{REQUIREMENT}");
+    assert_eq!(every.layer_of("Test.Own"), 0, "{REQUIREMENT}");
+    assert_eq!(first.names(), ["Test.Own"], "{REQUIREMENT}");
+    assert!(
+        first.finished.iter().all(|object| object.depth == 0),
+        "{REQUIREMENT}"
+    );
 }
 
 #[test]

@@ -6,17 +6,19 @@
 
 # Container parts
 
-How the parts a format module finds in a container (an archive's members, a document's streams, a normalised view of its text) are scanned, whatever the container's format. Proved with a test-only container until the first real format module exists.
+How the parts a format module finds in a container (an archive's members, a document's streams, a normalised view of its text) are scanned. Each rule holds whatever the container's format, except the order of its parts and its own bytes, which its format sets. Proved with a test-only container that can take either order.
 
 ## Each Part Of A Container Is Scanned Whole Before The Next Part Is Read
 
 - Asked for every detection, the detections in a container's parts are reported in the order the container holds them.
 - Asked for one, a detection in a part ends the scan, and no later part is read.
 
-## A Container's Parts Are Scanned Before Its Own Bytes
+## A Container's Parts Are Scanned Before Or After Its Own Bytes, As Its Format Orders Them
 
-- Asked for every detection, a part's detection is reported before one in the container's own bytes.
-- Asked for one, a detection in a part ends the scan before the container's own bytes are matched.
+- A format that opens its container first (an archive, an OLE2 document, a mail message, a web page) has a part's detection reported before one in the container's own bytes, under every detection.
+- Asked for one, a detection in such a container's part ends the scan before the container's own bytes are matched.
+- A format that matches its container's own bytes first (a PDF document, plain text) has a detection in the container's own bytes reported before a part's, under every detection.
+- Asked for one, a detection in such a container's own bytes ends the scan before any part is read.
 
 ## A Part Is An Object One Level Deeper Than Its Container, Under The Same Limits
 

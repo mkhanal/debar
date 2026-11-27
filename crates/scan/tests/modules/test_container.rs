@@ -34,9 +34,17 @@ pub const FACT: u8 = b'F';
 pub const ADMIT: u8 = b'A';
 pub const END: u8 = b'.';
 
-pub struct TestContainer;
+pub struct TestContainer {
+    stage: Stage,
+}
 
-pub static TEST_CONTAINER_MODULE: TestContainer = TestContainer;
+pub static TEST_CONTAINER_MODULE: TestContainer = TestContainer {
+    stage: Stage::BeforeOwnBytes,
+};
+
+pub static OWN_BYTES_FIRST_TEST_CONTAINER_MODULE: TestContainer = TestContainer {
+    stage: Stage::AfterOwnBytes,
+};
 
 impl FormatModule for TestContainer {
     fn kinds(&self) -> &[ObjectKind] {
@@ -44,7 +52,7 @@ impl FormatModule for TestContainer {
     }
 
     fn stage(&self) -> Stage {
-        Stage::BeforeOwnBytes
+        self.stage
     }
 
     fn open<'o>(
