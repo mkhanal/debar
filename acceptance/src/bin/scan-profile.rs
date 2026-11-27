@@ -36,6 +36,7 @@ const STAGES: [Stage; 12] = [
         name: "selecting signatures",
         functions_naming: &[
             "PatternScan>::new",
+            "PatternScan>::reusing",
             "place_positional",
             "selected_groups",
             "placed_starts",

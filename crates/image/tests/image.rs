@@ -3,7 +3,9 @@
 
 use debar_image::{
     Category, DatabaseRecord, Digest, DigestAlgorithm, HashPurpose, HashSignature, HashedSize,
-    Image, ImageBuilder, ImageError, Indicator, PartitionKey, Provenance,
+    Image, ImageBuilder, ImageError, Indicator, KindDescription, MaskedByte, ObjectKind, OwnBytes,
+    PartitionKey, Pattern, PatternElement, PatternOutcome, PatternSignature, Placement, Provenance,
+    RecognitionRank, SignatureGroup,
 };
 
 fn md5(seed: u32) -> Digest {
@@ -284,4 +286,64 @@ fn every_single_byte_change_to_an_image_is_answered_without_a_panic() {
             }
         }
     }
+}
+
+fn kind_matched_with(
+    groups: Vec<SignatureGroup>,
+    matched_again_as: Option<ObjectKind>,
+) -> KindDescription {
+    KindDescription {
+        format_name: "kind".to_owned(),
+        groups,
+        recognition: RecognitionRank::default(),
+        own_bytes: OwnBytes::Matched {
+            as_kind: None,
+            recognising_types: false,
+        },
+        matched_again_as,
+        found_in_full_scan_retypes: Vec::new(),
+        found_at_an_offset: None,
+        executable: false,
+    }
+}
+
+#[test]
+fn the_groups_a_kind_is_matched_again_with_beyond_its_own_have_a_selection_filter() {
+    const GENERIC: SignatureGroup = SignatureGroup(0);
+    const OTHER_DATA: SignatureGroup = SignatureGroup(14);
+    let mut builder = ImageBuilder::new();
+    for (group, name) in [(GENERIC, "Generic"), (OTHER_DATA, "Other")] {
+        builder
+            .add_pattern_signature(&PatternSignature {
+                group,
+                category: Category::Malware,
+                placement: Placement::Anywhere,
+                report_rank: 0,
+                pattern: &Pattern {
+                    before: None,
+                    elements: b"MARK"
+                        .iter()
+                        .map(|byte| PatternElement::Byte(MaskedByte::exactly(*byte)))
+                        .collect(),
+                    after: None,
+                },
+                outcome: PatternOutcome::Detection {
+                    name,
+                    indicator: Indicator::Strong,
+                },
+            })
+            .unwrap();
+    }
+    builder.describe_object_kind(
+        ObjectKind::BinaryData,
+        kind_matched_with(vec![GENERIC], Some(ObjectKind::Other)),
+    );
+    builder.describe_object_kind(
+        ObjectKind::Other,
+        kind_matched_with(vec![OTHER_DATA, GENERIC], None),
+    );
+    let bytes = builder.finish().unwrap();
+    let image = Image::open(&bytes).unwrap();
+
+    assert!(image.selection_filter(&[OTHER_DATA]).unwrap().is_some());
 }

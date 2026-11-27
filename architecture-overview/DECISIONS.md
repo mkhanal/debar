@@ -597,3 +597,24 @@ Other stages are unchanged within 0.5 per byte. Under amd64 emulation the digest
 - **Not built, recorded:** children that need a format module's header check (ZIP, CAB and ARJ self-extracting archives, executables found in executables, ZIP or OLE2 files) and the MBR check before re-typing are only recorded and taken, so they move nothing; the reference's walk order is its recording order (unsorted, multi-part bodies recorded at their last part with earlier starts, window-overlap duplicates), Debar's is by offset; an executable marker in an executable, ZIP or OLE2 host is not counted towards the offset cap; under every match the reference drops a 128 KiB window's found type when an Aho-Corasick body matched in it, which Debar does not reproduce.
 
 **Why.** Each rule is the reference's, read and measured in the study folder ("The embedded-object walk exactly"), and each changes which objects a signature sees.
+
+### 2026-11-27 — The pass as other data reuses the groups the object's own pass matched, as built
+
+**Decision.** Binary data, compiled Python and AI models no longer match the generic group a second time when their own bytes are matched again as other data:
+
+- **Matching returns what each group it matched found** (`PatternOutcomes::matched_groups`): per group, its pattern detections with the end of each match, and its logical outcomes evaluated on their own. `PatternScan::reusing` takes them: a group of the new selection that the earlier pass matched is not matched again, its detections are re-ordered by the new selection's report windows and group order, and its logical outcomes take its place in the evaluation order, so the outcomes are those of matching every group again. Only the groups not matched before read the object; with none, the object is not read again.
+- **A group is reused only when matching it again must give the same outcomes:** the earlier pass ran to its end (no strong match stopped it without every match), found no type in that group, was for an object of the same length, the same every-match setting and image fuzzy hash, and neither pass resolves executable offsets. Otherwise the group is matched again, as before.
+- **The image has a selection filter for the groups a kind is matched again with beyond its own** (target 14 for binary data), so the remaining groups are prefiltered when a database has signatures for them. The pinned databases have none, so for them the pass as other data matches nothing again and keeps only its hash lookups and its alerts.
+
+**Why.** The reference's pass as other data matches the generic group over the same bytes, settings and conditions as the object's own pass, so the generic group's outcomes are the same in both; matching it twice cost the binary and tar slices the whole matching cost again on small files (issue #30).
+
+**Measured** on the pinned databases, in the toolchain image on an Apple Silicon Mac (aarch64 Linux VM). No detection changed: Debar's reports were byte-identical before and after, with and without every match, on 6,000 of the harness's built inputs drawn with seed 30 and its fixtures, and on 4,000 of those inputs prefixed with 20 bytes that type them as binary data (3,952 with detections); every acceptance test passes.
+
+| Instructions per MiB, aarch64, before → after | binary | tar |
+| --- | --- | --- |
+| Scan total | 67,846,531 → 65,848,605 | 74,235,278 → 66,965,267 |
+| Selecting signatures, per byte | 6.1 → 5.6 | 8.2 → 5.5 |
+| Verifying candidates, per byte | 9.7 → 9.2 | 12.1 → 9.9 |
+| Prefilter, per byte | 31.9 → 31.2 | 31.9 → 31.3 |
+
+Both are back to where they were before the pass as other data was added, less the hardware SHA-256 gain since (binary 65.8 M, tar 66.8 M). The other kinds move by under 1 %. The x86_64 records are lowered by the same share of what the pass as other data had added there, 97 % (binary 143,131,215 → 140,220,715, tar 152,082,872 → 141,517,172), not measured natively; CI's figures replace them if they differ by more than the tolerance.

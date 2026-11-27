@@ -2,8 +2,8 @@ use debar_image::{
     EngineAlert, Image, Indicator, KindView, ObjectKind, OffsetAction, OwnBytes, TypingRules,
 };
 use debar_matching::{
-    GroupSelection, LogicalEvent, ObjectContext, PatternRequest, PatternSettings, Trust, TypeFound,
-    whole_object_detections, whole_object_digest_need, whole_object_trust,
+    GroupSelection, LogicalEvent, MatchedGroups, ObjectContext, PatternRequest, PatternSettings,
+    Trust, TypeFound, whole_object_detections, whole_object_digest_need, whole_object_trust,
     whole_object_trust_digest_need,
 };
 
@@ -69,7 +69,10 @@ enum Flow {
 }
 
 enum PassEnd {
-    Finished { types_found: Vec<TypeFound> },
+    Finished {
+        types_found: Vec<TypeFound>,
+        matched_groups: MatchedGroups,
+    },
     Aborted,
 }
 
@@ -156,19 +159,22 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
             None => self.kind_from_first_bytes()?,
         };
         self.current_mut().kind = Some(kind);
-        if self.own_bytes(kind)? == Flow::Abort {
+        let PassEnd::Finished { matched_groups, .. } = self.own_bytes(kind)? else {
             return Ok(Flow::Abort);
-        }
-        self.extra_pass(kind)
+        };
+        self.extra_pass(kind, &matched_groups)
     }
 
-    fn own_bytes(&mut self, kind: ObjectKind) -> Result<Flow, ScanFailure> {
+    fn own_bytes(&mut self, kind: ObjectKind) -> Result<PassEnd, ScanFailure> {
         let OwnBytes::Matched {
             as_kind,
             recognising_types,
         } = self.description(kind)?.own_bytes
         else {
-            return Ok(Flow::Continue);
+            return Ok(PassEnd::Finished {
+                types_found: Vec::new(),
+                matched_groups: MatchedGroups::default(),
+            });
         };
         let matched_as = as_kind.unwrap_or(kind);
         let selection = if recognising_types && self.current().arrival != Arrival::Embedded {
@@ -176,17 +182,24 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
         } else {
             GroupSelection::ForKind(matched_as)
         };
-        let PassEnd::Finished { types_found } = self.pass(selection)? else {
-            return Ok(Flow::Abort);
+        let PassEnd::Finished {
+            types_found,
+            matched_groups,
+        } = self.pass(selection, &MatchedGroups::default())?
+        else {
+            return Ok(PassEnd::Aborted);
         };
         if self.found_at_offsets(kind, &types_found)? == Flow::Abort {
-            return Ok(Flow::Abort);
+            return Ok(PassEnd::Aborted);
         }
         let found_kind = kind_after_full_scan(self.image, kind, &types_found)?;
         if found_kind != kind {
             self.current_mut().kind = Some(found_kind);
         }
-        Ok(Flow::Continue)
+        Ok(PassEnd::Finished {
+            types_found,
+            matched_groups,
+        })
     }
 
     fn found_at_offsets(
@@ -241,17 +254,27 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
         Ok(Flow::Continue)
     }
 
-    fn extra_pass(&mut self, typed_from_first_bytes: ObjectKind) -> Result<Flow, ScanFailure> {
+    fn extra_pass(
+        &mut self,
+        typed_from_first_bytes: ObjectKind,
+        matched_before: &MatchedGroups,
+    ) -> Result<Flow, ScanFailure> {
         let Some(again_as) = self.description(typed_from_first_bytes)?.matched_again_as else {
             return Ok(Flow::Continue);
         };
-        Ok(match self.pass(GroupSelection::ForKind(again_as))? {
-            PassEnd::Finished { .. } => Flow::Continue,
-            PassEnd::Aborted => Flow::Abort,
-        })
+        Ok(
+            match self.pass(GroupSelection::ForKind(again_as), matched_before)? {
+                PassEnd::Finished { .. } => Flow::Continue,
+                PassEnd::Aborted => Flow::Abort,
+            },
+        )
     }
 
-    fn pass(&mut self, selection: GroupSelection) -> Result<PassEnd, ScanFailure> {
+    fn pass(
+        &mut self,
+        selection: GroupSelection,
+        matched_before: &MatchedGroups,
+    ) -> Result<PassEnd, ScanFailure> {
         let bytes = self.current().bytes;
         let length = bytes.length();
         let hashes = self.settings.hashes();
@@ -266,12 +289,14 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
             &bytes,
             self.pattern_request(selection, length, context),
             self.current().digests.missing_from(digest_need),
+            matched_before,
         )?;
         if let Some(digests) = matched.digests_while_read {
             let layer = self.current_mut();
             layer.digests = layer.digests.joined_with(digests);
         }
-        let outcomes = matched.outcomes;
+        let mut outcomes = matched.outcomes;
+        let matched_groups = std::mem::take(&mut outcomes.matched_groups);
         if outcomes.logical.do_not_cache {
             self.current_mut().do_not_cache = true;
         }
@@ -303,12 +328,14 @@ impl<'m, 's, 'o> Scan<'_, 'm, 's, 'o, '_> {
                 Child::Refused => {
                     return Ok(PassEnd::Finished {
                         types_found: Vec::new(),
+                        matched_groups,
                     });
                 }
             }
         }
         Ok(PassEnd::Finished {
             types_found: outcomes.types_found,
+            matched_groups,
         })
     }
 

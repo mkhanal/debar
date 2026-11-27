@@ -29,6 +29,6 @@ pub use hash_lookup::{
 };
 pub use logical_state::{LogicalEvent, LogicalFindings, ObjectContext, UnwantedCategories};
 pub use pattern_scan::{
-    GroupSelection, PatternDetection, PatternOutcomes, PatternRequest, PatternScan,
+    GroupSelection, MatchedGroups, PatternDetection, PatternOutcomes, PatternRequest, PatternScan,
     PatternScanError, PatternSettings, ScanEnd, ScanProgress, TypeFound, scan_object,
 };

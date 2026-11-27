@@ -1,7 +1,7 @@
 use debar_image::Image;
 use debar_matching::{
-    DigestNeed, DigestsInProgress, ObjectDigests, PatternOutcomes, PatternRequest, PatternScan,
-    PatternScanError, ScanEnd, ScanProgress,
+    DigestNeed, DigestsInProgress, MatchedGroups, ObjectDigests, PatternOutcomes, PatternRequest,
+    PatternScan, PatternScanError, ScanEnd, ScanProgress,
 };
 
 use crate::object_bytes::{ChunkUse, ObjectBytes, ReadThrough, read_in_chunks};
@@ -17,14 +17,19 @@ pub(crate) fn match_own_bytes(
     bytes: &dyn ObjectBytes,
     request: PatternRequest<'_>,
     digest_need: DigestNeed,
+    matched_before: &MatchedGroups,
 ) -> Result<OwnBytesMatched, ScanFailure> {
-    let mut scan = PatternScan::new(image, request, || None)?;
+    let mut scan = PatternScan::reusing(image, request, || None, matched_before)?;
     let mut digesting = (!digest_need.is_empty()).then(|| DigestsInProgress::new(digest_need));
     let mut digests_while_read = None;
     loop {
-        let read_through = feed_the_object(&mut scan, bytes, digesting.as_mut())?;
-        if let (Some(digesting), ReadThrough::ToTheEnd) = (digesting.take(), read_through) {
-            digests_while_read = Some(digesting.finish());
+        if scan.needs_the_bytes() || digesting.is_some() {
+            let read_through = feed_the_object(&mut scan, bytes, digesting.as_mut())?;
+            if let (Some(digesting), ReadThrough::ToTheEnd) = (digesting.take(), read_through) {
+                digests_while_read = Some(digesting.finish());
+            }
+        } else {
+            scan.skip(usize::try_from(bytes.length()).unwrap_or(usize::MAX))?;
         }
         match scan.finish()? {
             ScanEnd::Complete(outcomes) => {

@@ -1093,6 +1093,18 @@ fn selections_section(
             with_recognition.push(recognition);
             selections.insert(present(&with_recognition));
         }
+        if let Some(again) = description
+            .matched_again_as
+            .and_then(|again_as| kinds.get(&again_as))
+        {
+            let not_matched_before: Vec<SignatureGroup> = again
+                .groups
+                .iter()
+                .copied()
+                .filter(|group| !description.groups.contains(group))
+                .collect();
+            selections.insert(present(&not_matched_before));
+        }
     }
     if let Some(recognition) = recognition {
         selections.insert(present(&[recognition]));

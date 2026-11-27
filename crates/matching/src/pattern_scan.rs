@@ -77,6 +77,35 @@ pub struct PatternOutcomes {
     pub detections: Vec<PatternDetection>,
     pub types_found: Vec<TypeFound>,
     pub logical: LogicalFindings,
+    pub matched_groups: MatchedGroups,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MatchedGroups {
+    object_length: u64,
+    every_match: bool,
+    image_fuzzy_hash: Option<u64>,
+    groups: Vec<MatchedGroup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatchedGroup {
+    id: SignatureGroup,
+    found: Vec<Found>,
+    logical: LogicalFindings,
+}
+
+impl MatchedGroups {
+    fn reusable_for(&self, request: &PatternRequest<'_>, layout: LayoutNeed) -> bool {
+        layout == LayoutNeed::NotExecutable
+            && self.object_length == request.object_length
+            && self.every_match == request.settings.every_match
+            && self.image_fuzzy_hash == request.image_fuzzy_hash
+    }
+
+    fn group(&self, id: SignatureGroup) -> Option<&MatchedGroup> {
+        self.groups.iter().find(|group| group.id == id)
+    }
 }
 
 #[derive(Debug)]
@@ -697,6 +726,8 @@ impl SignatureBits {
 
 struct SelectedGroup<'m> {
     id: SignatureGroup,
+    position: usize,
+    found_types: bool,
     plug_ins: Option<PlugInSubsignatures<'m>>,
     view: PatternGroup<'m>,
     tables: AnchorTables<'m>,
@@ -729,6 +760,7 @@ pub struct PatternScan<'i, 'm, 'r> {
     second_pass_search: Option<SecondPassSearch>,
     selection_filter: Option<SelectionFilter<'m>>,
     found: Vec<Found>,
+    matched_before: Vec<(usize, LogicalFindings)>,
     types_found: Vec<TypeFound>,
     types_found_at_every_offset: bool,
     stop_once_past: Option<u64>,
@@ -745,39 +777,66 @@ struct ReportOrder {
     signature: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Found {
     order: ReportOrder,
+    match_end: u64,
     detection: PatternDetection,
 }
 
 impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
-    #[inline(never)]
     pub fn new(
         image: &'i Image<'m>,
         request: PatternRequest<'r>,
         executable_layout: impl FnOnce() -> Option<ExecutableLayout>,
     ) -> Result<Self, PatternScanError> {
+        Self::reusing(image, request, executable_layout, &MatchedGroups::default())
+    }
+
+    #[inline(never)]
+    pub fn reusing(
+        image: &'i Image<'m>,
+        request: PatternRequest<'r>,
+        executable_layout: impl FnOnce() -> Option<ExecutableLayout>,
+        matched_before: &MatchedGroups,
+    ) -> Result<Self, PatternScanError> {
         let selected = selected_groups(image, request.selection)?;
-        let selected_ids: Vec<SignatureGroup> = selected
-            .groups
-            .iter()
-            .map(|(group, _, _, _)| *group)
-            .collect();
-        let selection_filter = image.selection_filter(&selected_ids)?;
-        let groups = selected
-            .groups
-            .into_iter()
-            .map(|(group, view, logical, plug_ins)| SelectedGroup {
+        let report_windows = combined_report_windows(
+            selected
+                .groups
+                .iter()
+                .filter_map(|(_, view, _, _)| view.report_windows()),
+        );
+        let reusable = matched_before.reusable_for(&request, selected.layout);
+        let mut groups = Vec::with_capacity(selected.groups.len());
+        let mut found = Vec::new();
+        let mut logical_before = Vec::new();
+        for (position, (group, view, logical, plug_ins)) in selected.groups.into_iter().enumerate()
+        {
+            if let Some(earlier) = matched_before.group(group).filter(|_| reusable) {
+                found.extend(earlier.found.iter().map(|earlier_found| {
+                    let mut moved = earlier_found.clone();
+                    moved.order.window = report_window(report_windows, moved.match_end);
+                    moved.order.group = position;
+                    moved
+                }));
+                logical_before.push((position, earlier.logical.clone()));
+                continue;
+            }
+            groups.push(SelectedGroup {
                 id: group,
+                position,
+                found_types: false,
                 plug_ins,
                 view,
                 tables: view.anchor_tables(MatchingPass::Main),
                 logical: logical.map(|logical| LogicalState::new(logical, group)),
                 chains: BTreeMap::new(),
                 detected: SignatureBits::sized_for(view.signature_count()),
-            })
-            .collect::<Vec<_>>();
-        let report_windows = combined_report_windows(&groups);
+            });
+        }
+        let matched_ids: Vec<SignatureGroup> = groups.iter().map(|group| group.id).collect();
+        let selection_filter = image.selection_filter(&matched_ids)?;
         let lookback = groups
             .iter()
             .map(|group| group.view.lookback())
@@ -810,7 +869,8 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             armed: ArmedParts::default(),
             second_pass_search: None,
             selection_filter,
-            found: Vec::new(),
+            found,
+            matched_before: logical_before,
             types_found: Vec::new(),
             types_found_at_every_offset: matches!(
                 request.selection,
@@ -822,6 +882,11 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         };
         scan.place_positional()?;
         Ok(scan)
+    }
+
+    #[must_use]
+    pub fn needs_the_bytes(&self) -> bool {
+        !self.groups.is_empty()
     }
 
     #[must_use]
@@ -996,49 +1061,105 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
     fn outcomes(mut self) -> Result<PatternOutcomes, PatternScanError> {
         self.found.sort_by_key(|found| found.order);
         let mut detections = Vec::with_capacity(self.found.len());
-        let mut strong_found = false;
-        for found in std::mem::take(&mut self.found) {
-            let strong = found.detection.indicator == Indicator::Strong;
-            detections.push(found.detection);
-            if strong && !self.settings.every_match {
-                strong_found = true;
+        for found in &self.found {
+            detections.push(found.detection.clone());
+            if found.detection.indicator == Indicator::Strong && !self.settings.every_match {
                 break;
             }
         }
         self.types_found.sort_by_key(|found| found.offset);
-        let logical = if strong_found || self.stopped {
-            LogicalFindings::default()
-        } else {
-            self.logical_findings()?
-        };
+        if self.stopped || self.stop_once_past.is_some() {
+            return Ok(PatternOutcomes {
+                detections,
+                types_found: self.types_found,
+                logical: LogicalFindings::default(),
+                matched_groups: MatchedGroups::default(),
+            });
+        }
+        let each_group_logical = self.each_group_logical_findings()?;
+        let logical = self.logical_findings(&each_group_logical);
+        let matched_groups = self.matched_groups(each_group_logical);
         Ok(PatternOutcomes {
             detections,
             types_found: self.types_found,
             logical,
+            matched_groups,
         })
     }
 
     #[inline(never)]
-    fn logical_findings(&self) -> Result<LogicalFindings, PatternScanError> {
-        let mut findings = LogicalFindings::default();
+    fn each_group_logical_findings(&self) -> Result<Vec<LogicalFindings>, PatternScanError> {
         let layout = self.layout_state();
+        let mut each_group = Vec::with_capacity(self.groups.len());
         for group in &self.groups {
-            let Some(logical) = &group.logical else {
-                continue;
-            };
-            logical.evaluate(
-                self.image,
-                &self.settings,
-                &self.context,
-                self.object_length,
-                layout,
-                &mut findings,
-            )?;
+            let mut findings = LogicalFindings::default();
+            if let Some(logical) = &group.logical {
+                logical.evaluate(
+                    self.image,
+                    &self.settings,
+                    &self.context,
+                    self.object_length,
+                    layout,
+                    &mut findings,
+                )?;
+            }
+            each_group.push(findings);
+        }
+        Ok(each_group)
+    }
+
+    fn logical_findings(&self, each_group: &[LogicalFindings]) -> LogicalFindings {
+        let matched_now = self
+            .groups
+            .iter()
+            .map(|group| group.position)
+            .zip(each_group);
+        let matched_before = self
+            .matched_before
+            .iter()
+            .map(|(position, findings)| (*position, findings));
+        let mut in_selection_order: Vec<(usize, &LogicalFindings)> =
+            matched_now.chain(matched_before).collect();
+        in_selection_order.sort_by_key(|(position, _)| *position);
+        let mut findings = LogicalFindings::default();
+        for (_, group_findings) in in_selection_order {
+            findings
+                .events
+                .extend(group_findings.events.iter().cloned());
+            findings.do_not_cache |= group_findings.do_not_cache;
             if findings.ends_the_scan(self.settings.every_match) {
                 break;
             }
         }
-        Ok(findings)
+        findings
+    }
+
+    fn matched_groups(&self, each_group_logical: Vec<LogicalFindings>) -> MatchedGroups {
+        if self.layout_need != LayoutNeed::NotExecutable {
+            return MatchedGroups::default();
+        }
+        let groups = self
+            .groups
+            .iter()
+            .zip(each_group_logical)
+            .filter(|(group, _)| !group.found_types)
+            .map(|(group, logical)| MatchedGroup {
+                id: group.id,
+                found: self
+                    .found
+                    .iter()
+                    .filter(|found| found.order.group == group.position)
+                    .cloned()
+                    .collect(),
+                logical,
+            })
+            .collect();
+        MatchedGroups {
+            object_length: self.object_length,
+            every_match: self.settings.every_match,
+            image_fuzzy_hash: self.image_fuzzy_hash,
+            groups,
+        }
     }
 
     fn progress(&self) -> ScanProgress {
@@ -1420,6 +1541,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
             return Ok(());
         };
         let view = group.view;
+        let position_in_selection = group.position;
         let bytes = RetainedBytes {
             bytes: &self.retained,
             first_position: self.first_retained,
@@ -1507,12 +1629,12 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         }
         let order = ReportOrder {
             window: report_window(self.report_windows, earliest_end),
-            group: candidate.group,
+            group: position_in_selection,
             rank: record.report_rank,
             position: first_start,
             signature,
         };
-        self.matched(candidate, signature, &record, order)
+        self.matched(candidate, signature, &record, order, earliest_end)
     }
 
     fn count_subsignature(
@@ -1543,14 +1665,16 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
         signature: u32,
         record: &PatternSignatureRecord,
         order: ReportOrder,
+        match_end: u64,
     ) -> Result<(), PatternScanError> {
-        let found_at_every_offset = self.types_found_at_every_offset
-            && matches!(record.outcome, RecordedOutcome::TypeFound(_));
-        if let Some(group) = self.groups.get_mut(candidate.group)
-            && !found_at_every_offset
-        {
-            group.detected.insert(signature);
-            group.chains.remove(&signature);
+        let type_found = matches!(record.outcome, RecordedOutcome::TypeFound(_));
+        let found_at_every_offset = self.types_found_at_every_offset && type_found;
+        if let Some(group) = self.groups.get_mut(candidate.group) {
+            group.found_types |= type_found;
+            if !found_at_every_offset {
+                group.detected.insert(signature);
+                group.chains.remove(&signature);
+            }
         }
         match record.outcome {
             RecordedOutcome::Detection(name) => {
@@ -1568,6 +1692,7 @@ impl<'i, 'm, 'r> PatternScan<'i, 'm, 'r> {
                 }
                 self.found.push(Found {
                     order,
+                    match_end,
                     detection: PatternDetection {
                         name: name.text,
                         indicator: name.indicator,
@@ -1677,14 +1802,13 @@ fn selected_groups<'m>(
     Ok(Selected { groups, layout })
 }
 
-fn combined_report_windows(groups: &[SelectedGroup<'_>]) -> Option<ReportWindows> {
-    groups
-        .iter()
-        .filter_map(|group| group.view.report_windows())
-        .reduce(|combined, windows| ReportWindows {
-            length: combined.length.max(windows.length),
-            overlap: combined.overlap.max(windows.overlap),
-        })
+fn combined_report_windows(
+    each_group: impl Iterator<Item = ReportWindows>,
+) -> Option<ReportWindows> {
+    each_group.reduce(|combined, windows| ReportWindows {
+        length: combined.length.max(windows.length),
+        overlap: combined.overlap.max(windows.overlap),
+    })
 }
 
 fn report_window(windows: Option<ReportWindows>, match_end: u64) -> u64 {

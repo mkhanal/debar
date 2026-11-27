@@ -50,7 +50,7 @@ Speed is a standing track beside the pieces, not a final slice (DECISIONS, "Aim 
 
 In progress.
 
-- **Done:** the ratchet, the stage profile, a call-free prefilter (86 to 93 instructions per byte down to 31 to 38), a second pass searched through a filter instead of an automaton built per scan (about 40 per byte down to 7 to 12), cheaper verification (23 to 39 down to 9 to 26), and SHA-256 in hardware on arm64 (digests 40 per byte down to 11.2).
+- **Done:** the ratchet, the stage profile, a call-free prefilter (86 to 93 instructions per byte down to 31 to 38), a second pass searched through a filter instead of an automaton built per scan (about 40 per byte down to 7 to 12), cheaper verification (23 to 39 down to 9 to 26), SHA-256 in hardware on arm64 (digests 40 per byte down to 11.2), and the pass as other data reusing the generic group's matches from the object's own pass (binary 67.8 M and tar 74.2 M instructions per MiB down to 65.8 M and 67.0 M).
 - **Next, by the last profile:** the prefilter (31 to 38), the MD5 every object needs (9.6 per byte, as much as the whole fifty-times budget on text, binary, PDF and tar), on real PDFs a linear-time check before the backtracking matcher (51 per byte there), the cost per anchored candidate on executables, placing the signatures tied to offsets on every object, copying each chunk into the retained buffer, and parallel scanning of independent objects.
 
 ## Borrowed pieces
